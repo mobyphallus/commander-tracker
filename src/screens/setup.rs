@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
-use iced::{Element, Length, Task};
+use iced::widget::{button, column, container, image, row, scrollable, stack, text, text_input};
+use iced::{Color, ContentFit, Element, Length, Task};
 use rusqlite::Connection;
 
 use crate::app::Message;
@@ -14,18 +14,9 @@ pub const MIN_POD: usize = 2;
 pub const MAX_POD: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Layout {
+pub enum SetupStage {
+    ChoosePodSize,
     Grid,
-    List,
-}
-
-impl Layout {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Layout::Grid => "Grid",
-            Layout::List => "List (pass the device)",
-        }
-    }
 }
 
 /// The commander a player picked by name; art is chosen next, but this
@@ -48,10 +39,10 @@ pub struct SeatSetup {
 }
 
 pub struct SetupState {
+    pub stage: SetupStage,
     pub pod_size: usize,
-    pub layout: Layout,
     pub seats: Vec<SeatSetup>,
-    pub active_seat: usize,
+    pub editing_seat: Option<usize>,
     pub new_player_name: String,
     pub commander_query: String,
     pub commander_results: Vec<ScryfallCard>,
@@ -64,12 +55,11 @@ pub struct SetupState {
 
 impl SetupState {
     pub fn new() -> Self {
-        let pod_size = 4;
         Self {
-            pod_size,
-            layout: Layout::Grid,
-            seats: vec![SeatSetup::default(); pod_size],
-            active_seat: 0,
+            stage: SetupStage::ChoosePodSize,
+            pod_size: 0,
+            seats: Vec::new(),
+            editing_seat: None,
             new_player_name: String::new(),
             commander_query: String::new(),
             commander_results: Vec::new(),
@@ -90,20 +80,30 @@ impl SetupState {
     }
 
     fn players_taken_by_other_seats(&self) -> std::collections::HashSet<i64> {
+        let editing = self.editing_seat;
         self.seats
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != self.active_seat)
+            .filter(|(i, _)| Some(*i) != editing)
             .filter_map(|(_, s)| s.player.as_ref().map(|p| p.id))
             .collect()
+    }
+
+    fn clear_editor_fields(&mut self) {
+        self.new_player_name.clear();
+        self.commander_query.clear();
+        self.commander_results.clear();
+        self.art_target = None;
+        self.art_options.clear();
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum SetupMessage {
-    ChangePodSize(usize),
-    ChangeLayout(Layout),
-    SelectSeat(usize),
+    ChoosePodSize(usize),
+    BackToPodSizeChoice,
+    EditSeat(usize),
+    BackToGrid,
     NewPlayerNameChanged(String),
     CreatePlayer,
     PickExistingPlayer(Player),
@@ -122,7 +122,7 @@ pub enum SetupMessage {
 }
 
 pub enum Action {
-    StartGame(Vec<Seat>, Layout),
+    StartGame(Vec<Seat>),
 }
 
 fn load_portrait_task(commander: &Commander) -> Task<Message> {
@@ -151,24 +151,26 @@ pub fn update(
 ) -> (Task<Message>, Option<Action>) {
     state.error = None;
     match message {
-        SetupMessage::ChangePodSize(n) => {
+        SetupMessage::ChoosePodSize(n) => {
             state.pod_size = n;
-            state.seats.resize_with(n, SeatSetup::default);
-            if state.active_seat >= n {
-                state.active_seat = n - 1;
-            }
+            state.seats = vec![SeatSetup::default(); n];
+            state.stage = SetupStage::Grid;
             (Task::none(), None)
         }
-        SetupMessage::ChangeLayout(layout) => {
-            state.layout = layout;
+        SetupMessage::BackToPodSizeChoice => {
+            state.stage = SetupStage::ChoosePodSize;
+            state.editing_seat = None;
+            state.clear_editor_fields();
             (Task::none(), None)
         }
-        SetupMessage::SelectSeat(i) => {
-            state.active_seat = i;
-            state.commander_query.clear();
-            state.commander_results.clear();
-            state.art_target = None;
-            state.art_options.clear();
+        SetupMessage::EditSeat(i) => {
+            state.editing_seat = Some(i);
+            state.clear_editor_fields();
+            (Task::none(), None)
+        }
+        SetupMessage::BackToGrid => {
+            state.editing_seat = None;
+            state.clear_editor_fields();
             (Task::none(), None)
         }
         SetupMessage::NewPlayerNameChanged(s) => {
@@ -180,10 +182,13 @@ pub fn update(
             if name.is_empty() {
                 return (Task::none(), None);
             }
+            let Some(seat) = state.editing_seat else {
+                return (Task::none(), None);
+            };
             match db::create_player(conn, &name) {
                 Ok(player) => {
-                    state.seats[state.active_seat].player = Some(player);
-                    state.seats[state.active_seat].commander_history = Vec::new();
+                    state.seats[seat].player = Some(player);
+                    state.seats[seat].commander_history = Vec::new();
                     state.new_player_name.clear();
                 }
                 Err(e) => state.error = Some(format!("Couldn't create player: {e}")),
@@ -191,18 +196,23 @@ pub fn update(
             (Task::none(), None)
         }
         SetupMessage::PickExistingPlayer(player) => {
+            let Some(seat) = state.editing_seat else {
+                return (Task::none(), None);
+            };
             if state.players_taken_by_other_seats().contains(&player.id) {
                 state.error = Some(format!("{} is already seated at this table.", player.name));
                 return (Task::none(), None);
             }
             let history = db::player_commander_history(conn, player.id).unwrap_or_default();
-            state.seats[state.active_seat].player = Some(player);
-            state.seats[state.active_seat].commander_history = history;
+            state.seats[seat].player = Some(player);
+            state.seats[seat].commander_history = history;
             (Task::none(), None)
         }
         SetupMessage::ClearSeatPlayer => {
-            state.seats[state.active_seat].player = None;
-            state.seats[state.active_seat].commander_history.clear();
+            if let Some(seat) = state.editing_seat {
+                state.seats[seat].player = None;
+                state.seats[seat].commander_history.clear();
+            }
             (Task::none(), None)
         }
         SetupMessage::CommanderQueryChanged(s) => {
@@ -253,8 +263,13 @@ pub fn update(
             (Task::batch([prints_task, default_thumb_task]), None)
         }
         SetupMessage::PickHistoryCommander(commander) => {
+            let Some(seat) = state.editing_seat else {
+                return (Task::none(), None);
+            };
             let task = load_portrait_task(&commander);
-            state.seats[state.active_seat].commander = Some(commander);
+            state.seats[seat].commander = Some(commander);
+            state.editing_seat = None;
+            state.clear_editor_fields();
             (task, None)
         }
         SetupMessage::ArtOptionsLoaded(res) => {
@@ -285,6 +300,9 @@ pub fn update(
             let Some(target) = state.art_target.take() else {
                 return (Task::none(), None);
             };
+            let Some(seat) = state.editing_seat else {
+                return (Task::none(), None);
+            };
             state.art_options.clear();
             match db::upsert_commander(
                 conn,
@@ -296,7 +314,9 @@ pub fn update(
             ) {
                 Ok(commander) => {
                     let task = load_portrait_task(&commander);
-                    state.seats[state.active_seat].commander = Some(commander);
+                    state.seats[seat].commander = Some(commander);
+                    state.editing_seat = None;
+                    state.clear_editor_fields();
                     (task, None)
                 }
                 Err(e) => {
@@ -311,7 +331,10 @@ pub fn update(
             (Task::none(), None)
         }
         SetupMessage::ChangeArt => {
-            let Some(commander) = state.seats[state.active_seat].commander.clone() else {
+            let Some(seat) = state.editing_seat else {
+                return (Task::none(), None);
+            };
+            let Some(commander) = state.seats[seat].commander.clone() else {
                 return (Task::none(), None);
             };
             state.art_target = Some(ArtTarget {
@@ -324,7 +347,9 @@ pub fn update(
             (load_prints_task(commander.oracle_id), None)
         }
         SetupMessage::ClearSeatCommander => {
-            state.seats[state.active_seat].commander = None;
+            if let Some(seat) = state.editing_seat {
+                state.seats[seat].commander = None;
+            }
             state.art_target = None;
             state.art_options.clear();
             (Task::none(), None)
@@ -342,7 +367,7 @@ pub fn update(
                         )
                     })
                     .collect();
-                (Task::none(), Some(Action::StartGame(seats, state.layout)))
+                (Task::none(), Some(Action::StartGame(seats)))
             } else {
                 state.error = Some("Every seat needs a player and a commander.".into());
                 (Task::none(), None)
@@ -351,133 +376,106 @@ pub fn update(
     }
 }
 
+fn grid_columns(n: usize) -> usize {
+    match n {
+        0 | 1 | 2 => 2,
+        3 => 3,
+        4 => 2,
+        5 | 6 => 3,
+        _ => 4,
+    }
+}
+
 pub fn view<'a>(
     state: &'a SetupState,
     players_cache: &'a [Player],
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
+    match state.stage {
+        SetupStage::ChoosePodSize => pod_size_view(),
+        SetupStage::Grid => {
+            if state.editing_seat.is_some() {
+                editor_overlay(state, players_cache, image_cache)
+            } else {
+                grid_view(state, image_cache)
+            }
+        }
+    }
+}
+
+fn pod_size_view<'a>() -> Element<'a, Message> {
+    let buttons = row((MIN_POD..=MAX_POD)
+        .map(|n| {
+            button(text(n.to_string()).size(28))
+                .padding(24)
+                .style(button::primary)
+                .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)))
+                .into()
+        })
+        .collect::<Vec<Element<Message>>>())
+    .spacing(16);
+
+    container(
+        column![
+            text("How many players?").size(32),
+            buttons,
+            button(text("Back").size(16))
+                .padding(10)
+                .on_press(Message::GoHome),
+        ]
+        .spacing(32)
+        .align_x(iced::Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .into()
+}
+
+fn grid_view<'a>(
+    state: &'a SetupState,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
     let header = container(
         row![
-            text("Commander Pod").size(30),
+            text("Set up your pod").size(26),
             iced::widget::horizontal_space(),
-            button(text("Game History").size(16))
+            button(text("Change Player Count").size(14))
                 .padding(10)
-                .on_press(Message::GoToHistory),
-            button(text("Stats").size(16))
-                .padding(10)
-                .on_press(Message::GoToStats),
+                .on_press(Message::Setup(SetupMessage::BackToPodSizeChoice)),
         ]
-        .spacing(10)
         .align_y(iced::Alignment::Center),
     )
-    .padding(16)
+    .padding(14)
     .width(Length::Fill)
     .style(style::header);
 
-    let pod_size_row = row((MIN_POD..=MAX_POD)
-        .map(|n| {
-            let selected = n == state.pod_size;
-            button(text(n.to_string()).size(18))
-                .padding(10)
-                .style(if selected {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .on_press(Message::Setup(SetupMessage::ChangePodSize(n)))
-                .into()
-        })
-        .collect::<Vec<Element<Message>>>())
-    .spacing(6);
+    let cols = grid_columns(state.seats.len());
+    let mut rows_el: Vec<Element<Message>> = Vec::new();
+    let mut i = 0;
+    while i < state.seats.len() {
+        let end = (i + cols).min(state.seats.len());
+        let tiles: Vec<Element<Message>> = (i..end)
+            .map(|idx| seat_tile(idx, &state.seats[idx], image_cache))
+            .collect();
+        rows_el.push(
+            row(tiles)
+                .spacing(14)
+                .height(Length::FillPortion(1))
+                .into(),
+        );
+        i = end;
+    }
 
-    let layout_row = row([Layout::Grid, Layout::List]
-        .into_iter()
-        .map(|l| {
-            let selected = l == state.layout;
-            button(text(l.label()).size(16))
-                .padding(10)
-                .style(if selected {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .on_press(Message::Setup(SetupMessage::ChangeLayout(l)))
-                .into()
-        })
-        .collect::<Vec<Element<Message>>>())
-    .spacing(6);
-
-    let config_card = container(
-        row![
-            column![text("Players").size(14), pod_size_row].spacing(6),
-            column![text("Layout").size(14), layout_row].spacing(6),
-        ]
-        .spacing(32),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .style(style::panel);
-
-    let seat_tabs = container(
-        scrollable(
-            row((0..state.pod_size)
-                .map(|i| {
-                    let seat = &state.seats[i];
-                    let ready = seat.player.is_some() && seat.commander.is_some();
-                    let label = match &seat.player {
-                        Some(p) if ready => format!("{} \u{2713}", p.name),
-                        Some(p) => p.name.clone(),
-                        None => format!("Seat {}", i + 1),
-                    };
-                    let selected = i == state.active_seat;
-                    button(text(label).size(16))
-                        .padding(12)
-                        .width(Length::Fixed(140.0))
-                        .style(if selected {
-                            button::primary
-                        } else if ready {
-                            button::success
-                        } else {
-                            button::secondary
-                        })
-                        .on_press(Message::Setup(SetupMessage::SelectSeat(i)))
-                        .into()
-                })
-                .collect::<Vec<Element<Message>>>())
-            .spacing(8)
-            .wrap(),
-        )
-        .width(Length::Fill),
-    )
-    .padding(12)
-    .width(Length::Fill)
-    .style(style::panel);
-
-    let seat = &state.seats[state.active_seat];
-    let editor: Element<Message> = if state.art_target.is_some() {
-        art_gallery(state, image_cache)
-    } else if seat.player.is_none() {
-        player_picker(state, players_cache)
-    } else if seat.commander.is_none() {
-        commander_picker(state, &seat.commander_history)
-    } else {
-        seat_summary(seat, image_cache)
-    };
-
-    let editor_card = container(editor)
-        .padding(20)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(style::panel);
-
-    let mut start_button = button(text("Start Game").size(22)).padding(18);
+    let mut start_button = button(text("Start Game").size(24)).padding(20);
     if state.all_seats_ready() {
         start_button = start_button
             .style(button::success)
             .on_press(Message::Setup(SetupMessage::StartGame));
     }
 
-    let mut content = column![header, config_card, seat_tabs, editor_card].spacing(14);
+    let mut content = column![header, column(rows_el).spacing(14).height(Length::Fill)].spacing(14);
 
     if let Some(e) = &state.error {
         content = content.push(
@@ -488,9 +486,132 @@ pub fn view<'a>(
         );
     }
 
-    content = content.push(start_button);
+    content = content.push(container(start_button).center_x(Length::Fill));
 
     container(content.padding(20))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn seat_tile<'a>(
+    index: usize,
+    seat: &'a SeatSetup,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    match (&seat.player, &seat.commander) {
+        (Some(player), Some(commander)) => {
+            let art: Element<Message> = match commander.portrait_url().and_then(|u| image_cache.get(u)) {
+                Some(handle) => image(handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .content_fit(ContentFit::Cover)
+                    .into(),
+                None => container(text("Loading art...").size(16))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .into(),
+            };
+
+            let caption = container(
+                column![
+                    text(player.name.clone()).size(22),
+                    text(commander.name.clone()).size(14),
+                ]
+                .spacing(2),
+            )
+            .padding(14)
+            .width(Length::Fill)
+            .style(|_theme: &iced::Theme| container::Style {
+                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.6).into()),
+                text_color: Some(Color::WHITE),
+                ..container::Style::default()
+            });
+
+            let overlay = container(caption)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_y(iced::alignment::Vertical::Bottom);
+
+            button(stack![art, overlay])
+                .padding(0)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_press(Message::Setup(SetupMessage::EditSeat(index)))
+                .into()
+        }
+        (Some(player), None) => button(
+            container(
+                column![
+                    text(player.name.clone()).size(22),
+                    text("Tap to pick a commander").size(14),
+                ]
+                .spacing(8)
+                .align_x(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(button::secondary)
+        .on_press(Message::Setup(SetupMessage::EditSeat(index)))
+        .into(),
+        _ => button(
+            container(text("+ Add Player").size(24))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(button::secondary)
+        .on_press(Message::Setup(SetupMessage::EditSeat(index)))
+        .into(),
+    }
+}
+
+fn editor_overlay<'a>(
+    state: &'a SetupState,
+    players_cache: &'a [Player],
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let seat_index = state.editing_seat.unwrap();
+    let seat = &state.seats[seat_index];
+
+    let body: Element<Message> = if state.art_target.is_some() {
+        art_gallery(state, image_cache)
+    } else if seat.player.is_none() {
+        player_picker(state, players_cache)
+    } else if seat.commander.is_none() {
+        commander_picker(state, &seat.commander_history)
+    } else {
+        seat_summary(seat, image_cache)
+    };
+
+    let top = row![
+        button(text("\u{2190} Back to Grid").size(16))
+            .padding(10)
+            .on_press(Message::Setup(SetupMessage::BackToGrid)),
+    ];
+
+    let mut content = column![top, body].spacing(20);
+
+    if let Some(e) = &state.error {
+        content = content.push(
+            container(text(e.clone()).size(16))
+                .padding(10)
+                .width(Length::Fill)
+                .style(style::panel_danger),
+        );
+    }
+
+    container(content.padding(24))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -504,7 +625,7 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
         .into_iter()
         .map(|p| {
             button(text(p.name.clone()).size(18))
-                .padding(12)
+                .padding(14)
                 .on_press(Message::Setup(SetupMessage::PickExistingPlayer(p.clone())))
                 .into()
         })
@@ -513,22 +634,22 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
     .wrap();
 
     column![
-        text("Who's sitting here?").size(24),
-        scrollable(existing).height(Length::Fixed(160.0)),
+        text("Who's sitting here?").size(26),
+        scrollable(existing).height(Length::Fixed(180.0)),
         row![
             text_input("New player name", &state.new_player_name)
-                .size(18)
-                .padding(10)
+                .size(20)
+                .padding(14)
                 .on_input(|s| Message::Setup(SetupMessage::NewPlayerNameChanged(s)))
                 .on_submit(Message::Setup(SetupMessage::CreatePlayer)),
             button(text("Add Player").size(18))
-                .padding(12)
+                .padding(14)
                 .style(button::primary)
                 .on_press(Message::Setup(SetupMessage::CreatePlayer)),
         ]
         .spacing(8),
     ]
-    .spacing(14)
+    .spacing(16)
     .into()
 }
 
@@ -579,24 +700,24 @@ fn commander_picker<'a>(
     };
 
     column![
-        text("Pick a commander").size(24),
+        text("Pick a commander").size(26),
         text("This player's commanders:").size(15),
         scrollable(history_row).height(Length::Fixed(90.0)),
         row![
             text_input("Commander name", &state.commander_query)
-                .size(18)
-                .padding(10)
+                .size(20)
+                .padding(14)
                 .on_input(|s| Message::Setup(SetupMessage::CommanderQueryChanged(s)))
                 .on_submit(Message::Setup(SetupMessage::SearchCommanders)),
             button(text(search_label).size(18))
-                .padding(12)
+                .padding(14)
                 .style(button::primary)
                 .on_press(Message::Setup(SetupMessage::SearchCommanders)),
         ]
         .spacing(8),
-        scrollable(results).height(Length::Fixed(200.0)),
+        scrollable(results).height(Length::Fill),
     ]
-    .spacing(12)
+    .spacing(14)
     .into()
 }
 
@@ -612,14 +733,15 @@ fn art_gallery<'a>(
         .map(|card| {
             let thumb: Element<Message> = match card.small_url.as_deref().and_then(|u| image_cache.get(u)) {
                 Some(handle) => image(handle.clone())
-                    .width(Length::Fixed(150.0))
-                    .height(Length::Fixed(110.0))
+                    .width(Length::Fixed(180.0))
+                    .height(Length::Fixed(130.0))
+                    .content_fit(ContentFit::Cover)
                     .into(),
                 None => container(text("...").size(14))
-                    .width(Length::Fixed(150.0))
-                    .height(Length::Fixed(110.0))
-                    .center_x(Length::Fixed(150.0))
-                    .center_y(Length::Fixed(110.0))
+                    .width(Length::Fixed(180.0))
+                    .height(Length::Fixed(130.0))
+                    .center_x(Length::Fixed(180.0))
+                    .center_y(Length::Fixed(130.0))
                     .into(),
             };
             button(
@@ -640,14 +762,14 @@ fn art_gallery<'a>(
     };
 
     column![
-        text(format!("Choose art for {}", target.name)).size(24),
+        text(format!("Choose art for {}", target.name)).size(26),
         status,
-        scrollable(row(tiles).spacing(10).wrap()).height(Length::Fixed(360.0)),
-        button(text("Cancel").size(16))
+        scrollable(row(tiles).spacing(10).wrap()).height(Length::Fill),
+        button(text("Back to search").size(16))
             .padding(10)
             .on_press(Message::Setup(SetupMessage::CancelArtPick)),
     ]
-    .spacing(12)
+    .spacing(14)
     .into()
 }
 
@@ -661,33 +783,35 @@ fn seat_summary<'a>(
     let portrait: Element<Message> = match commander.portrait_url().and_then(|u| image_cache.get(u)) {
         Some(handle) => image(handle.clone())
             .width(Length::Fill)
-            .height(Length::Fixed(200.0))
+            .height(Length::Fill)
+            .content_fit(ContentFit::Contain)
             .into(),
         None => container(text("Loading art...").size(16))
             .width(Length::Fill)
-            .height(Length::Fixed(200.0))
+            .height(Length::Fill)
             .center_x(Length::Fill)
-            .center_y(Length::Fixed(200.0))
+            .center_y(Length::Fill)
             .into(),
     };
 
     column![
-        portrait,
+        container(portrait).width(Length::Fill).height(Length::FillPortion(4)),
         text(format!("{} is playing {}", player.name, commander.name)).size(24),
         text(format!("Color identity: {}", commander.color_identity)).size(16),
         row![
             button(text("Change Player").size(16))
-                .padding(12)
+                .padding(14)
                 .on_press(Message::Setup(SetupMessage::ClearSeatPlayer)),
             button(text("Change Commander").size(16))
-                .padding(12)
+                .padding(14)
                 .on_press(Message::Setup(SetupMessage::ClearSeatCommander)),
             button(text("Change Art").size(16))
-                .padding(12)
+                .padding(14)
                 .on_press(Message::Setup(SetupMessage::ChangeArt)),
         ]
         .spacing(8),
     ]
     .spacing(14)
+    .height(Length::Fill)
     .into()
 }

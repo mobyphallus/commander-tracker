@@ -8,7 +8,6 @@ use rusqlite::Connection;
 use crate::app::Message;
 use crate::db;
 use crate::model::{FinishedGame, KillEvent, Seat, LETHAL_COMMANDER_DAMAGE, LETHAL_POISON, WinReason};
-use crate::screens::setup::Layout;
 use crate::style;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +19,6 @@ pub enum SeatTab {
 
 pub struct GameState {
     pub seats: Vec<Seat>,
-    pub layout: Layout,
     pub started_at: chrono::DateTime<Utc>,
     pub active_seat: usize,
     pub turn_seconds: u64,
@@ -38,12 +36,11 @@ pub struct GameState {
 }
 
 impl GameState {
-    pub fn new(seats: Vec<Seat>, layout: Layout) -> Self {
+    pub fn new(seats: Vec<Seat>) -> Self {
         let seat_tab = vec![SeatTab::Life; seats.len()];
         let zero_life_prompt_dismissed = vec![false; seats.len()];
         Self {
             seats,
-            layout,
             started_at: Utc::now(),
             active_seat: 0,
             turn_seconds: 0,
@@ -302,64 +299,26 @@ pub fn view<'a>(
     .width(Length::Fill)
     .style(style::header);
 
-    let kill_log: Element<Message> = if state.kills.is_empty() {
-        column![].into()
-    } else {
-        let lines: Vec<Element<Message>> = state
-            .kills
-            .iter()
-            .map(|k| {
-                let victim = &state.seats[k.victim_seat];
-                let killer_label = k
-                    .killer_seat
-                    .map(|i| state.seats[i].commander.name.clone())
-                    .unwrap_or_else(|| "unknown causes".to_string());
-                text(format!(
-                    "\u{1F480} {}'s {} was killed by {}",
-                    victim.player.name, victim.commander.name, killer_label
-                ))
-                .size(13)
-                .into()
-            })
-            .collect();
-        container(column(lines).spacing(4))
-            .padding(10)
-            .width(Length::Fill)
-            .style(style::panel)
-            .into()
-    };
-
     let seat_count = state.seats.len();
-    let board: Element<Message> = match state.layout {
-        Layout::List => scrollable(
-            column(
-                (0..seat_count)
-                    .map(|i| seat_panel(i, state, image_cache))
-                    .collect::<Vec<Element<Message>>>(),
-            )
-            .spacing(12),
-        )
-        .height(Length::Fill)
-        .into(),
-        Layout::Grid => {
-            let cols = grid_columns(seat_count);
-            let mut rows_el = Vec::new();
-            let mut i = 0;
-            while i < seat_count {
-                let end = (i + cols).min(seat_count);
-                let row_panels: Vec<Element<Message>> = (i..end)
-                    .map(|idx| seat_panel(idx, state, image_cache))
-                    .collect();
-                rows_el.push(row(row_panels).spacing(12).into());
-                i = end;
-            }
-            scrollable(column(rows_el).spacing(12))
-                .height(Length::Fill)
-                .into()
-        }
-    };
+    let cols = grid_columns(seat_count);
+    let mut rows_el: Vec<Element<Message>> = Vec::new();
+    let mut i = 0;
+    while i < seat_count {
+        let end = (i + cols).min(seat_count);
+        let row_panels: Vec<Element<Message>> = (i..end)
+            .map(|idx| seat_panel(idx, state, image_cache))
+            .collect();
+        rows_el.push(
+            row(row_panels)
+                .spacing(12)
+                .height(Length::FillPortion(1))
+                .into(),
+        );
+        i = end;
+    }
+    let board = column(rows_el).spacing(12).height(Length::Fill);
 
-    container(column![top_bar, kill_log, board].spacing(12).padding(16))
+    container(column![top_bar, board].spacing(12).padding(16))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -502,6 +461,7 @@ fn seat_panel<'a>(
     container(card)
         .padding(12)
         .width(Length::Fill)
+        .height(Length::Fill)
         .style(style_fn)
         .into()
 }
@@ -545,7 +505,7 @@ fn mark_kill_view(state: &GameState, victim: usize) -> Element<'_, Message> {
         .filter(|(j, _)| *j != victim)
         .map(|(j, other)| {
             button(
-                text(format!("{} ({})", other.commander.name, other.player.name)).size(18),
+                text(format!("{} ({})", other.player.name, other.commander.name)).size(18),
             )
             .padding(14)
             .width(Length::Fill)

@@ -71,7 +71,7 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
                 text("Game History").size(30),
                 button(text("Back").size(18))
                     .padding(10)
-                    .on_press(Message::BackToSetup),
+                    .on_press(Message::GoHome),
             ]
             .spacing(16)
             .align_y(iced::Alignment::Center),

@@ -6,10 +6,11 @@ use rusqlite::Connection;
 
 use crate::db;
 use crate::model::Player;
-use crate::screens::{game, history, setup, stats};
+use crate::screens::{game, history, home, setup, stats};
 use crate::style;
 
 pub enum Screen {
+    Home,
     Setup(setup::SetupState),
     Game(game::GameState),
     Stats(stats::StatsState),
@@ -25,13 +26,12 @@ pub struct App {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    Home(home::HomeMessage),
     Setup(setup::SetupMessage),
     Game(game::GameMessage),
     History(history::HistoryMessage),
     ArtLoaded(String, Result<Vec<u8>, String>),
-    GoToStats,
-    GoToHistory,
-    BackToSetup,
+    GoHome,
 }
 
 impl App {
@@ -43,7 +43,7 @@ impl App {
                 conn,
                 players,
                 image_cache: HashMap::new(),
-                screen: Screen::Setup(setup::SetupState::new()),
+                screen: Screen::Home,
             },
             Task::none(),
         )
@@ -76,23 +76,29 @@ impl App {
                 }
                 Task::none()
             }
-            Message::GoToStats => {
-                self.screen = Screen::Stats(stats::StatsState::load(&self.conn));
+            Message::GoHome => {
+                self.screen = Screen::Home;
                 Task::none()
             }
-            Message::GoToHistory => {
-                self.screen = Screen::History(history::HistoryState::load(&self.conn));
-                Task::none()
-            }
-            Message::BackToSetup => {
-                self.screen = Screen::Setup(setup::SetupState::new());
+            Message::Home(msg) => {
+                match msg {
+                    home::HomeMessage::StartGame => {
+                        self.screen = Screen::Setup(setup::SetupState::new());
+                    }
+                    home::HomeMessage::ViewStats => {
+                        self.screen = Screen::Stats(stats::StatsState::load(&self.conn));
+                    }
+                    home::HomeMessage::ViewHistory => {
+                        self.screen = Screen::History(history::HistoryState::load(&self.conn));
+                    }
+                }
                 Task::none()
             }
             Message::Setup(msg) => {
                 let task = if let Screen::Setup(state) = &mut self.screen {
                     let (task, action) = setup::update(state, &self.conn, msg);
-                    if let Some(setup::Action::StartGame(seats, layout)) = action {
-                        self.screen = Screen::Game(game::GameState::new(seats, layout));
+                    if let Some(setup::Action::StartGame(seats)) = action {
+                        self.screen = Screen::Game(game::GameState::new(seats));
                     }
                     task
                 } else {
@@ -109,7 +115,7 @@ impl App {
                     let (task, action) = game::update(state, &mut self.conn, msg);
                     match action {
                         Some(game::Action::Finished) | Some(game::Action::Abandoned) => {
-                            self.screen = Screen::Setup(setup::SetupState::new());
+                            self.screen = Screen::Home;
                         }
                         None => {}
                     }
@@ -129,6 +135,7 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         match &self.screen {
+            Screen::Home => home::view(),
             Screen::Setup(state) => setup::view(state, &self.players, &self.image_cache),
             Screen::Game(state) => game::view(state, &self.image_cache),
             Screen::Stats(state) => stats::view(state),
