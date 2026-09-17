@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use iced::widget::{button, column, container, image, row, scrollable, text};
-use iced::{Element, Length};
+use iced::widget::{button, column, container, image, row, scrollable, stack, text};
+use iced::{Color, ContentFit, Element, Length};
 use rusqlite::Connection;
 
 use crate::app::Message;
@@ -406,13 +406,48 @@ fn seat_panel<'a>(
     let lethal = seat.is_lethal();
     let out = seat.eliminated || lethal;
 
-    let portrait: Element<Message> = match seat.commander.portrait_url().and_then(|u| image_cache.get(u)) {
+    if out {
+        return eliminated_tile(index, seat, image_cache);
+    }
+
+    let art: Element<Message> = match seat.commander.portrait_url().and_then(|u| image_cache.get(u)) {
         Some(handle) => image(handle.clone())
             .width(Length::Fill)
-            .height(Length::Fixed(90.0))
+            .height(Length::Fill)
+            .content_fit(ContentFit::Cover)
             .into(),
-        None => text(&seat.commander.name).size(14).into(),
+        None => container(text(seat.commander.name.clone()).size(16))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into(),
     };
+
+    let caption = container(
+        column![
+            text(seat.player.name.clone()).size(20),
+            text(seat.commander.name.clone()).size(13),
+        ]
+        .spacing(2),
+    )
+    .padding(10)
+    .width(Length::Fill)
+    .style(|_theme: &iced::Theme| container::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+        text_color: Some(Color::WHITE),
+        ..container::Style::default()
+    });
+
+    let portrait_area = container(stack![
+        art,
+        container(caption)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(iced::alignment::Vertical::Bottom),
+    ])
+    .width(Length::Fill)
+    .height(Length::FillPortion(3));
 
     let tabs = row![
         tab_button("Life", SeatTab::Life, index, state.seat_tab[index]),
@@ -427,10 +462,7 @@ fn seat_panel<'a>(
         SeatTab::Poison => poison_tab(index, seat),
     };
 
-    let card = column![
-        portrait,
-        text(seat.player.name.clone()).size(19),
-        text(seat.commander.name.clone()).size(13),
+    let controls = column![
         tabs,
         body,
         row![
@@ -448,11 +480,12 @@ fn seat_panel<'a>(
             .style(button::success)
             .on_press(Message::Game(GameMessage::StartDeclareWinner(index))),
     ]
-    .spacing(7);
+    .spacing(7)
+    .height(Length::FillPortion(2));
 
-    let style_fn: fn(&iced::Theme) -> container::Style = if out {
-        style::panel_danger
-    } else if is_active {
+    let card = column![portrait_area, controls].spacing(7).height(Length::Fill);
+
+    let style_fn: fn(&iced::Theme) -> container::Style = if is_active {
         style::panel_active
     } else {
         style::panel
@@ -463,6 +496,53 @@ fn seat_panel<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style_fn)
+        .into()
+}
+
+/// A fully blacked-out tile for a seat that's out of the game, with just
+/// enough left to see who it was and undo the call if it was a mistake.
+fn eliminated_tile<'a>(
+    index: usize,
+    seat: &'a Seat,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let art: Element<Message> = match seat.commander.portrait_url().and_then(|u| image_cache.get(u)) {
+        Some(handle) => image(handle.clone())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .content_fit(ContentFit::Cover)
+            .into(),
+        None => container(text("")).width(Length::Fill).height(Length::Fill).into(),
+    };
+
+    let scrim = container(
+        column![
+            text("ELIMINATED").size(24),
+            text(seat.player.name.clone()).size(18),
+            text(seat.commander.name.clone()).size(13),
+            text(format!("Final: {} life, {} poison", seat.life, seat.poison)).size(13),
+            button(text("Back In").size(14))
+                .padding(10)
+                .style(button::secondary)
+                .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
+        ]
+        .spacing(8)
+        .align_x(iced::Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .style(|_theme: &iced::Theme| container::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.85).into()),
+        text_color: Some(Color::WHITE),
+        ..container::Style::default()
+    });
+
+    container(stack![art, scrim])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::panel)
         .into()
 }
 
