@@ -130,7 +130,7 @@ impl App {
         }
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub fn view(&self) -> Element<'_, Message> {
         match &self.screen {
             Screen::Setup(state) => setup::view(state, &self.players, &self.commanders),
             Screen::Game(state) => game::view(state, &self.image_cache),

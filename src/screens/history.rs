@@ -37,7 +37,7 @@ pub fn update(state: &mut HistoryState, conn: &Connection, message: HistoryMessa
     }
 }
 
-pub fn view(state: &HistoryState) -> Element<Message> {
+pub fn view(state: &HistoryState) -> Element<'_, Message> {
     if let Some(detail) = &state.selected {
         return detail_view(detail);
     }
@@ -85,7 +85,7 @@ pub fn view(state: &HistoryState) -> Element<Message> {
     .into()
 }
 
-fn detail_view(detail: &GameDetail) -> Element<Message> {
+fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
     let seat_rows = column(
         detail
             .seats

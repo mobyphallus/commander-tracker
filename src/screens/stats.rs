@@ -20,7 +20,7 @@ impl StatsState {
     }
 }
 
-pub fn view(state: &StatsState) -> Element<Message> {
+pub fn view(state: &StatsState) -> Element<'_, Message> {
     let player_rows = column(
         state
             .players

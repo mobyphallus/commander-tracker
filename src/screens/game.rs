@@ -298,7 +298,7 @@ fn seat_panel<'a>(
         .into()
 }
 
-fn declare_winner_view(state: &GameState, winner: usize) -> Element<Message> {
+fn declare_winner_view(state: &GameState, winner: usize) -> Element<'_, Message> {
     let winner_seat = &state.seats[winner];
     let reasons = column(
         WinReason::ALL

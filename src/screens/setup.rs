@@ -455,7 +455,7 @@ fn commander_picker<'a>(
     .into()
 }
 
-fn seat_summary(seat: &SeatSetup) -> Element<Message> {
+fn seat_summary(seat: &SeatSetup) -> Element<'_, Message> {
     let player = seat.player.as_ref().unwrap();
     let commander = seat.commander.as_ref().unwrap();
     column![
