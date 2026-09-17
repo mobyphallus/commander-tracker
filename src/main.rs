@@ -3,6 +3,7 @@ mod db;
 mod model;
 mod screens;
 mod scryfall;
+mod style;
 
 fn main() -> iced::Result {
     iced::application(app::App::title, app::App::update, app::App::view)

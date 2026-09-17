@@ -86,6 +86,17 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
 }
 
 fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
+    let kill_lines: Vec<Element<Message>> = detail
+        .kills
+        .iter()
+        .map(|k| {
+            let killer = k.killer.clone().unwrap_or_else(|| "unknown causes".to_string());
+            text(format!("\u{1F480} {} was killed by {}", k.victim, killer))
+                .size(14)
+                .into()
+        })
+        .collect();
+
     let seat_rows = column(
         detail
             .seats
@@ -134,6 +145,7 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
             ]
             .spacing(16)
             .align_y(iced::Alignment::Center),
+            column(kill_lines).spacing(4),
             text(format!(
                 "Win condition: {}",
                 detail.win_reason.map(|r| r.label()).unwrap_or("-")

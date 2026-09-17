@@ -1,12 +1,19 @@
-//! Minimal Scryfall client: search for legal commanders by name and fetch
-//! their art so it can be cached locally and shown as a player's portrait.
+//! Minimal Scryfall client: search for legal commanders by name, list every
+//! printing/art of a chosen card, and fetch art so it can be cached locally
+//! and shown as a player's portrait.
 
 use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub struct ScryfallCard {
+    /// This printing's id. Not the commander's identity - see `oracle_id`.
     pub scryfall_id: String,
+    /// Stable across every printing of this card; this is what a Commander
+    /// row is keyed by, so changing art later doesn't fragment stats.
+    pub oracle_id: String,
     pub name: String,
+    pub set_name: String,
+    pub small_url: Option<String>,
     pub image_url: Option<String>,
     pub art_crop_url: Option<String>,
     pub color_identity: String,
@@ -21,7 +28,9 @@ struct SearchResponse {
 #[derive(Debug, Deserialize)]
 struct CardData {
     id: String,
+    oracle_id: Option<String>,
     name: String,
+    set_name: String,
     #[serde(default)]
     color_identity: Vec<String>,
     #[serde(default)]
@@ -38,6 +47,7 @@ struct CardFace {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ImageUris {
+    small: Option<String>,
     normal: Option<String>,
     art_crop: Option<String>,
 }
@@ -50,13 +60,16 @@ impl From<CardData> for ScryfallCard {
                 .and_then(|faces| faces.first())
                 .and_then(|face| face.image_uris.clone())
         });
-        let (image_url, art_crop_url) = match images {
-            Some(i) => (i.normal, i.art_crop),
-            None => (None, None),
+        let (small_url, image_url, art_crop_url) = match images {
+            Some(i) => (i.small, i.normal, i.art_crop),
+            None => (None, None, None),
         };
         ScryfallCard {
+            oracle_id: c.oracle_id.unwrap_or_else(|| c.id.clone()),
             scryfall_id: c.id,
             name: c.name,
+            set_name: c.set_name,
+            small_url,
             image_url,
             art_crop_url,
             color_identity: c.color_identity.join(""),
@@ -71,18 +84,12 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Searches Scryfall for legal commanders matching `query`. Empty query
-/// returns no results rather than hitting the network.
-pub async fn search_commanders(query: String) -> Result<Vec<ScryfallCard>, String> {
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let q = format!("{trimmed} is:commander");
+async fn run_search(query: &str, extra: &[(&str, &str)]) -> Result<Vec<ScryfallCard>, String> {
+    let mut pairs: Vec<(&str, &str)> = vec![("q", query)];
+    pairs.extend_from_slice(extra);
     let resp = client()?
         .get("https://api.scryfall.com/cards/search")
-        .query(&[("q", q.as_str()), ("unique", "cards"), ("order", "name")])
+        .query(&pairs)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -97,6 +104,24 @@ pub async fn search_commanders(query: String) -> Result<Vec<ScryfallCard>, Strin
 
     let body: SearchResponse = resp.json().await.map_err(|e| e.to_string())?;
     Ok(body.data.into_iter().map(ScryfallCard::from).collect())
+}
+
+/// Searches Scryfall for legal commanders matching `query`, one result per
+/// distinct card. Empty query returns no results rather than hitting the network.
+pub async fn search_commanders(query: String) -> Result<Vec<ScryfallCard>, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let q = format!("{trimmed} is:commander");
+    run_search(&q, &[("unique", "cards"), ("order", "name")]).await
+}
+
+/// Every printing/art of the given oracle card, newest first, so the player
+/// can pick which art represents their commander at the table.
+pub async fn fetch_prints(oracle_id: String) -> Result<Vec<ScryfallCard>, String> {
+    let q = format!("oracleid:{oracle_id}");
+    run_search(&q, &[("unique", "prints"), ("order", "released"), ("dir", "desc")]).await
 }
 
 /// Downloads raw image bytes for use with `iced::widget::image::Handle`.

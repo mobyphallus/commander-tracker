@@ -5,8 +5,9 @@ use iced::{Element, Subscription, Task, Theme};
 use rusqlite::Connection;
 
 use crate::db;
-use crate::model::{Commander, Player};
+use crate::model::Player;
 use crate::screens::{game, history, setup, stats};
+use crate::style;
 
 pub enum Screen {
     Setup(setup::SetupState),
@@ -18,7 +19,6 @@ pub enum Screen {
 pub struct App {
     conn: Connection,
     players: Vec<Player>,
-    commanders: Vec<Commander>,
     image_cache: HashMap<String, image::Handle>,
     screen: Screen,
 }
@@ -38,12 +38,10 @@ impl App {
     pub fn new() -> (Self, Task<Message>) {
         let conn = db::open().expect("failed to open local database");
         let players = db::list_players(&conn).unwrap_or_default();
-        let commanders = db::list_commanders(&conn).unwrap_or_default();
         (
             Self {
                 conn,
                 players,
-                commanders,
                 image_cache: HashMap::new(),
                 screen: Screen::Setup(setup::SetupState::new()),
             },
@@ -56,7 +54,7 @@ impl App {
     }
 
     pub fn theme(&self) -> Theme {
-        Theme::Dark
+        style::app_theme()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -91,21 +89,20 @@ impl App {
                 Task::none()
             }
             Message::Setup(msg) => {
-                if let Screen::Setup(state) = &mut self.screen {
-                    let (task, action) = setup::update(
-                        state,
-                        &self.conn,
-                        &mut self.commanders,
-                        &mut self.players,
-                        msg,
-                    );
+                let task = if let Screen::Setup(state) = &mut self.screen {
+                    let (task, action) = setup::update(state, &self.conn, msg);
                     if let Some(setup::Action::StartGame(seats, layout)) = action {
                         self.screen = Screen::Game(game::GameState::new(seats, layout));
                     }
                     task
                 } else {
                     Task::none()
-                }
+                };
+                // Cheap local query; keeps the player list current after
+                // adding a new player, without threading a shared cache
+                // through every setup message.
+                self.players = db::list_players(&self.conn).unwrap_or_default();
+                task
             }
             Message::Game(msg) => {
                 if let Screen::Game(state) = &mut self.screen {
@@ -132,7 +129,7 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         match &self.screen {
-            Screen::Setup(state) => setup::view(state, &self.players, &self.commanders),
+            Screen::Setup(state) => setup::view(state, &self.players, &self.image_cache),
             Screen::Game(state) => game::view(state, &self.image_cache),
             Screen::Stats(state) => stats::view(state),
             Screen::History(state) => history::view(state),

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use rusqlite::{params, Connection};
 
 use crate::model::{
-    Commander, FinishedGame, GameDetail, GameDetailSeat, GameSummary, MatchupStat, Player,
-    PlayerStat, WinReason,
+    Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailSeat, GameSummary, MatchupStat,
+    Player, PlayerStat, WinReason,
 };
 
 pub fn data_dir() -> PathBuf {
@@ -33,7 +33,7 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE TABLE IF NOT EXISTS commanders (
             id              INTEGER PRIMARY KEY,
-            scryfall_id     TEXT NOT NULL UNIQUE,
+            oracle_id       TEXT NOT NULL UNIQUE,
             name            TEXT NOT NULL,
             image_url       TEXT,
             art_crop_url    TEXT,
@@ -66,8 +66,30 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
             source_game_player_id INTEGER NOT NULL REFERENCES game_players(id),
             amount                INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS commander_kills (
+            id                     INTEGER PRIMARY KEY,
+            game_id                INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+            victim_game_player_id  INTEGER NOT NULL REFERENCES game_players(id),
+            killer_game_player_id  INTEGER REFERENCES game_players(id)
+        );
         "#,
-    )
+    )?;
+
+    migrate_scryfall_id_to_oracle_id(conn)
+}
+
+/// Early builds keyed `commanders` by a specific printing's Scryfall id. That
+/// fragmented stats every time someone picked different art for the same
+/// card, so the column was renamed to hold the oracle id instead.
+fn migrate_scryfall_id_to_oracle_id(conn: &Connection) -> rusqlite::Result<()> {
+    let has_old_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('commanders') WHERE name = 'scryfall_id'")?
+        .exists([])?;
+    if has_old_column {
+        conn.execute_batch("ALTER TABLE commanders RENAME COLUMN scryfall_id TO oracle_id;")?;
+    }
+    Ok(())
 }
 
 pub fn list_players(conn: &Connection) -> rusqlite::Result<Vec<Player>> {
@@ -89,58 +111,63 @@ pub fn create_player(conn: &Connection, name: &str) -> rusqlite::Result<Player> 
     })
 }
 
-pub fn list_commanders(conn: &Connection) -> rusqlite::Result<Vec<Commander>> {
+fn commander_from_row(row: &rusqlite::Row) -> rusqlite::Result<Commander> {
+    Ok(Commander {
+        id: row.get(0)?,
+        oracle_id: row.get(1)?,
+        name: row.get(2)?,
+        image_url: row.get(3)?,
+        art_crop_url: row.get(4)?,
+        color_identity: row.get(5)?,
+    })
+}
+
+const COMMANDER_COLUMNS: &str = "id, oracle_id, name, image_url, art_crop_url, color_identity";
+
+/// Commanders this specific player has piloted before, most recently used
+/// first. Deliberately scoped per player: one person's "quick picks" aren't
+/// shared with the rest of the pod.
+pub fn player_commander_history(conn: &Connection, player_id: i64) -> rusqlite::Result<Vec<Commander>> {
     let mut stmt = conn.prepare(
-        "SELECT id, scryfall_id, name, image_url, art_crop_url, color_identity
-         FROM commanders ORDER BY name COLLATE NOCASE",
+        "SELECT c.id, c.oracle_id, c.name, c.image_url, c.art_crop_url, c.color_identity
+         FROM commanders c
+         JOIN (
+            SELECT commander_id, MAX(gp.id) AS last_played
+            FROM game_players gp
+            WHERE gp.player_id = ?1
+            GROUP BY commander_id
+         ) recent ON recent.commander_id = c.id
+         ORDER BY recent.last_played DESC",
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Commander {
-            id: row.get(0)?,
-            scryfall_id: row.get(1)?,
-            name: row.get(2)?,
-            image_url: row.get(3)?,
-            art_crop_url: row.get(4)?,
-            color_identity: row.get(5)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![player_id], commander_from_row)?;
     rows.collect()
 }
 
-/// Inserts a commander cached from Scryfall if we haven't seen it before,
-/// otherwise returns the existing local copy.
+/// Inserts a commander cached from Scryfall if we haven't seen its oracle
+/// card before; otherwise updates the chosen art/name on the existing row so
+/// stats keep pointing at the same commander.
 pub fn upsert_commander(
     conn: &Connection,
-    scryfall_id: &str,
+    oracle_id: &str,
     name: &str,
     image_url: Option<&str>,
     art_crop_url: Option<&str>,
     color_identity: &str,
 ) -> rusqlite::Result<Commander> {
     conn.execute(
-        "INSERT INTO commanders (scryfall_id, name, image_url, art_crop_url, color_identity)
+        "INSERT INTO commanders (oracle_id, name, image_url, art_crop_url, color_identity)
          VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(scryfall_id) DO UPDATE SET
+         ON CONFLICT(oracle_id) DO UPDATE SET
             name = excluded.name,
             image_url = excluded.image_url,
             art_crop_url = excluded.art_crop_url,
             color_identity = excluded.color_identity",
-        params![scryfall_id, name, image_url, art_crop_url, color_identity],
+        params![oracle_id, name, image_url, art_crop_url, color_identity],
     )?;
     conn.query_row(
-        "SELECT id, scryfall_id, name, image_url, art_crop_url, color_identity
-         FROM commanders WHERE scryfall_id = ?1",
-        params![scryfall_id],
-        |row| {
-            Ok(Commander {
-                id: row.get(0)?,
-                scryfall_id: row.get(1)?,
-                name: row.get(2)?,
-                image_url: row.get(3)?,
-                art_crop_url: row.get(4)?,
-                color_identity: row.get(5)?,
-            })
-        },
+        &format!("SELECT {COMMANDER_COLUMNS} FROM commanders WHERE oracle_id = ?1"),
+        params![oracle_id],
+        commander_from_row,
     )
 }
 
@@ -157,7 +184,7 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
     )?;
     let game_id = tx.last_insert_rowid();
 
-    // Map seat index -> the game_players row id, so commander damage can reference it.
+    // Map seat index -> the game_players row id, so commander damage and kills can reference it.
     let mut game_player_ids = Vec::with_capacity(game.seats.len());
     for (seat_index, seat) in game.seats.iter().enumerate() {
         let won = game.winner_seat == Some(seat_index);
@@ -195,6 +222,15 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
                 ],
             )?;
         }
+    }
+
+    for kill in &game.kills {
+        let killer_id = kill.killer_seat.map(|i| game_player_ids[i]);
+        tx.execute(
+            "INSERT INTO commander_kills (game_id, victim_game_player_id, killer_game_player_id)
+             VALUES (?1, ?2, ?3)",
+            params![game_id, game_player_ids[kill.victim_seat], killer_id],
+        )?;
     }
 
     tx.commit()
@@ -356,11 +392,33 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
         });
     }
 
+    let kills: Vec<GameDetailKill> = {
+        let mut stmt = conn.prepare(
+            "SELECT vc.name, kc.name
+             FROM commander_kills ck
+             JOIN game_players vp ON vp.id = ck.victim_game_player_id
+             JOIN commanders vc ON vc.id = vp.commander_id
+             LEFT JOIN game_players kp ON kp.id = ck.killer_game_player_id
+             LEFT JOIN commanders kc ON kc.id = kp.commander_id
+             WHERE ck.game_id = ?1",
+        )?;
+        let result = stmt
+            .query_map(params![game_id], |row| {
+                Ok(GameDetailKill {
+                    victim: row.get(0)?,
+                    killer: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        result
+    };
+
     Ok(GameDetail {
         id: game_id,
         started_at: parse_dt(&started_at),
         ended_at: parse_dt(&ended_at),
         win_reason: win_reason.map(|s| WinReason::from_db_str(&s)),
         seats,
+        kills,
     })
 }

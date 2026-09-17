@@ -1,11 +1,14 @@
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use std::collections::HashMap;
+
+use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
 use rusqlite::Connection;
 
 use crate::app::Message;
 use crate::db;
-use crate::model::{Commander, Player, Seat, StartingLife};
+use crate::model::{Commander, Player, Seat, STARTING_LIFE};
 use crate::scryfall::{self, ScryfallCard};
+use crate::style;
 
 pub const MIN_POD: usize = 2;
 pub const MAX_POD: usize = 8;
@@ -25,10 +28,23 @@ impl Layout {
     }
 }
 
+/// The commander a player picked by name; art is chosen next, but this
+/// identity (oracle id) is what stats will key on regardless of which
+/// printing's art ends up chosen.
+#[derive(Debug, Clone)]
+pub struct ArtTarget {
+    pub oracle_id: String,
+    pub name: String,
+    pub color_identity: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SeatSetup {
     pub player: Option<Player>,
     pub commander: Option<Commander>,
+    /// Commanders this specific player has piloted before - personal to
+    /// them, never shared with the rest of the pod.
+    pub commander_history: Vec<Commander>,
 }
 
 pub struct SetupState {
@@ -40,6 +56,9 @@ pub struct SetupState {
     pub commander_query: String,
     pub commander_results: Vec<ScryfallCard>,
     pub searching: bool,
+    pub art_target: Option<ArtTarget>,
+    pub art_options: Vec<ScryfallCard>,
+    pub loading_art_options: bool,
     pub error: Option<String>,
 }
 
@@ -55,6 +74,9 @@ impl SetupState {
             commander_query: String::new(),
             commander_results: Vec::new(),
             searching: false,
+            art_target: None,
+            art_options: Vec::new(),
+            loading_art_options: false,
             error: None,
         }
     }
@@ -65,6 +87,15 @@ impl SetupState {
                 .seats
                 .iter()
                 .all(|s| s.player.is_some() && s.commander.is_some())
+    }
+
+    fn players_taken_by_other_seats(&self) -> std::collections::HashSet<i64> {
+        self.seats
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != self.active_seat)
+            .filter_map(|(_, s)| s.player.as_ref().map(|p| p.id))
+            .collect()
     }
 }
 
@@ -80,8 +111,12 @@ pub enum SetupMessage {
     CommanderQueryChanged(String),
     SearchCommanders,
     SearchResults(Result<Vec<ScryfallCard>, String>),
-    PickCommander(ScryfallCard),
-    PickCachedCommander(Commander),
+    PickCommanderName(ScryfallCard),
+    PickHistoryCommander(Commander),
+    ArtOptionsLoaded(Result<Vec<ScryfallCard>, String>),
+    PickArt(ScryfallCard),
+    CancelArtPick,
+    ChangeArt,
     ClearSeatCommander,
     StartGame,
 }
@@ -90,11 +125,28 @@ pub enum Action {
     StartGame(Vec<Seat>, Layout),
 }
 
+fn load_portrait_task(commander: &Commander) -> Task<Message> {
+    match commander.portrait_url() {
+        Some(url) => {
+            let url = url.to_string();
+            let key = url.clone();
+            Task::perform(scryfall::fetch_image(url), move |res| {
+                Message::ArtLoaded(key.clone(), res)
+            })
+        }
+        None => Task::none(),
+    }
+}
+
+fn load_prints_task(oracle_id: String) -> Task<Message> {
+    Task::perform(scryfall::fetch_prints(oracle_id), |res| {
+        Message::Setup(SetupMessage::ArtOptionsLoaded(res))
+    })
+}
+
 pub fn update(
     state: &mut SetupState,
     conn: &Connection,
-    commanders_cache: &mut Vec<Commander>,
-    players_cache: &mut Vec<Player>,
     message: SetupMessage,
 ) -> (Task<Message>, Option<Action>) {
     state.error = None;
@@ -115,6 +167,8 @@ pub fn update(
             state.active_seat = i;
             state.commander_query.clear();
             state.commander_results.clear();
+            state.art_target = None;
+            state.art_options.clear();
             (Task::none(), None)
         }
         SetupMessage::NewPlayerNameChanged(s) => {
@@ -128,9 +182,8 @@ pub fn update(
             }
             match db::create_player(conn, &name) {
                 Ok(player) => {
-                    players_cache.push(player.clone());
-                    players_cache.sort_by_key(|p| p.name.to_lowercase());
                     state.seats[state.active_seat].player = Some(player);
+                    state.seats[state.active_seat].commander_history = Vec::new();
                     state.new_player_name.clear();
                 }
                 Err(e) => state.error = Some(format!("Couldn't create player: {e}")),
@@ -138,11 +191,18 @@ pub fn update(
             (Task::none(), None)
         }
         SetupMessage::PickExistingPlayer(player) => {
+            if state.players_taken_by_other_seats().contains(&player.id) {
+                state.error = Some(format!("{} is already seated at this table.", player.name));
+                return (Task::none(), None);
+            }
+            let history = db::player_commander_history(conn, player.id).unwrap_or_default();
             state.seats[state.active_seat].player = Some(player);
+            state.seats[state.active_seat].commander_history = history;
             (Task::none(), None)
         }
         SetupMessage::ClearSeatPlayer => {
             state.seats[state.active_seat].player = None;
+            state.seats[state.active_seat].commander_history.clear();
             (Task::none(), None)
         }
         SetupMessage::CommanderQueryChanged(s) => {
@@ -170,34 +230,73 @@ pub fn update(
             }
             (Task::none(), None)
         }
-        SetupMessage::PickCommander(card) => {
+        SetupMessage::PickCommanderName(card) => {
+            state.commander_results.clear();
+            state.commander_query.clear();
+            state.loading_art_options = true;
+            let default_thumb_task = match card.small_url.clone() {
+                Some(url) => {
+                    let key = url.clone();
+                    Task::perform(scryfall::fetch_image(url), move |res| {
+                        Message::ArtLoaded(key.clone(), res)
+                    })
+                }
+                None => Task::none(),
+            };
+            let prints_task = load_prints_task(card.oracle_id.clone());
+            state.art_target = Some(ArtTarget {
+                oracle_id: card.oracle_id.clone(),
+                name: card.name.clone(),
+                color_identity: card.color_identity.clone(),
+            });
+            state.art_options = vec![card];
+            (Task::batch([prints_task, default_thumb_task]), None)
+        }
+        SetupMessage::PickHistoryCommander(commander) => {
+            let task = load_portrait_task(&commander);
+            state.seats[state.active_seat].commander = Some(commander);
+            (task, None)
+        }
+        SetupMessage::ArtOptionsLoaded(res) => {
+            state.loading_art_options = false;
+            match res {
+                Ok(list) => {
+                    let thumb_tasks: Vec<Task<Message>> = list
+                        .iter()
+                        .filter_map(|c| c.small_url.clone())
+                        .take(20)
+                        .map(|url| {
+                            let key = url.clone();
+                            Task::perform(scryfall::fetch_image(url), move |res| {
+                                Message::ArtLoaded(key.clone(), res)
+                            })
+                        })
+                        .collect();
+                    state.art_options = list;
+                    (Task::batch(thumb_tasks), None)
+                }
+                Err(e) => {
+                    state.error = Some(format!("Couldn't load printings: {e}"));
+                    (Task::none(), None)
+                }
+            }
+        }
+        SetupMessage::PickArt(card) => {
+            let Some(target) = state.art_target.take() else {
+                return (Task::none(), None);
+            };
+            state.art_options.clear();
             match db::upsert_commander(
                 conn,
-                &card.scryfall_id,
-                &card.name,
+                &target.oracle_id,
+                &target.name,
                 card.image_url.as_deref(),
                 card.art_crop_url.as_deref(),
-                &card.color_identity,
+                &target.color_identity,
             ) {
                 Ok(commander) => {
-                    if !commanders_cache.iter().any(|c| c.id == commander.id) {
-                        commanders_cache.push(commander.clone());
-                        commanders_cache.sort_by_key(|c| c.name.to_lowercase());
-                    }
-                    let art_url = commander
-                        .art_crop_url
-                        .clone()
-                        .or_else(|| commander.image_url.clone());
-                    let id = commander.scryfall_id.clone();
+                    let task = load_portrait_task(&commander);
                     state.seats[state.active_seat].commander = Some(commander);
-                    state.commander_results.clear();
-                    state.commander_query.clear();
-                    let task = match art_url {
-                        Some(url) => Task::perform(scryfall::fetch_image(url), move |res| {
-                            Message::ArtLoaded(id.clone(), res)
-                        }),
-                        None => Task::none(),
-                    };
                     (task, None)
                 }
                 Err(e) => {
@@ -206,23 +305,28 @@ pub fn update(
                 }
             }
         }
-        SetupMessage::PickCachedCommander(commander) => {
-            let art_url = commander
-                .art_crop_url
-                .clone()
-                .or_else(|| commander.image_url.clone());
-            let id = commander.scryfall_id.clone();
-            state.seats[state.active_seat].commander = Some(commander);
-            let task = match art_url {
-                Some(url) => Task::perform(scryfall::fetch_image(url), move |res| {
-                    Message::ArtLoaded(id.clone(), res)
-                }),
-                None => Task::none(),
+        SetupMessage::CancelArtPick => {
+            state.art_target = None;
+            state.art_options.clear();
+            (Task::none(), None)
+        }
+        SetupMessage::ChangeArt => {
+            let Some(commander) = state.seats[state.active_seat].commander.clone() else {
+                return (Task::none(), None);
             };
-            (task, None)
+            state.art_target = Some(ArtTarget {
+                oracle_id: commander.oracle_id.clone(),
+                name: commander.name.clone(),
+                color_identity: commander.color_identity.clone(),
+            });
+            state.art_options.clear();
+            state.loading_art_options = true;
+            (load_prints_task(commander.oracle_id), None)
         }
         SetupMessage::ClearSeatCommander => {
             state.seats[state.active_seat].commander = None;
+            state.art_target = None;
+            state.art_options.clear();
             (Task::none(), None)
         }
         SetupMessage::StartGame => {
@@ -234,7 +338,7 @@ pub fn update(
                         Seat::new(
                             s.player.clone().unwrap(),
                             s.commander.clone().unwrap(),
-                            StartingLife::VALUE,
+                            STARTING_LIFE,
                         )
                     })
                     .collect();
@@ -250,32 +354,48 @@ pub fn update(
 pub fn view<'a>(
     state: &'a SetupState,
     players_cache: &'a [Player],
-    commanders_cache: &'a [Commander],
+    image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
-    let pod_size_row = row(
-        (MIN_POD..=MAX_POD)
-            .map(|n| {
-                let selected = n == state.pod_size;
-                button(text(n.to_string()).size(20))
-                    .padding(12)
-                    .style(if selected {
-                        button::primary
-                    } else {
-                        button::secondary
-                    })
-                    .on_press(Message::Setup(SetupMessage::ChangePodSize(n)))
-                    .into()
-            })
-            .collect::<Vec<Element<Message>>>(),
+    let header = container(
+        row![
+            text("Commander Pod").size(30),
+            iced::widget::horizontal_space(),
+            button(text("Game History").size(16))
+                .padding(10)
+                .on_press(Message::GoToHistory),
+            button(text("Stats").size(16))
+                .padding(10)
+                .on_press(Message::GoToStats),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
     )
-    .spacing(8);
+    .padding(16)
+    .width(Length::Fill)
+    .style(style::header);
+
+    let pod_size_row = row((MIN_POD..=MAX_POD)
+        .map(|n| {
+            let selected = n == state.pod_size;
+            button(text(n.to_string()).size(18))
+                .padding(10)
+                .style(if selected {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .on_press(Message::Setup(SetupMessage::ChangePodSize(n)))
+                .into()
+        })
+        .collect::<Vec<Element<Message>>>())
+    .spacing(6);
 
     let layout_row = row([Layout::Grid, Layout::List]
         .into_iter()
         .map(|l| {
             let selected = l == state.layout;
-            button(text(l.label()).size(18))
-                .padding(12)
+            button(text(l.label()).size(16))
+                .padding(10)
                 .style(if selected {
                     button::primary
                 } else {
@@ -285,97 +405,115 @@ pub fn view<'a>(
                 .into()
         })
         .collect::<Vec<Element<Message>>>())
-    .spacing(8);
+    .spacing(6);
 
-    let seat_tabs = row(
-        (0..state.pod_size)
-            .map(|i| {
-                let seat = &state.seats[i];
-                let label = match (&seat.player, &seat.commander) {
-                    (Some(p), Some(c)) => format!("{} \u{2713}\n{}", p.name, c.name),
-                    (Some(p), None) => format!("{}\n(pick commander)", p.name),
-                    _ => format!("Seat {}", i + 1),
-                };
-                let selected = i == state.active_seat;
-                button(text(label).size(16))
-                    .padding(10)
-                    .width(Length::Fixed(160.0))
-                    .style(if selected {
-                        button::primary
-                    } else if seat.player.is_some() && seat.commander.is_some() {
-                        button::success
-                    } else {
-                        button::secondary
-                    })
-                    .on_press(Message::Setup(SetupMessage::SelectSeat(i)))
-                    .into()
-            })
-            .collect::<Vec<Element<Message>>>(),
+    let config_card = container(
+        row![
+            column![text("Players").size(14), pod_size_row].spacing(6),
+            column![text("Layout").size(14), layout_row].spacing(6),
+        ]
+        .spacing(32),
     )
-    .spacing(8)
-    .wrap();
+    .padding(16)
+    .width(Length::Fill)
+    .style(style::panel);
+
+    let seat_tabs = container(
+        scrollable(
+            row((0..state.pod_size)
+                .map(|i| {
+                    let seat = &state.seats[i];
+                    let ready = seat.player.is_some() && seat.commander.is_some();
+                    let label = match &seat.player {
+                        Some(p) if ready => format!("{} \u{2713}", p.name),
+                        Some(p) => p.name.clone(),
+                        None => format!("Seat {}", i + 1),
+                    };
+                    let selected = i == state.active_seat;
+                    button(text(label).size(16))
+                        .padding(12)
+                        .width(Length::Fixed(140.0))
+                        .style(if selected {
+                            button::primary
+                        } else if ready {
+                            button::success
+                        } else {
+                            button::secondary
+                        })
+                        .on_press(Message::Setup(SetupMessage::SelectSeat(i)))
+                        .into()
+                })
+                .collect::<Vec<Element<Message>>>())
+            .spacing(8)
+            .wrap(),
+        )
+        .width(Length::Fill),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .style(style::panel);
 
     let seat = &state.seats[state.active_seat];
-    let editor: Element<Message> = if seat.player.is_none() {
+    let editor: Element<Message> = if state.art_target.is_some() {
+        art_gallery(state, image_cache)
+    } else if seat.player.is_none() {
         player_picker(state, players_cache)
     } else if seat.commander.is_none() {
-        commander_picker(state, commanders_cache)
+        commander_picker(state, &seat.commander_history)
     } else {
-        seat_summary(seat)
+        seat_summary(seat, image_cache)
     };
 
-    let mut start_button = button(text("Start Game").size(22)).padding(16);
+    let editor_card = container(editor)
+        .padding(20)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::panel);
+
+    let mut start_button = button(text("Start Game").size(22)).padding(18);
     if state.all_seats_ready() {
         start_button = start_button
             .style(button::success)
             .on_press(Message::Setup(SetupMessage::StartGame));
     }
 
-    let error_text: Element<Message> = match &state.error {
-        Some(e) => text(e.clone()).size(16).into(),
-        None => text("").into(),
-    };
+    let mut content = column![header, config_card, seat_tabs, editor_card].spacing(14);
 
-    container(
-        column![
-            text("Commander Pod").size(32),
-            row![text("Players:").size(18), pod_size_row].spacing(12).align_y(iced::Alignment::Center),
-            row![text("Layout:").size(18), layout_row].spacing(12).align_y(iced::Alignment::Center),
-            scrollable(seat_tabs).width(Length::Fill),
-            container(editor).padding(16).width(Length::Fill),
-            error_text,
-            row![
-                start_button,
-                button(text("Game History").size(18)).padding(12).on_press(Message::GoToHistory),
-                button(text("Stats").size(18)).padding(12).on_press(Message::GoToStats),
-            ]
-            .spacing(12),
-        ]
-        .spacing(16)
-        .padding(20),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    if let Some(e) = &state.error {
+        content = content.push(
+            container(text(e.clone()).size(16))
+                .padding(10)
+                .width(Length::Fill)
+                .style(style::panel_danger),
+        );
+    }
+
+    content = content.push(start_button);
+
+    container(content.padding(20))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Element<'a, Message> {
-    let existing = row(
-        players_cache
-            .iter()
-            .map(|p| {
-                button(text(p.name.clone()).size(18))
-                    .padding(12)
-                    .on_press(Message::Setup(SetupMessage::PickExistingPlayer(p.clone())))
-                    .into()
-            })
-            .collect::<Vec<Element<Message>>>(),
-    )
+    let taken = state.players_taken_by_other_seats();
+    let available: Vec<&Player> = players_cache.iter().filter(|p| !taken.contains(&p.id)).collect();
+
+    let existing = row(available
+        .into_iter()
+        .map(|p| {
+            button(text(p.name.clone()).size(18))
+                .padding(12)
+                .on_press(Message::Setup(SetupMessage::PickExistingPlayer(p.clone())))
+                .into()
+        })
+        .collect::<Vec<Element<Message>>>())
     .spacing(8)
     .wrap();
 
     column![
-        text("Who's sitting here?").size(22),
+        text("Who's sitting here?").size(24),
         scrollable(existing).height(Length::Fixed(160.0)),
         row![
             text_input("New player name", &state.new_player_name)
@@ -385,33 +523,39 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
                 .on_submit(Message::Setup(SetupMessage::CreatePlayer)),
             button(text("Add Player").size(18))
                 .padding(12)
+                .style(button::primary)
                 .on_press(Message::Setup(SetupMessage::CreatePlayer)),
         ]
         .spacing(8),
     ]
-    .spacing(12)
+    .spacing(14)
     .into()
 }
 
 fn commander_picker<'a>(
     state: &'a SetupState,
-    commanders_cache: &'a [Commander],
+    history: &'a [Commander],
 ) -> Element<'a, Message> {
-    let cached = row(
-        commanders_cache
+    let history_row: Element<Message> = if history.is_empty() {
+        text("No commanders played yet - search below to add one.")
+            .size(14)
+            .into()
+    } else {
+        row(history
             .iter()
             .map(|c| {
                 button(text(c.name.clone()).size(16))
                     .padding(10)
-                    .on_press(Message::Setup(SetupMessage::PickCachedCommander(
+                    .on_press(Message::Setup(SetupMessage::PickHistoryCommander(
                         c.clone(),
                     )))
                     .into()
             })
-            .collect::<Vec<Element<Message>>>(),
-    )
-    .spacing(8)
-    .wrap();
+            .collect::<Vec<Element<Message>>>())
+        .spacing(8)
+        .wrap()
+        .into()
+    };
 
     let results = column(
         state
@@ -421,7 +565,7 @@ fn commander_picker<'a>(
                 button(text(format!("{}  [{}]", c.name, c.color_identity)).size(16))
                     .padding(10)
                     .width(Length::Fill)
-                    .on_press(Message::Setup(SetupMessage::PickCommander(c.clone())))
+                    .on_press(Message::Setup(SetupMessage::PickCommanderName(c.clone())))
                     .into()
             })
             .collect::<Vec<Element<Message>>>(),
@@ -435,9 +579,9 @@ fn commander_picker<'a>(
     };
 
     column![
-        text("Pick a commander").size(22),
-        text("Previously used:").size(16),
-        scrollable(cached).height(Length::Fixed(100.0)),
+        text("Pick a commander").size(24),
+        text("This player's commanders:").size(15),
+        scrollable(history_row).height(Length::Fixed(90.0)),
         row![
             text_input("Commander name", &state.commander_query)
                 .size(18)
@@ -446,31 +590,104 @@ fn commander_picker<'a>(
                 .on_submit(Message::Setup(SetupMessage::SearchCommanders)),
             button(text(search_label).size(18))
                 .padding(12)
+                .style(button::primary)
                 .on_press(Message::Setup(SetupMessage::SearchCommanders)),
         ]
         .spacing(8),
-        scrollable(results).height(Length::Fixed(220.0)),
+        scrollable(results).height(Length::Fixed(200.0)),
     ]
     .spacing(12)
     .into()
 }
 
-fn seat_summary(seat: &SeatSetup) -> Element<'_, Message> {
+fn art_gallery<'a>(
+    state: &'a SetupState,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let target = state.art_target.as_ref().unwrap();
+
+    let tiles: Vec<Element<Message>> = state
+        .art_options
+        .iter()
+        .map(|card| {
+            let thumb: Element<Message> = match card.small_url.as_deref().and_then(|u| image_cache.get(u)) {
+                Some(handle) => image(handle.clone())
+                    .width(Length::Fixed(150.0))
+                    .height(Length::Fixed(110.0))
+                    .into(),
+                None => container(text("...").size(14))
+                    .width(Length::Fixed(150.0))
+                    .height(Length::Fixed(110.0))
+                    .center_x(Length::Fixed(150.0))
+                    .center_y(Length::Fixed(110.0))
+                    .into(),
+            };
+            button(
+                column![thumb, text(card.set_name.clone()).size(12)]
+                    .spacing(4)
+                    .align_x(iced::Alignment::Center),
+            )
+            .padding(6)
+            .on_press(Message::Setup(SetupMessage::PickArt(card.clone())))
+            .into()
+        })
+        .collect();
+
+    let status = if state.loading_art_options {
+        text("Loading every printing from Scryfall...").size(14)
+    } else {
+        text(format!("{} printings found", state.art_options.len())).size(14)
+    };
+
+    column![
+        text(format!("Choose art for {}", target.name)).size(24),
+        status,
+        scrollable(row(tiles).spacing(10).wrap()).height(Length::Fixed(360.0)),
+        button(text("Cancel").size(16))
+            .padding(10)
+            .on_press(Message::Setup(SetupMessage::CancelArtPick)),
+    ]
+    .spacing(12)
+    .into()
+}
+
+fn seat_summary<'a>(
+    seat: &'a SeatSetup,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
     let player = seat.player.as_ref().unwrap();
     let commander = seat.commander.as_ref().unwrap();
+
+    let portrait: Element<Message> = match commander.portrait_url().and_then(|u| image_cache.get(u)) {
+        Some(handle) => image(handle.clone())
+            .width(Length::Fill)
+            .height(Length::Fixed(200.0))
+            .into(),
+        None => container(text("Loading art...").size(16))
+            .width(Length::Fill)
+            .height(Length::Fixed(200.0))
+            .center_x(Length::Fill)
+            .center_y(Length::Fixed(200.0))
+            .into(),
+    };
+
     column![
-        text(format!("{} is playing {}", player.name, commander.name)).size(22),
+        portrait,
+        text(format!("{} is playing {}", player.name, commander.name)).size(24),
         text(format!("Color identity: {}", commander.color_identity)).size(16),
         row![
             button(text("Change Player").size(16))
-                .padding(10)
+                .padding(12)
                 .on_press(Message::Setup(SetupMessage::ClearSeatPlayer)),
             button(text("Change Commander").size(16))
-                .padding(10)
+                .padding(12)
                 .on_press(Message::Setup(SetupMessage::ClearSeatCommander)),
+            button(text("Change Art").size(16))
+                .padding(12)
+                .on_press(Message::Setup(SetupMessage::ChangeArt)),
         ]
         .spacing(8),
     ]
-    .spacing(12)
+    .spacing(14)
     .into()
 }
