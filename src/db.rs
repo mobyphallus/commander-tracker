@@ -73,6 +73,13 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
             victim_game_player_id  INTEGER NOT NULL REFERENCES game_players(id),
             killer_game_player_id  INTEGER REFERENCES game_players(id)
         );
+
+        CREATE TABLE IF NOT EXISTS player_commanders (
+            player_id     INTEGER NOT NULL REFERENCES players(id),
+            commander_id  INTEGER NOT NULL REFERENCES commanders(id),
+            last_used_at  TEXT NOT NULL,
+            PRIMARY KEY (player_id, commander_id)
+        );
         "#,
     )?;
 
@@ -124,6 +131,24 @@ fn commander_from_row(row: &rusqlite::Row) -> rusqlite::Result<Commander> {
 
 const COMMANDER_COLUMNS: &str = "id, oracle_id, name, image_url, art_crop_url, color_identity";
 
+/// Records that a player picked a commander during setup, regardless of
+/// whether the game that follows is ever finished. This is what backs each
+/// player's "quick pick" history - deliberately independent of the
+/// games/game_players tables, which only reflect completed games.
+pub fn record_player_commander_use(
+    conn: &Connection,
+    player_id: i64,
+    commander_id: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO player_commanders (player_id, commander_id, last_used_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(player_id, commander_id) DO UPDATE SET last_used_at = excluded.last_used_at",
+        params![player_id, commander_id, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 /// Commanders this specific player has piloted before, most recently used
 /// first. Deliberately scoped per player: one person's "quick picks" aren't
 /// shared with the rest of the pod.
@@ -131,13 +156,9 @@ pub fn player_commander_history(conn: &Connection, player_id: i64) -> rusqlite::
     let mut stmt = conn.prepare(
         "SELECT c.id, c.oracle_id, c.name, c.image_url, c.art_crop_url, c.color_identity
          FROM commanders c
-         JOIN (
-            SELECT commander_id, MAX(gp.id) AS last_played
-            FROM game_players gp
-            WHERE gp.player_id = ?1
-            GROUP BY commander_id
-         ) recent ON recent.commander_id = c.id
-         ORDER BY recent.last_played DESC",
+         JOIN player_commanders pc ON pc.commander_id = c.id
+         WHERE pc.player_id = ?1
+         ORDER BY pc.last_used_at DESC",
     )?;
     let rows = stmt.query_map(params![player_id], commander_from_row)?;
     rows.collect()

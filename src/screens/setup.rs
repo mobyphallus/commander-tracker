@@ -266,6 +266,9 @@ pub fn update(
             let Some(seat) = state.editing_seat else {
                 return (Task::none(), None);
             };
+            if let Some(player) = &state.seats[seat].player {
+                let _ = db::record_player_commander_use(conn, player.id, commander.id);
+            }
             let task = load_portrait_task(&commander);
             state.seats[seat].commander = Some(commander);
             state.editing_seat = None;
@@ -313,6 +316,9 @@ pub fn update(
                 &target.color_identity,
             ) {
                 Ok(commander) => {
+                    if let Some(player) = &state.seats[seat].player {
+                        let _ = db::record_player_commander_use(conn, player.id, commander.id);
+                    }
                     let task = load_portrait_task(&commander);
                     state.seats[seat].commander = Some(commander);
                     state.editing_seat = None;
