@@ -33,8 +33,8 @@ pub struct GameState {
     pub zero_life_prompt_dismissed: Vec<bool>,
     pub pending_winner: Option<usize>,
     pub pending_reason: Option<WinReason>,
-    /// A life +/- button currently held down; holding it applies +/-10
-    /// instead of the normal +/-1 on release.
+    /// A counter zone currently held down; holding it applies +/-10 every
+    /// couple of seconds instead of the normal +/-1 on release.
     pub press_hold: Option<PressHold>,
     /// An upward swipe in progress on a seat tile, tracked until it crosses
     /// the threshold that opens that seat's action menu.
@@ -47,12 +47,23 @@ pub struct GameState {
     pub damage_focus: Option<usize>,
 }
 
+/// Any counter that can be adjusted with the hold-to-repeat left/right zones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CounterTarget {
+    Life(usize),
+    Poison(usize),
+    /// (seat whose damage total this is, seat whose commander dealt it)
+    Damage(usize, usize),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PressHold {
-    pub seat: usize,
+    pub target: CounterTarget,
     pub sign: i32,
     pub started_at: Instant,
-    pub fired: bool,
+    /// None until the first +/-10 fires; then tracks the last time it fired
+    /// so continuing to hold repeats it every `HOLD_THRESHOLD`.
+    pub last_fired_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,7 +74,8 @@ pub struct SwipeState {
 
 /// Pixels of upward swipe needed to open a seat's action menu.
 const SWIPE_OPEN_THRESHOLD: f32 = 55.0;
-/// How long a life button must be held before it jumps to +/-10.
+/// How long a zone must be held before it jumps by +/-10, and how often it
+/// repeats while still held.
 const HOLD_THRESHOLD: Duration = Duration::from_secs(2);
 
 impl GameState {
@@ -127,8 +139,8 @@ pub enum GameMessage {
     TogglePause,
     NextTurn,
     SwitchTab(usize, SeatTab),
-    LifePressStart(usize, i32),
-    LifePressEnd(usize, i32),
+    CounterPressStart(CounterTarget, i32),
+    CounterPressEnd(CounterTarget, i32),
     HoldTick,
     SwipeStart(usize),
     SwipeMove(usize, f32),
@@ -136,8 +148,6 @@ pub enum GameMessage {
     CloseActionMenu,
     StartDamageFocus(usize),
     EndDamageFocus,
-    PoisonDelta(usize, i32),
-    CommanderDamageDelta(usize, usize, i32),
     ToggleEliminated(usize),
     AnswerZeroLifeCheck(bool),
     MarkKilled(usize),
@@ -192,31 +202,38 @@ pub fn update(
             state.action_menu_for = None;
             (iced::Task::none(), None)
         }
-        GameMessage::LifePressStart(seat, sign) => {
+        GameMessage::CounterPressStart(target, sign) => {
             state.press_hold = Some(PressHold {
-                seat,
+                target,
                 sign,
                 started_at: Instant::now(),
-                fired: false,
+                last_fired_at: None,
             });
             (iced::Task::none(), None)
         }
-        GameMessage::LifePressEnd(seat, sign) => {
+        GameMessage::CounterPressEnd(target, sign) => {
             if let Some(hold) = state.press_hold.take() {
-                if hold.seat == seat && hold.sign == sign && !hold.fired {
-                    apply_life_delta(state, seat, sign);
+                if hold.target == target && hold.sign == sign && hold.last_fired_at.is_none() {
+                    apply_counter_delta(state, target, sign);
                 }
             }
             (iced::Task::none(), None)
         }
         GameMessage::HoldTick => {
-            if let Some(hold) = state.press_hold {
-                if !hold.fired && hold.started_at.elapsed() >= HOLD_THRESHOLD {
-                    if let Some(h) = &mut state.press_hold {
-                        h.fired = true;
-                    }
-                    apply_life_delta(state, hold.seat, hold.sign * 10);
+            let mut fire = None;
+            if let Some(hold) = &mut state.press_hold {
+                let now = Instant::now();
+                let should_fire = match hold.last_fired_at {
+                    None => now.duration_since(hold.started_at) >= HOLD_THRESHOLD,
+                    Some(last) => now.duration_since(last) >= HOLD_THRESHOLD,
+                };
+                if should_fire {
+                    hold.last_fired_at = Some(now);
+                    fire = Some((hold.target, hold.sign));
                 }
+            }
+            if let Some((target, sign)) = fire {
+                apply_counter_delta(state, target, sign * 10);
             }
             (iced::Task::none(), None)
         }
@@ -262,14 +279,6 @@ pub fn update(
         }
         GameMessage::EndDamageFocus => {
             state.damage_focus = None;
-            (iced::Task::none(), None)
-        }
-        GameMessage::PoisonDelta(seat, delta) => {
-            apply_poison_delta(state, seat, delta);
-            (iced::Task::none(), None)
-        }
-        GameMessage::CommanderDamageDelta(target, source, delta) => {
-            apply_damage_delta(state, target, source, delta);
             (iced::Task::none(), None)
         }
         GameMessage::ToggleEliminated(seat) => {
@@ -366,6 +375,16 @@ fn apply_damage_delta(state: &mut GameState, target: usize, source: usize, delta
     }
     state.check_hard_elimination(target);
     state.check_zero_life(target);
+}
+
+fn apply_counter_delta(state: &mut GameState, target: CounterTarget, delta: i32) {
+    match target {
+        CounterTarget::Life(seat) => apply_life_delta(state, seat, delta),
+        CounterTarget::Poison(seat) => apply_poison_delta(state, seat, delta),
+        CounterTarget::Damage(target_seat, source_seat) => {
+            apply_damage_delta(state, target_seat, source_seat, delta)
+        }
+    }
 }
 
 fn format_duration(total_seconds: u64) -> String {
@@ -509,55 +528,50 @@ pub fn view<'a>(
         .into()
 }
 
-/// A big, thumb-friendly life +/- control. Tap for +/-1; hold to jump by
-/// +/-10 instead.
-fn life_button(seat: usize, sign: i32, label: &str) -> Element<'_, Message> {
-    mouse_area(
-        container(text(label).size(30))
-            .width(Length::Fixed(72.0))
-            .height(Length::Fixed(72.0))
-            .center_x(Length::Fixed(72.0))
-            .center_y(Length::Fixed(72.0))
-            .style(style::panel),
+/// A big number with the whole left half acting as a "-" zone and the whole
+/// right half as a "+" zone, so you don't have to hit a small button. Tap
+/// for +/-1; hold for +/-10, repeating every couple of seconds while held.
+fn split_counter<'a>(value: i32, target: CounterTarget, height: f32) -> Element<'a, Message> {
+    let zone = |sign: i32, glyph: &'static str, align: iced::alignment::Horizontal| {
+        mouse_area(
+            container(text(glyph).size(20))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(align)
+                .align_y(iced::alignment::Vertical::Center)
+                .padding(18),
+        )
+        .on_press(Message::Game(GameMessage::CounterPressStart(target, sign)))
+        .on_release(Message::Game(GameMessage::CounterPressEnd(target, sign)))
+    };
+
+    let zones = container(
+        row![
+            zone(-1, "\u{2212}", iced::alignment::Horizontal::Left),
+            zone(1, "+", iced::alignment::Horizontal::Right),
+        ]
+        .spacing(0),
     )
-    .on_press(Message::Game(GameMessage::LifePressStart(seat, sign)))
-    .on_release(Message::Game(GameMessage::LifePressEnd(seat, sign)))
-    .into()
+    .width(Length::Fill)
+    .height(Length::Fixed(height))
+    .style(style::panel);
+
+    let number = container(text(value.to_string()).size(52))
+        .width(Length::Fill)
+        .height(Length::Fixed(height))
+        .center_x(Length::Fill)
+        .center_y(Length::Fixed(height));
+
+    stack![zones, number].into()
 }
 
 fn life_tab(index: usize, seat: &Seat) -> Element<'_, Message> {
-    row![
-        life_button(index, -1, "-"),
-        text(seat.life.to_string())
-            .size(48)
-            .width(Length::Fill)
-            .align_x(iced::Alignment::Center),
-        life_button(index, 1, "+"),
-    ]
-    .spacing(14)
-    .align_y(iced::Alignment::Center)
-    .into()
-}
-
-fn counter_button(label: &str, message: Message) -> Element<'_, Message> {
-    button(text(label).size(20))
-        .padding(14)
-        .on_press(message)
-        .into()
+    split_counter(seat.life, CounterTarget::Life(index), 90.0)
 }
 
 fn poison_tab(index: usize, seat: &Seat) -> Element<'_, Message> {
     column![
-        row![
-            counter_button("-", Message::Game(GameMessage::PoisonDelta(index, -1))),
-            text(seat.poison.to_string())
-                .size(44)
-                .width(Length::Fixed(70.0))
-                .align_x(iced::Alignment::Center),
-            counter_button("+", Message::Game(GameMessage::PoisonDelta(index, 1))),
-        ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
+        split_counter(seat.poison, CounterTarget::Poison(index), 80.0),
         text(format!("Lethal at {LETHAL_POISON} poison")).size(11),
     ]
     .spacing(6)
@@ -573,16 +587,7 @@ fn damage_focus_tab(source: usize, target: usize, state: &GameState) -> Element<
     let target_name = state.seats[target].player.name.clone();
     column![
         text(format!("Damage dealt to {target_name}")).size(13),
-        row![
-            counter_button("-", Message::Game(GameMessage::CommanderDamageDelta(target, source, -1))),
-            text(amount.to_string())
-                .size(44)
-                .width(Length::Fixed(70.0))
-                .align_x(iced::Alignment::Center),
-            counter_button("+", Message::Game(GameMessage::CommanderDamageDelta(target, source, 1))),
-        ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
+        split_counter(amount, CounterTarget::Damage(target, source), 80.0),
         text(format!("Lethal at {LETHAL_COMMANDER_DAMAGE}")).size(11),
     ]
     .spacing(8)
@@ -640,10 +645,11 @@ fn seat_panel<'a>(
 ) -> Element<'a, Message> {
     let seat = &state.seats[index];
     let is_active = state.active_seat == index;
-    let lethal = seat.is_lethal();
-    let out = seat.eliminated || lethal;
 
-    if out {
+    // `eliminated` alone gates this, not a live re-check of the stats:
+    // otherwise tapping "Back In" while poison/damage is still at a lethal
+    // number would immediately re-flag them as out on the very next render.
+    if seat.eliminated {
         return eliminated_tile(index, seat, image_cache);
     }
 

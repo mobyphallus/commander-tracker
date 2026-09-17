@@ -57,17 +57,6 @@ impl Seat {
     pub fn damage_from(&self, seat_index: usize) -> i32 {
         *self.commander_damage_taken.get(&seat_index).unwrap_or(&0)
     }
-
-    /// Whether the rules would currently call this seat eliminated, independent
-    /// of the manual `eliminated` flag a group can still toggle by hand.
-    pub fn is_lethal(&self) -> bool {
-        self.life <= 0
-            || self.poison >= LETHAL_POISON
-            || self
-                .commander_damage_taken
-                .values()
-                .any(|&d| d >= LETHAL_COMMANDER_DAMAGE)
-    }
 }
 
 pub const STARTING_LIFE: i32 = 40;
