@@ -1,5 +1,6 @@
 mod app;
 mod db;
+mod layout;
 mod model;
 mod screens;
 mod scryfall;

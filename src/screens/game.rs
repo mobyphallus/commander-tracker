@@ -8,6 +8,7 @@ use rusqlite::Connection;
 
 use crate::app::Message;
 use crate::db;
+use crate::layout::{self, TableLayout};
 use crate::model::{FinishedGame, KillEvent, Seat, LETHAL_COMMANDER_DAMAGE, LETHAL_POISON, WinReason};
 use crate::style;
 
@@ -19,8 +20,12 @@ pub enum SeatTab {
 
 pub struct GameState {
     pub seats: Vec<Seat>,
+    pub table_layout: TableLayout,
     pub started_at: chrono::DateTime<Utc>,
     pub active_seat: usize,
+    /// The 1-indexed count of individual turns taken so far this game,
+    /// including the one in progress.
+    pub turn_number: u32,
     pub turn_seconds: u64,
     pub game_seconds: u64,
     pub paused: bool,
@@ -34,11 +39,10 @@ pub struct GameState {
     pub pending_winner: Option<usize>,
     pub pending_reason: Option<WinReason>,
     /// A counter zone currently held down; holding it applies +/-10 every
-    /// couple of seconds instead of the normal +/-1 on release.
+    /// couple of seconds instead of the normal +/-1 on release, and an
+    /// upward drag past the swipe threshold turns it into opening the
+    /// action menu instead.
     pub press_hold: Option<PressHold>,
-    /// An upward swipe in progress on a seat tile, tracked until it crosses
-    /// the threshold that opens that seat's action menu.
-    pub swipe: Option<SwipeState>,
     /// Which seat's action menu (Commander Damage / Poison / Mark Out /
     /// Declare Winner) is currently open, if any.
     pub action_menu_for: Option<usize>,
@@ -58,18 +62,18 @@ pub enum CounterTarget {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PressHold {
+    pub seat: usize,
     pub target: CounterTarget,
     pub sign: i32,
     pub started_at: Instant,
     /// None until the first +/-10 fires; then tracks the last time it fired
     /// so continuing to hold repeats it every `HOLD_THRESHOLD`.
     pub last_fired_at: Option<Instant>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SwipeState {
-    pub seat: usize,
-    pub baseline_y: Option<f32>,
+    /// Since the +/- zones now cover the whole tile, an upward drag past
+    /// the swipe threshold cancels the tap/hold and opens the action menu
+    /// instead - tracked here rather than as a separate gesture.
+    pub swipe_baseline_y: Option<f32>,
+    pub became_swipe: bool,
 }
 
 /// Pixels of upward swipe needed to open a seat's action menu.
@@ -79,13 +83,15 @@ const SWIPE_OPEN_THRESHOLD: f32 = 55.0;
 const HOLD_THRESHOLD: Duration = Duration::from_secs(2);
 
 impl GameState {
-    pub fn new(seats: Vec<Seat>) -> Self {
+    pub fn new(seats: Vec<Seat>, table_layout: TableLayout) -> Self {
         let seat_tab = vec![SeatTab::Life; seats.len()];
         let zero_life_prompt_dismissed = vec![false; seats.len()];
         Self {
             seats,
+            table_layout,
             started_at: Utc::now(),
             active_seat: 0,
+            turn_number: 1,
             turn_seconds: 0,
             game_seconds: 0,
             paused: false,
@@ -97,7 +103,6 @@ impl GameState {
             pending_winner: None,
             pending_reason: None,
             press_hold: None,
-            swipe: None,
             action_menu_for: None,
             damage_focus: None,
         }
@@ -139,12 +144,10 @@ pub enum GameMessage {
     TogglePause,
     NextTurn,
     SwitchTab(usize, SeatTab),
-    CounterPressStart(CounterTarget, i32),
+    CounterPressStart(usize, CounterTarget, i32),
+    CounterPressMove(CounterTarget, i32, f32),
     CounterPressEnd(CounterTarget, i32),
     HoldTick,
-    SwipeStart(usize),
-    SwipeMove(usize, f32),
-    SwipeEnd,
     CloseActionMenu,
     StartDamageFocus(usize),
     EndDamageFocus,
@@ -193,6 +196,7 @@ pub fn update(
             }
             state.active_seat = next;
             state.turn_seconds = 0;
+            state.turn_number += 1;
             (iced::Task::none(), None)
         }
         GameMessage::SwitchTab(seat, tab) => {
@@ -202,18 +206,46 @@ pub fn update(
             state.action_menu_for = None;
             (iced::Task::none(), None)
         }
-        GameMessage::CounterPressStart(target, sign) => {
+        GameMessage::CounterPressStart(seat, target, sign) => {
             state.press_hold = Some(PressHold {
+                seat,
                 target,
                 sign,
                 started_at: Instant::now(),
                 last_fired_at: None,
+                swipe_baseline_y: None,
+                became_swipe: false,
             });
+            (iced::Task::none(), None)
+        }
+        GameMessage::CounterPressMove(target, sign, y) => {
+            let mut open_seat = None;
+            if let Some(hold) = &mut state.press_hold {
+                if hold.target == target && hold.sign == sign && !hold.became_swipe {
+                    match hold.swipe_baseline_y {
+                        None => hold.swipe_baseline_y = Some(y),
+                        Some(baseline) => {
+                            if baseline - y >= SWIPE_OPEN_THRESHOLD {
+                                hold.became_swipe = true;
+                                open_seat = Some(hold.seat);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(seat) = open_seat {
+                state.action_menu_for = Some(seat);
+                state.press_hold = None;
+            }
             (iced::Task::none(), None)
         }
         GameMessage::CounterPressEnd(target, sign) => {
             if let Some(hold) = state.press_hold.take() {
-                if hold.target == target && hold.sign == sign && hold.last_fired_at.is_none() {
+                if hold.target == target
+                    && hold.sign == sign
+                    && hold.last_fired_at.is_none()
+                    && !hold.became_swipe
+                {
                     apply_counter_delta(state, target, sign);
                 }
             }
@@ -235,37 +267,6 @@ pub fn update(
             if let Some((target, sign)) = fire {
                 apply_counter_delta(state, target, sign * 10);
             }
-            (iced::Task::none(), None)
-        }
-        GameMessage::SwipeStart(seat) => {
-            state.swipe = Some(SwipeState {
-                seat,
-                baseline_y: None,
-            });
-            (iced::Task::none(), None)
-        }
-        GameMessage::SwipeMove(seat, y) => {
-            let mut opened = false;
-            if let Some(swipe) = &mut state.swipe {
-                if swipe.seat == seat {
-                    match swipe.baseline_y {
-                        None => swipe.baseline_y = Some(y),
-                        Some(baseline) => {
-                            if baseline - y >= SWIPE_OPEN_THRESHOLD {
-                                opened = true;
-                            }
-                        }
-                    }
-                }
-            }
-            if opened {
-                state.action_menu_for = Some(seat);
-                state.swipe = None;
-            }
-            (iced::Task::none(), None)
-        }
-        GameMessage::SwipeEnd => {
-            state.swipe = None;
             (iced::Task::none(), None)
         }
         GameMessage::CloseActionMenu => {
@@ -335,6 +336,7 @@ pub fn update(
                     seats: state.seats.clone(),
                     winner_seat: Some(winner),
                     win_reason: Some(reason),
+                    ending_turn: state.turn_number,
                     kills: state.kills.clone(),
                     started_at: state.started_at,
                     ended_at: Utc::now(),
@@ -391,16 +393,6 @@ fn format_duration(total_seconds: u64) -> String {
     format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
 }
 
-fn grid_columns(n: usize) -> usize {
-    match n {
-        0 | 1 | 2 => 2,
-        3 => 3,
-        4 => 2,
-        5 | 6 => 3,
-        _ => 4,
-    }
-}
-
 pub fn view<'a>(
     state: &'a GameState,
     image_cache: &'a HashMap<String, image::Handle>,
@@ -418,7 +410,8 @@ pub fn view<'a>(
     let top_bar = container(
         row![
             text(format!(
-                "{}'s turn - {}",
+                "Turn {} - {}'s turn - {}",
+                state.turn_number,
                 state.seats[state.active_seat].player.name,
                 format_duration(state.turn_seconds)
             ))
@@ -488,24 +481,7 @@ pub fn view<'a>(
         ..container::Style::default()
     });
 
-    let seat_count = state.seats.len();
-    let cols = grid_columns(seat_count);
-    let mut rows_el: Vec<Element<Message>> = Vec::new();
-    let mut i = 0;
-    while i < seat_count {
-        let end = (i + cols).min(seat_count);
-        let row_panels: Vec<Element<Message>> = (i..end)
-            .map(|idx| seat_panel(idx, state, image_cache))
-            .collect();
-        rows_el.push(
-            row(row_panels)
-                .spacing(12)
-                .height(Length::FillPortion(1))
-                .into(),
-        );
-        i = end;
-    }
-    let board = column(rows_el).spacing(12).height(Length::Fill);
+    let board = layout::render_table(&state.table_layout, |idx| seat_panel(idx, state, image_cache));
 
     let board_with_timer = stack![
         board,
@@ -531,68 +507,70 @@ pub fn view<'a>(
 /// A big number with the whole left half acting as a "-" zone and the whole
 /// right half as a "+" zone, so you don't have to hit a small button. Tap
 /// for +/-1; hold for +/-10, repeating every couple of seconds while held.
-fn split_counter<'a>(value: i32, target: CounterTarget, height: f32) -> Element<'a, Message> {
-    let zone = |sign: i32, glyph: &'static str, align: iced::alignment::Horizontal| {
+/// A huge centered number over full-tile-height, mostly-invisible left/right
+/// tap zones - the left half subtracts, the right half adds. Tap for +/-1;
+/// hold for +/-10, repeating while held; drag up past the threshold cancels
+/// the tap and opens the seat's action menu instead.
+fn split_counter<'a>(seat: usize, value: i32, target: CounterTarget) -> Element<'a, Message> {
+    let zone = |sign: i32, glyph: &'static str| {
         mouse_area(
-            container(text(glyph).size(20))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(align)
-                .align_y(iced::alignment::Vertical::Center)
-                .padding(18),
+            container(
+                text(glyph)
+                    .size(34)
+                    .color(Color::from_rgba(1.0, 1.0, 1.0, 0.45)),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
         )
-        .on_press(Message::Game(GameMessage::CounterPressStart(target, sign)))
+        .on_press(Message::Game(GameMessage::CounterPressStart(seat, target, sign)))
+        .on_move(move |point| Message::Game(GameMessage::CounterPressMove(target, sign, point.y)))
         .on_release(Message::Game(GameMessage::CounterPressEnd(target, sign)))
     };
 
-    let zones = container(
-        row![
-            zone(-1, "\u{2212}", iced::alignment::Horizontal::Left),
-            zone(1, "+", iced::alignment::Horizontal::Right),
-        ]
-        .spacing(0),
+    let zones = row![zone(-1, "\u{2212}"), zone(1, "+")]
+        .spacing(0)
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    let number = container(
+        text(value.to_string())
+            .size(76)
+            .color(Color::WHITE),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(height))
-    .style(style::panel);
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill);
 
-    let number = container(text(value.to_string()).size(52))
-        .width(Length::Fill)
-        .height(Length::Fixed(height))
-        .center_x(Length::Fill)
-        .center_y(Length::Fixed(height));
-
-    stack![zones, number].into()
+    stack![zones, number].width(Length::Fill).height(Length::Fill).into()
 }
 
-fn life_tab(index: usize, seat: &Seat) -> Element<'_, Message> {
-    split_counter(seat.life, CounterTarget::Life(index), 90.0)
-}
-
-fn poison_tab(index: usize, seat: &Seat) -> Element<'_, Message> {
-    column![
-        split_counter(seat.poison, CounterTarget::Poison(index), 80.0),
-        text(format!("Lethal at {LETHAL_POISON} poison")).size(11),
-    ]
-    .spacing(6)
-    .align_x(iced::Alignment::Center)
-    .into()
-}
-
-/// Shown on an opponent's own tile (in place of their life total) while
-/// someone else is in commander-damage-logging mode: a quick +/- on the
-/// damage *this* seat's commander has dealt to the seat being focused.
-fn damage_focus_tab(source: usize, target: usize, state: &GameState) -> Element<'_, Message> {
-    let amount = state.seats[target].damage_from(source);
-    let target_name = state.seats[target].player.name.clone();
-    column![
-        text(format!("Damage dealt to {target_name}")).size(13),
-        split_counter(amount, CounterTarget::Damage(target, source), 80.0),
-        text(format!("Lethal at {LETHAL_COMMANDER_DAMAGE}")).size(11),
-    ]
-    .spacing(8)
-    .align_x(iced::Alignment::Center)
-    .into()
+/// What a seat's counter currently shows: the value, what it edits, and a
+/// short subtitle for the caption (commander name / "Poison" / who the
+/// damage is being logged against).
+fn active_counter(index: usize, state: &GameState) -> (i32, CounterTarget, String) {
+    if let Some(focus) = state.damage_focus {
+        if focus != index {
+            let amount = state.seats[focus].damage_from(index);
+            let target_name = state.seats[focus].player.name.clone();
+            return (
+                amount,
+                CounterTarget::Damage(focus, index),
+                format!("Damage to {target_name} (lethal at {LETHAL_COMMANDER_DAMAGE})"),
+            );
+        }
+    }
+    let seat = &state.seats[index];
+    match state.seat_tab[index] {
+        SeatTab::Life => (seat.life, CounterTarget::Life(index), seat.commander.name.clone()),
+        SeatTab::Poison => (
+            seat.poison,
+            CounterTarget::Poison(index),
+            format!("Poison (lethal at {LETHAL_POISON})"),
+        ),
+    }
 }
 
 fn action_menu_item(label: &str, message: Message) -> Element<'_, Message> {
@@ -667,57 +645,43 @@ fn seat_panel<'a>(
             .into(),
     };
 
+    let (value, target, subtitle) = active_counter(index, state);
+
     let caption = container(
         column![
             text(seat.player.name.clone()).size(20),
-            text(seat.commander.name.clone()).size(13),
+            text(subtitle).size(12),
         ]
         .spacing(2),
     )
     .padding(10)
     .width(Length::Fill)
     .style(|_theme: &iced::Theme| container::Style {
-        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.45).into()),
         text_color: Some(Color::WHITE),
         ..container::Style::default()
     });
 
-    let body = match state.damage_focus {
-        Some(focus) if focus != index => damage_focus_tab(index, focus, state),
-        _ => match state.seat_tab[index] {
-            SeatTab::Life => life_tab(index, seat),
-            SeatTab::Poison => poison_tab(index, seat),
-        },
-    };
-
-    let controls = container(
-        column![
-            body,
-            button(text("Commander Killed").size(16))
-                .padding(14)
-                .width(Length::Fill)
-                .on_press(Message::Game(GameMessage::MarkKilled(index))),
-        ]
-        .spacing(10),
+    let kill_button = container(
+        button(text("Commander Killed").size(14))
+            .padding(10)
+            .on_press(Message::Game(GameMessage::MarkKilled(index))),
     )
-    .padding(10)
     .width(Length::Fill)
-    .style(|_theme: &iced::Theme| container::Style {
-        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.62).into()),
-        text_color: Some(Color::WHITE),
-        ..container::Style::default()
-    });
+    .padding(10)
+    .center_x(Length::Fill);
 
-    // Art fills the entire tile; the name sits on top of it up high, and the
-    // interactive controls float over the bottom on their own scrim.
-    let overlay = column![caption, iced::widget::vertical_space(), controls]
+    // Top caption and bottom kill button float above everything else in the
+    // stack, so they still capture their own taps; the vertical space
+    // between them is empty and lets taps fall through to the counter zones.
+    let chrome = column![caption, iced::widget::vertical_space(), kill_button]
         .width(Length::Fill)
         .height(Length::Fill);
 
     let card: Element<Message> = if state.action_menu_for == Some(index) {
         stack![art, action_menu(index, seat)].into()
     } else {
-        stack![art, overlay].into()
+        stack![art, split_counter(index, value, target), chrome].into()
     };
 
     let style_fn: fn(&iced::Theme) -> container::Style = if is_active {
@@ -726,13 +690,7 @@ fn seat_panel<'a>(
         style::panel
     };
 
-    let swipeable = mouse_area(card)
-        .on_press(Message::Game(GameMessage::SwipeStart(index)))
-        .on_move(move |point| Message::Game(GameMessage::SwipeMove(index, point.y)))
-        .on_release(Message::Game(GameMessage::SwipeEnd))
-        .on_exit(Message::Game(GameMessage::SwipeEnd));
-
-    container(swipeable)
+    container(card)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style_fn)

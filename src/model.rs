@@ -129,6 +129,8 @@ pub struct FinishedGame {
     pub seats: Vec<Seat>,
     pub winner_seat: Option<usize>,
     pub win_reason: Option<WinReason>,
+    /// The 1-indexed turn count when the game ended.
+    pub ending_turn: u32,
     pub kills: Vec<KillEvent>,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub ended_at: chrono::DateTime<chrono::Utc>,
@@ -160,6 +162,7 @@ pub struct GameSummary {
     pub winner_name: Option<String>,
     pub winner_commander: Option<String>,
     pub win_reason: Option<WinReason>,
+    pub ending_turn: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +189,7 @@ pub struct GameDetail {
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub ended_at: chrono::DateTime<chrono::Utc>,
     pub win_reason: Option<WinReason>,
+    pub ending_turn: i64,
     pub seats: Vec<GameDetailSeat>,
     pub kills: Vec<GameDetailKill>,
 }

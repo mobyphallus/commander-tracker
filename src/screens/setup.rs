@@ -6,6 +6,7 @@ use rusqlite::Connection;
 
 use crate::app::Message;
 use crate::db;
+use crate::layout::{self, TableLayout};
 use crate::model::{Commander, Player, Seat, STARTING_LIFE};
 use crate::scryfall::{self, ScryfallCard};
 use crate::style;
@@ -16,6 +17,7 @@ pub const MAX_POD: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupStage {
     ChoosePodSize,
+    ChooseLayout,
     Grid,
 }
 
@@ -41,6 +43,7 @@ pub struct SeatSetup {
 pub struct SetupState {
     pub stage: SetupStage,
     pub pod_size: usize,
+    pub table_layout: Option<TableLayout>,
     pub seats: Vec<SeatSetup>,
     pub editing_seat: Option<usize>,
     pub new_player_name: String,
@@ -58,6 +61,7 @@ impl SetupState {
         Self {
             stage: SetupStage::ChoosePodSize,
             pod_size: 0,
+            table_layout: None,
             seats: Vec::new(),
             editing_seat: None,
             new_player_name: String::new(),
@@ -102,6 +106,8 @@ impl SetupState {
 pub enum SetupMessage {
     ChoosePodSize(usize),
     BackToPodSizeChoice,
+    ChooseLayout(TableLayout),
+    BackToLayoutChoice,
     EditSeat(usize),
     BackToGrid,
     NewPlayerNameChanged(String),
@@ -122,7 +128,7 @@ pub enum SetupMessage {
 }
 
 pub enum Action {
-    StartGame(Vec<Seat>),
+    StartGame(Vec<Seat>, TableLayout),
 }
 
 fn load_portrait_task(commander: &Commander) -> Task<Message> {
@@ -154,11 +160,23 @@ pub fn update(
         SetupMessage::ChoosePodSize(n) => {
             state.pod_size = n;
             state.seats = vec![SeatSetup::default(); n];
-            state.stage = SetupStage::Grid;
+            state.table_layout = None;
+            state.stage = SetupStage::ChooseLayout;
             (Task::none(), None)
         }
         SetupMessage::BackToPodSizeChoice => {
             state.stage = SetupStage::ChoosePodSize;
+            state.editing_seat = None;
+            state.clear_editor_fields();
+            (Task::none(), None)
+        }
+        SetupMessage::ChooseLayout(layout) => {
+            state.table_layout = Some(layout);
+            state.stage = SetupStage::Grid;
+            (Task::none(), None)
+        }
+        SetupMessage::BackToLayoutChoice => {
+            state.stage = SetupStage::ChooseLayout;
             state.editing_seat = None;
             state.clear_editor_fields();
             (Task::none(), None)
@@ -361,6 +379,10 @@ pub fn update(
             (Task::none(), None)
         }
         SetupMessage::StartGame => {
+            let Some(layout) = state.table_layout.clone() else {
+                state.error = Some("Pick a table layout first.".into());
+                return (Task::none(), None);
+            };
             if state.all_seats_ready() {
                 let seats: Vec<Seat> = state
                     .seats
@@ -373,22 +395,12 @@ pub fn update(
                         )
                     })
                     .collect();
-                (Task::none(), Some(Action::StartGame(seats)))
+                (Task::none(), Some(Action::StartGame(seats, layout)))
             } else {
                 state.error = Some("Every seat needs a player and a commander.".into());
                 (Task::none(), None)
             }
         }
-    }
-}
-
-fn grid_columns(n: usize) -> usize {
-    match n {
-        0 | 1 | 2 => 2,
-        3 => 3,
-        4 => 2,
-        5 | 6 => 3,
-        _ => 4,
     }
 }
 
@@ -399,6 +411,7 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     match state.stage {
         SetupStage::ChoosePodSize => pod_size_view(),
+        SetupStage::ChooseLayout => layout_choice_view(state),
         SetupStage::Grid => {
             if state.editing_seat.is_some() {
                 editor_overlay(state, players_cache, image_cache)
@@ -407,6 +420,64 @@ pub fn view<'a>(
             }
         }
     }
+}
+
+/// A small numbered-box diagram of a layout, using the same rendering logic
+/// as the real board so it's an accurate preview, just shrunk down.
+fn layout_preview(table: &TableLayout) -> Element<'static, Message> {
+    container(layout::render_table(table, |idx| {
+        container(text((idx + 1).to_string()).size(16))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(style::panel)
+            .into()
+    }))
+    .width(Length::Fixed(160.0))
+    .height(Length::Fixed(100.0))
+    .into()
+}
+
+fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
+    let options = layout::options_for(state.pod_size);
+
+    let cards = row(options
+        .into_iter()
+        .map(|opt| {
+            let label = opt.name.clone();
+            button(
+                column![layout_preview(&opt), text(label).size(15)]
+                    .spacing(8)
+                    .align_x(iced::Alignment::Center),
+            )
+            .padding(12)
+            .style(button::secondary)
+            .on_press(Message::Setup(SetupMessage::ChooseLayout(opt)))
+            .into()
+        })
+        .collect::<Vec<Element<Message>>>())
+    .spacing(20)
+    .wrap();
+
+    container(
+        column![
+            text("How are you sitting?").size(30),
+            text(format!("{} players - pick the arrangement that matches your table", state.pod_size)).size(15),
+            scrollable(cards).width(Length::Fill),
+            button(text("Back").size(16))
+                .padding(10)
+                .on_press(Message::Setup(SetupMessage::BackToPodSizeChoice)),
+        ]
+        .spacing(24)
+        .align_x(iced::Alignment::Center)
+        .padding(20),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .into()
 }
 
 fn pod_size_view<'a>() -> Element<'a, Message> {
@@ -447,32 +518,26 @@ fn grid_view<'a>(
         row![
             text("Set up your pod").size(26),
             iced::widget::horizontal_space(),
+            button(text("Change Layout").size(14))
+                .padding(10)
+                .on_press(Message::Setup(SetupMessage::BackToLayoutChoice)),
             button(text("Change Player Count").size(14))
                 .padding(10)
                 .on_press(Message::Setup(SetupMessage::BackToPodSizeChoice)),
         ]
+        .spacing(8)
         .align_y(iced::Alignment::Center),
     )
     .padding(14)
     .width(Length::Fill)
     .style(style::header);
 
-    let cols = grid_columns(state.seats.len());
-    let mut rows_el: Vec<Element<Message>> = Vec::new();
-    let mut i = 0;
-    while i < state.seats.len() {
-        let end = (i + cols).min(state.seats.len());
-        let tiles: Vec<Element<Message>> = (i..end)
-            .map(|idx| seat_tile(idx, &state.seats[idx], image_cache))
-            .collect();
-        rows_el.push(
-            row(tiles)
-                .spacing(14)
-                .height(Length::FillPortion(1))
-                .into(),
-        );
-        i = end;
-    }
+    let board = match &state.table_layout {
+        Some(table) => {
+            layout::render_table(table, |idx| seat_tile(idx, &state.seats[idx], image_cache))
+        }
+        None => text("Pick a layout first.").size(16).into(),
+    };
 
     let mut start_button = button(text("Start Game").size(24)).padding(20);
     if state.all_seats_ready() {
@@ -481,7 +546,7 @@ fn grid_view<'a>(
             .on_press(Message::Setup(SetupMessage::StartGame));
     }
 
-    let mut content = column![header, column(rows_el).spacing(14).height(Length::Fill)].spacing(14);
+    let mut content = column![header, container(board).height(Length::Fill)].spacing(14);
 
     if let Some(e) = &state.error {
         content = content.push(

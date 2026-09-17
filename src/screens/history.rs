@@ -54,7 +54,11 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
                 let reason = g.win_reason.map(|r| r.label()).unwrap_or("-");
                 button(column![
                     text(g.started_at.format("%Y-%m-%d %H:%M").to_string()).size(14),
-                    text(format!("{winner} ({reason}) - {} players", g.pod_size)).size(16),
+                    text(format!(
+                        "{winner} ({reason}, turn {}) - {} players",
+                        g.ending_turn, g.pod_size
+                    ))
+                    .size(16),
                 ])
                 .padding(12)
                 .width(Length::Fill)
@@ -147,8 +151,9 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
             .align_y(iced::Alignment::Center),
             column(kill_lines).spacing(4),
             text(format!(
-                "Win condition: {}",
-                detail.win_reason.map(|r| r.label()).unwrap_or("-")
+                "Win condition: {} - ended on turn {}",
+                detail.win_reason.map(|r| r.label()).unwrap_or("-"),
+                detail.ending_turn
             ))
             .size(18),
             scrollable(seat_rows).height(Length::Fill),

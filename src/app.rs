@@ -114,8 +114,8 @@ impl App {
             Message::Setup(msg) => {
                 let task = if let Screen::Setup(state) = &mut self.screen {
                     let (task, action) = setup::update(state, &self.conn, msg);
-                    if let Some(setup::Action::StartGame(seats)) = action {
-                        self.screen = Screen::Game(game::GameState::new(seats));
+                    if let Some(setup::Action::StartGame(seats, layout)) = action {
+                        self.screen = Screen::Game(game::GameState::new(seats, layout));
                     }
                     task
                 } else {

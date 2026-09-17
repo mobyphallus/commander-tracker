@@ -45,7 +45,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
             started_at  TEXT NOT NULL,
             ended_at    TEXT NOT NULL,
             pod_size    INTEGER NOT NULL,
-            win_reason  TEXT
+            win_reason  TEXT,
+            ending_turn INTEGER NOT NULL DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS game_players (
@@ -83,7 +84,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
 
-    migrate_scryfall_id_to_oracle_id(conn)
+    migrate_scryfall_id_to_oracle_id(conn)?;
+    migrate_add_ending_turn(conn)
 }
 
 /// Early builds keyed `commanders` by a specific printing's Scryfall id. That
@@ -95,6 +97,18 @@ fn migrate_scryfall_id_to_oracle_id(conn: &Connection) -> rusqlite::Result<()> {
         .exists([])?;
     if has_old_column {
         conn.execute_batch("ALTER TABLE commanders RENAME COLUMN scryfall_id TO oracle_id;")?;
+    }
+    Ok(())
+}
+
+fn migrate_add_ending_turn(conn: &Connection) -> rusqlite::Result<()> {
+    let has_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('games') WHERE name = 'ending_turn'")?
+        .exists([])?;
+    if !has_column {
+        conn.execute_batch(
+            "ALTER TABLE games ADD COLUMN ending_turn INTEGER NOT NULL DEFAULT 1;",
+        )?;
     }
     Ok(())
 }
@@ -203,12 +217,13 @@ pub fn upsert_commander(
 pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO games (started_at, ended_at, pod_size, win_reason) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO games (started_at, ended_at, pod_size, win_reason, ending_turn) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             game.started_at.to_rfc3339(),
             game.ended_at.to_rfc3339(),
             game.seats.len() as i64,
-            game.win_reason.map(|r| r.as_db_str())
+            game.win_reason.map(|r| r.as_db_str()),
+            game.ending_turn as i64
         ],
     )?;
     let game_id = tx.last_insert_rowid();
@@ -323,7 +338,7 @@ fn parse_dt(s: &str) -> chrono::DateTime<chrono::Utc> {
 pub fn list_games(conn: &Connection) -> rusqlite::Result<Vec<GameSummary>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT g.id, g.started_at, g.ended_at, g.pod_size, g.win_reason, p.name, c.name
+        SELECT g.id, g.started_at, g.ended_at, g.pod_size, g.win_reason, p.name, c.name, g.ending_turn
         FROM games g
         LEFT JOIN game_players gp ON gp.game_id = g.id AND gp.won = 1
         LEFT JOIN players p ON p.id = gp.player_id
@@ -343,17 +358,19 @@ pub fn list_games(conn: &Connection) -> rusqlite::Result<Vec<GameSummary>> {
             win_reason: win_reason.map(|s| WinReason::from_db_str(&s)),
             winner_name: row.get(5)?,
             winner_commander: row.get(6)?,
+            ending_turn: row.get(7)?,
         })
     })?;
     rows.collect()
 }
 
 pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDetail> {
-    let (started_at, ended_at, win_reason): (String, String, Option<String>) = conn.query_row(
-        "SELECT started_at, ended_at, win_reason FROM games WHERE id = ?1",
-        params![game_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+    let (started_at, ended_at, win_reason, ending_turn): (String, String, Option<String>, i64) = conn
+        .query_row(
+            "SELECT started_at, ended_at, win_reason, ending_turn FROM games WHERE id = ?1",
+            params![game_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
 
     struct SeatRow {
         id: i64,
@@ -447,6 +464,7 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
         started_at: parse_dt(&started_at),
         ended_at: parse_dt(&ended_at),
         win_reason: win_reason.map(|s| WinReason::from_db_str(&s)),
+        ending_turn,
         seats,
         kills,
     })
