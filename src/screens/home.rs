@@ -9,6 +9,7 @@ pub enum HomeMessage {
     StartGame,
     ViewStats,
     ViewHistory,
+    ManagePlayers,
 }
 
 fn big_button<'a>(label: &'a str, message: Message) -> Element<'a, Message> {
@@ -40,6 +41,7 @@ pub fn view<'a>() -> Element<'a, Message> {
                 big_button("Start Game", Message::Home(HomeMessage::StartGame)),
                 big_button("Stats", Message::Home(HomeMessage::ViewStats)),
                 big_button("Game History", Message::Home(HomeMessage::ViewHistory)),
+                big_button("Manage Players", Message::Home(HomeMessage::ManagePlayers)),
             ]
             .spacing(24)
             .align_x(iced::Alignment::Center),

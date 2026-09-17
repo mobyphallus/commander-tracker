@@ -118,6 +118,14 @@ pub fn create_player(conn: &Connection, name: &str) -> rusqlite::Result<Player> 
     })
 }
 
+pub fn rename_player(conn: &Connection, id: i64, new_name: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE players SET name = ?1 WHERE id = ?2",
+        params![new_name, id],
+    )?;
+    Ok(())
+}
+
 fn commander_from_row(row: &rusqlite::Row) -> rusqlite::Result<Commander> {
     Ok(Commander {
         id: row.get(0)?,

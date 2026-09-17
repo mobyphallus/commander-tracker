@@ -6,7 +6,7 @@ use rusqlite::Connection;
 
 use crate::db;
 use crate::model::Player;
-use crate::screens::{game, history, home, setup, stats};
+use crate::screens::{game, history, home, players, setup, stats};
 use crate::style;
 
 pub enum Screen {
@@ -15,6 +15,7 @@ pub enum Screen {
     Game(game::GameState),
     Stats(stats::StatsState),
     History(history::HistoryState),
+    Players(players::PlayersState),
 }
 
 pub struct App {
@@ -30,6 +31,7 @@ pub enum Message {
     Setup(setup::SetupMessage),
     Game(game::GameMessage),
     History(history::HistoryMessage),
+    Players(players::PlayersMessage),
     ArtLoaded(String, Result<Vec<u8>, String>),
     GoHome,
 }
@@ -103,6 +105,9 @@ impl App {
                     home::HomeMessage::ViewHistory => {
                         self.screen = Screen::History(history::HistoryState::load(&self.conn));
                     }
+                    home::HomeMessage::ManagePlayers => {
+                        self.screen = Screen::Players(players::PlayersState::load(&self.conn));
+                    }
                 }
                 Task::none()
             }
@@ -142,6 +147,13 @@ impl App {
                 }
                 Task::none()
             }
+            Message::Players(msg) => {
+                if let Screen::Players(state) = &mut self.screen {
+                    players::update(state, &self.conn, msg);
+                }
+                self.players = db::list_players(&self.conn).unwrap_or_default();
+                Task::none()
+            }
         }
     }
 
@@ -152,6 +164,7 @@ impl App {
             Screen::Game(state) => game::view(state, &self.image_cache),
             Screen::Stats(state) => stats::view(state),
             Screen::History(state) => history::view(state),
+            Screen::Players(state) => players::view(state),
         }
     }
 }
