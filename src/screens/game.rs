@@ -439,16 +439,6 @@ fn seat_panel<'a>(
         ..container::Style::default()
     });
 
-    let portrait_area = container(stack![
-        art,
-        container(caption)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_y(iced::alignment::Vertical::Bottom),
-    ])
-    .width(Length::Fill)
-    .height(Length::FillPortion(3));
-
     let tabs = row![
         tab_button("Life", SeatTab::Life, index, state.seat_tab[index]),
         tab_button("Damage", SeatTab::Damage, index, state.seat_tab[index]),
@@ -462,28 +452,42 @@ fn seat_panel<'a>(
         SeatTab::Poison => poison_tab(index, seat),
     };
 
-    let controls = column![
-        tabs,
-        body,
-        row![
-            button(text(if seat.eliminated { "Back In" } else { "Mark Out" }).size(13))
-                .padding(7)
-                .style(if seat.eliminated { button::secondary } else { button::danger })
-                .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
-            button(text("Commander Killed").size(13))
-                .padding(7)
-                .on_press(Message::Game(GameMessage::MarkKilled(index))),
+    let controls = container(
+        column![
+            tabs,
+            body,
+            row![
+                button(text(if seat.eliminated { "Back In" } else { "Mark Out" }).size(13))
+                    .padding(7)
+                    .style(if seat.eliminated { button::secondary } else { button::danger })
+                    .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
+                button(text("Commander Killed").size(13))
+                    .padding(7)
+                    .on_press(Message::Game(GameMessage::MarkKilled(index))),
+            ]
+            .spacing(6),
+            button(text("Declare Winner").size(15))
+                .padding(9)
+                .style(button::success)
+                .on_press(Message::Game(GameMessage::StartDeclareWinner(index))),
         ]
-        .spacing(6),
-        button(text("Declare Winner").size(15))
-            .padding(9)
-            .style(button::success)
-            .on_press(Message::Game(GameMessage::StartDeclareWinner(index))),
-    ]
-    .spacing(7)
-    .height(Length::FillPortion(2));
+        .spacing(7),
+    )
+    .padding(10)
+    .width(Length::Fill)
+    .style(|_theme: &iced::Theme| container::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.62).into()),
+        text_color: Some(Color::WHITE),
+        ..container::Style::default()
+    });
 
-    let card = column![portrait_area, controls].spacing(7).height(Length::Fill);
+    // Art fills the entire tile; the name sits on top of it up high, and the
+    // interactive controls float over the bottom on their own scrim.
+    let overlay = column![caption, iced::widget::vertical_space(), controls]
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    let card = stack![art, overlay];
 
     let style_fn: fn(&iced::Theme) -> container::Style = if is_active {
         style::panel_active
@@ -492,7 +496,6 @@ fn seat_panel<'a>(
     };
 
     container(card)
-        .padding(12)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style_fn)
