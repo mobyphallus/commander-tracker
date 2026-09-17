@@ -59,9 +59,21 @@ impl App {
 
     pub fn subscription(&self) -> Subscription<Message> {
         match &self.screen {
-            Screen::Game(state) if !state.paused => {
-                iced::time::every(std::time::Duration::from_secs(1))
-                    .map(|_| Message::Game(game::GameMessage::Tick))
+            Screen::Game(state) => {
+                let mut subs = Vec::new();
+                if !state.paused {
+                    subs.push(
+                        iced::time::every(std::time::Duration::from_secs(1))
+                            .map(|_| Message::Game(game::GameMessage::Tick)),
+                    );
+                }
+                if state.press_hold.is_some() {
+                    subs.push(
+                        iced::time::every(std::time::Duration::from_millis(100))
+                            .map(|_| Message::Game(game::GameMessage::HoldTick)),
+                    );
+                }
+                Subscription::batch(subs)
             }
             _ => Subscription::none(),
         }

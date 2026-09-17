@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use iced::widget::{button, column, container, image, row, scrollable, stack, text};
-use iced::{Color, ContentFit, Element, Length};
+use iced::widget::{button, column, container, image, mouse_area, row, scrollable, stack, text};
+use iced::{Border, Color, ContentFit, Element, Length};
 use rusqlite::Connection;
 
 use crate::app::Message;
@@ -33,7 +34,37 @@ pub struct GameState {
     pub zero_life_prompt_dismissed: Vec<bool>,
     pub pending_winner: Option<usize>,
     pub pending_reason: Option<WinReason>,
+    /// A life +/- button currently held down; a 3s hold applies +/-10 instead
+    /// of the normal +/-1 on release.
+    pub press_hold: Option<PressHold>,
+    /// A swipe in progress over a poison or commander-damage counter.
+    pub drag: Option<DragState>,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct PressHold {
+    pub seat: usize,
+    pub sign: i32,
+    pub started_at: Instant,
+    pub fired: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragTarget {
+    Poison(usize),
+    Damage(usize, usize),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DragState {
+    pub target: DragTarget,
+    pub baseline_y: Option<f32>,
+}
+
+/// Pixels of vertical swipe needed to register one +/-1 step.
+const SWIPE_STEP: f32 = 28.0;
+/// How long a life button must be held before it jumps to +/-10.
+const HOLD_THRESHOLD: Duration = Duration::from_secs(3);
 
 impl GameState {
     pub fn new(seats: Vec<Seat>) -> Self {
@@ -53,6 +84,8 @@ impl GameState {
             zero_life_prompt_dismissed,
             pending_winner: None,
             pending_reason: None,
+            press_hold: None,
+            drag: None,
         }
     }
 
@@ -92,9 +125,12 @@ pub enum GameMessage {
     TogglePause,
     NextTurn,
     SwitchTab(usize, SeatTab),
-    LifeDelta(usize, i32),
-    PoisonDelta(usize, i32),
-    CommanderDamageDelta(usize, usize, i32),
+    LifePressStart(usize, i32),
+    LifePressEnd(usize, i32),
+    HoldTick,
+    DragStart(DragTarget),
+    DragMove(DragTarget, f32),
+    DragEnd,
     ToggleEliminated(usize),
     AnswerZeroLifeCheck(bool),
     MarkKilled(usize),
@@ -148,30 +184,64 @@ pub fn update(
             }
             (iced::Task::none(), None)
         }
-        GameMessage::LifeDelta(seat, delta) => {
-            if let Some(s) = state.seats.get_mut(seat) {
-                s.life += delta;
-            }
-            state.check_zero_life(seat);
+        GameMessage::LifePressStart(seat, sign) => {
+            state.press_hold = Some(PressHold {
+                seat,
+                sign,
+                started_at: Instant::now(),
+                fired: false,
+            });
             (iced::Task::none(), None)
         }
-        GameMessage::PoisonDelta(seat, delta) => {
-            if let Some(s) = state.seats.get_mut(seat) {
-                s.poison = (s.poison + delta).max(0);
+        GameMessage::LifePressEnd(seat, sign) => {
+            if let Some(hold) = state.press_hold.take() {
+                if hold.seat == seat && hold.sign == sign && !hold.fired {
+                    apply_life_delta(state, seat, sign);
+                }
             }
-            state.check_hard_elimination(seat);
             (iced::Task::none(), None)
         }
-        GameMessage::CommanderDamageDelta(target, source, delta) => {
-            if let Some(seat) = state.seats.get_mut(target) {
-                let entry = seat.commander_damage_taken.entry(source).or_insert(0);
-                let before = *entry;
-                let after = (before + delta).max(0);
-                *entry = after;
-                seat.life -= after - before;
+        GameMessage::HoldTick => {
+            if let Some(hold) = state.press_hold {
+                if !hold.fired && hold.started_at.elapsed() >= HOLD_THRESHOLD {
+                    if let Some(h) = &mut state.press_hold {
+                        h.fired = true;
+                    }
+                    apply_life_delta(state, hold.seat, hold.sign * 10);
+                }
             }
-            state.check_hard_elimination(target);
-            state.check_zero_life(target);
+            (iced::Task::none(), None)
+        }
+        GameMessage::DragStart(target) => {
+            state.drag = Some(DragState {
+                target,
+                baseline_y: None,
+            });
+            (iced::Task::none(), None)
+        }
+        GameMessage::DragMove(target, y) => {
+            let mut steps = 0;
+            if let Some(drag) = &mut state.drag {
+                if drag.target == target {
+                    match drag.baseline_y {
+                        None => drag.baseline_y = Some(y),
+                        Some(baseline) => {
+                            let delta = baseline - y;
+                            if delta.abs() >= SWIPE_STEP {
+                                steps = (delta / SWIPE_STEP).trunc() as i32;
+                                drag.baseline_y = Some(y);
+                            }
+                        }
+                    }
+                }
+            }
+            if steps != 0 {
+                apply_drag_steps(state, target, steps);
+            }
+            (iced::Task::none(), None)
+        }
+        GameMessage::DragEnd => {
+            state.drag = None;
             (iced::Task::none(), None)
         }
         GameMessage::ToggleEliminated(seat) => {
@@ -242,6 +312,35 @@ pub fn update(
     }
 }
 
+fn apply_life_delta(state: &mut GameState, seat: usize, delta: i32) {
+    if let Some(s) = state.seats.get_mut(seat) {
+        s.life += delta;
+    }
+    state.check_zero_life(seat);
+}
+
+fn apply_drag_steps(state: &mut GameState, target: DragTarget, steps: i32) {
+    match target {
+        DragTarget::Poison(seat) => {
+            if let Some(s) = state.seats.get_mut(seat) {
+                s.poison = (s.poison + steps).max(0);
+            }
+            state.check_hard_elimination(seat);
+        }
+        DragTarget::Damage(target_seat, source_seat) => {
+            if let Some(seat) = state.seats.get_mut(target_seat) {
+                let entry = seat.commander_damage_taken.entry(source_seat).or_insert(0);
+                let before = *entry;
+                let after = (before + steps).max(0);
+                *entry = after;
+                seat.life -= after - before;
+            }
+            state.check_hard_elimination(target_seat);
+            state.check_zero_life(target_seat);
+        }
+    }
+}
+
 fn format_duration(total_seconds: u64) -> String {
     format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
 }
@@ -270,25 +369,24 @@ pub fn view<'a>(
         return mark_kill_view(state, victim);
     }
 
-    let top_bar = container(
+    let bar_row = container(
         row![
             text(format!(
                 "{}'s turn - {}",
                 state.seats[state.active_seat].player.name,
                 format_duration(state.turn_seconds)
             ))
-            .size(22),
-            text(format!("Game time {}", format_duration(state.game_seconds))).size(16),
+            .size(18),
             iced::widget::horizontal_space(),
-            button(text(if state.paused { "Resume" } else { "Pause" }).size(16))
-                .padding(10)
+            button(text(if state.paused { "Resume" } else { "Pause" }).size(18))
+                .padding(16)
                 .on_press(Message::Game(GameMessage::TogglePause)),
-            button(text("Next Turn").size(16))
-                .padding(10)
+            button(text("Next Turn").size(18))
+                .padding(16)
                 .style(button::primary)
                 .on_press(Message::Game(GameMessage::NextTurn)),
-            button(text("Abandon Game").size(16))
-                .padding(10)
+            button(text("Abandon Game").size(18))
+                .padding(16)
                 .style(button::danger)
                 .on_press(Message::Game(GameMessage::AbandonGame)),
         ]
@@ -298,6 +396,33 @@ pub fn view<'a>(
     .padding(14)
     .width(Length::Fill)
     .style(style::header);
+
+    // A frosted-glass-style panel floating over the header, centered
+    // regardless of how wide the surrounding controls are.
+    let timer_panel = container(
+        column![
+            text(format_duration(state.game_seconds)).size(30),
+            text("GAME TIME").size(11),
+        ]
+        .spacing(2)
+        .align_x(iced::Alignment::Center),
+    )
+    .padding([10.0, 26.0])
+    .style(|_theme: &iced::Theme| container::Style {
+        background: Some(Color::from_rgba(1.0, 1.0, 1.0, 0.14).into()),
+        text_color: Some(Color::WHITE),
+        border: Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.28),
+            width: 1.0,
+            radius: 20.0.into(),
+        },
+        ..container::Style::default()
+    });
+
+    let top_bar = stack![
+        bar_row,
+        container(timer_panel).width(Length::Fill).center_x(Length::Fill),
+    ];
 
     let seat_count = state.seats.len();
     let cols = grid_columns(seat_count);
@@ -326,39 +451,71 @@ pub fn view<'a>(
 
 fn tab_button<'a>(label: &'a str, tab: SeatTab, seat: usize, current: SeatTab) -> Element<'a, Message> {
     let selected = tab == current;
-    button(text(label).size(13))
-        .padding(6)
+    button(text(label).size(16))
+        .padding(12)
+        .width(Length::Fill)
         .style(if selected { button::primary } else { button::secondary })
         .on_press(Message::Game(GameMessage::SwitchTab(seat, tab)))
         .into()
 }
 
+/// A big, thumb-friendly life +/- control. Tap for +/-1; hold for three
+/// seconds to jump by +/-10 instead.
+fn life_button(seat: usize, sign: i32, label: &str) -> Element<'_, Message> {
+    mouse_area(
+        container(text(label).size(30))
+            .width(Length::Fixed(72.0))
+            .height(Length::Fixed(72.0))
+            .center_x(Length::Fixed(72.0))
+            .center_y(Length::Fixed(72.0))
+            .style(style::panel),
+    )
+    .on_press(Message::Game(GameMessage::LifePressStart(seat, sign)))
+    .on_release(Message::Game(GameMessage::LifePressEnd(seat, sign)))
+    .into()
+}
+
 fn life_tab(index: usize, seat: &Seat) -> Element<'_, Message> {
     row![
-        button(text("-5").size(16)).padding(8).on_press(Message::Game(GameMessage::LifeDelta(index, -5))),
-        button(text("-1").size(16)).padding(8).on_press(Message::Game(GameMessage::LifeDelta(index, -1))),
-        text(seat.life.to_string()).size(34).width(Length::Fixed(64.0)).align_x(iced::Alignment::Center),
-        button(text("+1").size(16)).padding(8).on_press(Message::Game(GameMessage::LifeDelta(index, 1))),
-        button(text("+5").size(16)).padding(8).on_press(Message::Game(GameMessage::LifeDelta(index, 5))),
+        life_button(index, -1, "-"),
+        text(seat.life.to_string())
+            .size(48)
+            .width(Length::Fill)
+            .align_x(iced::Alignment::Center),
+        life_button(index, 1, "+"),
     ]
-    .spacing(6)
+    .spacing(14)
     .align_y(iced::Alignment::Center)
     .into()
 }
 
+/// A large swipe zone: swipe up to add one, down to remove one.
+fn swipe_zone<'a>(target: DragTarget, content: Element<'a, Message>) -> Element<'a, Message> {
+    mouse_area(content)
+        .on_press(Message::Game(GameMessage::DragStart(target)))
+        .on_move(move |point| Message::Game(GameMessage::DragMove(target, point.y)))
+        .on_release(Message::Game(GameMessage::DragEnd))
+        .on_exit(Message::Game(GameMessage::DragEnd))
+        .into()
+}
+
 fn poison_tab(index: usize, seat: &Seat) -> Element<'_, Message> {
-    column![
-        row![
-            button(text("-1").size(16)).padding(8).on_press(Message::Game(GameMessage::PoisonDelta(index, -1))),
-            text(seat.poison.to_string()).size(34).width(Length::Fixed(50.0)).align_x(iced::Alignment::Center),
-            button(text("+1").size(16)).padding(8).on_press(Message::Game(GameMessage::PoisonDelta(index, 1))),
+    let content = container(
+        column![
+            text(seat.poison.to_string()).size(48),
+            text("Swipe up: +1  \u{00b7}  down: -1").size(13),
+            text(format!("Lethal at {LETHAL_POISON} poison")).size(11),
         ]
         .spacing(6)
-        .align_y(iced::Alignment::Center),
-        text(format!("Lethal at {LETHAL_POISON} poison")).size(11),
-    ]
-    .spacing(4)
-    .into()
+        .align_x(iced::Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .style(style::panel);
+
+    swipe_zone(DragTarget::Poison(index), content.into())
 }
 
 fn damage_tab<'a>(index: usize, state: &'a GameState) -> Element<'a, Message> {
@@ -370,27 +527,31 @@ fn damage_tab<'a>(index: usize, state: &'a GameState) -> Element<'a, Message> {
         .filter(|(j, _)| *j != index)
         .map(|(j, other)| {
             let amount = seat.damage_from(j);
-            row![
-                text(format!("{} ({})", other.commander.name, other.player.name))
-                    .size(13)
-                    .width(Length::Fill),
-                button(text("-").size(16))
-                    .padding(6)
-                    .on_press(Message::Game(GameMessage::CommanderDamageDelta(index, j, -1))),
-                text(amount.to_string()).size(18).width(Length::Fixed(30.0)).align_x(iced::Alignment::Center),
-                button(text("+").size(16))
-                    .padding(6)
-                    .on_press(Message::Game(GameMessage::CommanderDamageDelta(index, j, 1))),
-            ]
-            .spacing(6)
-            .align_y(iced::Alignment::Center)
-            .into()
+            let content = container(
+                row![
+                    text(format!("{} ({})", other.commander.name, other.player.name))
+                        .size(14)
+                        .width(Length::Fill),
+                    text(amount.to_string()).size(26),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fixed(64.0))
+            .style(style::panel);
+
+            swipe_zone(DragTarget::Damage(index, j), content.into())
         })
         .collect();
 
     column![
-        text(format!("Lethal at {LETHAL_COMMANDER_DAMAGE} from one commander")).size(11),
-        column(rows).spacing(6),
+        text(format!(
+            "Lethal at {LETHAL_COMMANDER_DAMAGE} from one commander \u{00b7} swipe up/down"
+        ))
+        .size(11),
+        scrollable(column(rows).spacing(8)).height(Length::Fill),
     ]
     .spacing(6)
     .into()
@@ -457,21 +618,24 @@ fn seat_panel<'a>(
             tabs,
             body,
             row![
-                button(text(if seat.eliminated { "Back In" } else { "Mark Out" }).size(13))
-                    .padding(7)
+                button(text(if seat.eliminated { "Back In" } else { "Mark Out" }).size(16))
+                    .padding(14)
+                    .width(Length::Fill)
                     .style(if seat.eliminated { button::secondary } else { button::danger })
                     .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
-                button(text("Commander Killed").size(13))
-                    .padding(7)
+                button(text("Commander Killed").size(16))
+                    .padding(14)
+                    .width(Length::Fill)
                     .on_press(Message::Game(GameMessage::MarkKilled(index))),
             ]
-            .spacing(6),
-            button(text("Declare Winner").size(15))
-                .padding(9)
+            .spacing(8),
+            button(text("Declare Winner").size(18))
+                .padding(16)
+                .width(Length::Fill)
                 .style(button::success)
                 .on_press(Message::Game(GameMessage::StartDeclareWinner(index))),
         ]
-        .spacing(7),
+        .spacing(8),
     )
     .padding(10)
     .width(Length::Fill)
