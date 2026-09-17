@@ -14,7 +14,6 @@ use crate::style;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeatTab {
     Life,
-    Damage,
     Poison,
 }
 
@@ -43,6 +42,9 @@ pub struct GameState {
     /// Which seat's action menu (Commander Damage / Poison / Mark Out /
     /// Declare Winner) is currently open, if any.
     pub action_menu_for: Option<usize>,
+    /// While set, every OTHER seat's tile swaps its life display for a
+    /// quick +/- on the commander damage *that seat* has dealt to this one.
+    pub damage_focus: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +87,7 @@ impl GameState {
             press_hold: None,
             swipe: None,
             action_menu_for: None,
+            damage_focus: None,
         }
     }
 
@@ -131,6 +134,8 @@ pub enum GameMessage {
     SwipeMove(usize, f32),
     SwipeEnd,
     CloseActionMenu,
+    StartDamageFocus(usize),
+    EndDamageFocus,
     PoisonDelta(usize, i32),
     CommanderDamageDelta(usize, usize, i32),
     ToggleEliminated(usize),
@@ -248,6 +253,15 @@ pub fn update(
         }
         GameMessage::CloseActionMenu => {
             state.action_menu_for = None;
+            (iced::Task::none(), None)
+        }
+        GameMessage::StartDamageFocus(seat) => {
+            state.damage_focus = Some(seat);
+            state.action_menu_for = None;
+            (iced::Task::none(), None)
+        }
+        GameMessage::EndDamageFocus => {
+            state.damage_focus = None;
             (iced::Task::none(), None)
         }
         GameMessage::PoisonDelta(seat, delta) => {
@@ -410,6 +424,29 @@ pub fn view<'a>(
     .width(Length::Fill)
     .style(style::header);
 
+    let damage_focus_banner: Option<Element<Message>> = state.damage_focus.map(|focus| {
+        container(
+            row![
+                text(format!(
+                    "Logging commander damage dealt to {} - tap an opponent's tile to add it",
+                    state.seats[focus].player.name
+                ))
+                .size(15),
+                iced::widget::horizontal_space(),
+                button(text("Done").size(16))
+                    .padding(10)
+                    .style(button::primary)
+                    .on_press(Message::Game(GameMessage::EndDamageFocus)),
+            ]
+            .spacing(14)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding(12)
+        .width(Length::Fill)
+        .style(style::panel_active)
+        .into()
+    });
+
     // A frosted-glass-style panel floating dead center of the seat grid, so
     // it sits in the middle of the table regardless of pod size.
     let timer_panel = container(
@@ -460,7 +497,13 @@ pub fn view<'a>(
             .center_y(Length::Fill),
     ];
 
-    container(column![top_bar, board_with_timer].spacing(12).padding(16))
+    let mut layout = column![top_bar].spacing(12);
+    if let Some(banner) = damage_focus_banner {
+        layout = layout.push(banner);
+    }
+    layout = layout.push(board_with_timer);
+
+    container(layout.padding(16))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -522,37 +565,28 @@ fn poison_tab(index: usize, seat: &Seat) -> Element<'_, Message> {
     .into()
 }
 
-fn damage_tab<'a>(index: usize, state: &'a GameState) -> Element<'a, Message> {
-    let seat = &state.seats[index];
-    let rows: Vec<Element<Message>> = state
-        .seats
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| *j != index)
-        .map(|(j, other)| {
-            let amount = seat.damage_from(j);
-            row![
-                text(format!("{} ({})", other.commander.name, other.player.name))
-                    .size(14)
-                    .width(Length::Fill),
-                counter_button("-", Message::Game(GameMessage::CommanderDamageDelta(index, j, -1))),
-                text(amount.to_string())
-                    .size(22)
-                    .width(Length::Fixed(36.0))
-                    .align_x(iced::Alignment::Center),
-                counter_button("+", Message::Game(GameMessage::CommanderDamageDelta(index, j, 1))),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .into()
-        })
-        .collect();
-
+/// Shown on an opponent's own tile (in place of their life total) while
+/// someone else is in commander-damage-logging mode: a quick +/- on the
+/// damage *this* seat's commander has dealt to the seat being focused.
+fn damage_focus_tab(source: usize, target: usize, state: &GameState) -> Element<'_, Message> {
+    let amount = state.seats[target].damage_from(source);
+    let target_name = state.seats[target].player.name.clone();
     column![
-        text(format!("Lethal at {LETHAL_COMMANDER_DAMAGE} from one commander")).size(11),
-        scrollable(column(rows).spacing(8)).height(Length::Fill),
+        text(format!("Damage dealt to {target_name}")).size(13),
+        row![
+            counter_button("-", Message::Game(GameMessage::CommanderDamageDelta(target, source, -1))),
+            text(amount.to_string())
+                .size(44)
+                .width(Length::Fixed(70.0))
+                .align_x(iced::Alignment::Center),
+            counter_button("+", Message::Game(GameMessage::CommanderDamageDelta(target, source, 1))),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+        text(format!("Lethal at {LETHAL_COMMANDER_DAMAGE}")).size(11),
     ]
-    .spacing(6)
+    .spacing(8)
+    .align_x(iced::Alignment::Center)
     .into()
 }
 
@@ -573,7 +607,7 @@ fn action_menu(index: usize, seat: &Seat) -> Element<'_, Message> {
             action_menu_item("Life", Message::Game(GameMessage::SwitchTab(index, SeatTab::Life))),
             action_menu_item(
                 "Commander Damage",
-                Message::Game(GameMessage::SwitchTab(index, SeatTab::Damage)),
+                Message::Game(GameMessage::StartDamageFocus(index)),
             ),
             action_menu_item("Poison", Message::Game(GameMessage::SwitchTab(index, SeatTab::Poison))),
             action_menu_item(
@@ -642,10 +676,12 @@ fn seat_panel<'a>(
         ..container::Style::default()
     });
 
-    let body = match state.seat_tab[index] {
-        SeatTab::Life => life_tab(index, seat),
-        SeatTab::Damage => damage_tab(index, state),
-        SeatTab::Poison => poison_tab(index, seat),
+    let body = match state.damage_focus {
+        Some(focus) if focus != index => damage_focus_tab(index, focus, state),
+        _ => match state.seat_tab[index] {
+            SeatTab::Life => life_tab(index, seat),
+            SeatTab::Poison => poison_tab(index, seat),
+        },
     };
 
     let controls = container(
