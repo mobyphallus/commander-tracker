@@ -71,63 +71,74 @@ pub fn view<'a>(state: &'a PlayersState) -> Element<'a, Message> {
                     if *id == p.id {
                         return row![
                             text_input("Player name", name)
-                                .size(18)
-                                .padding(12)
+                                .size(26)
+                                .padding(22)
                                 .on_input(|s| Message::Players(PlayersMessage::NameChanged(s)))
                                 .on_submit(Message::Players(PlayersMessage::Save)),
-                            button(text("Save").size(16))
-                                .padding(12)
+                            style::touch_button("Save", 22)
+                                .width(Length::Fixed(180.0))
                                 .style(button::success)
                                 .on_press(Message::Players(PlayersMessage::Save)),
-                            button(text("Cancel").size(16))
-                                .padding(12)
+                            style::touch_button("Cancel", 22)
+                                .width(Length::Fixed(180.0))
+                                .style(button::secondary)
                                 .on_press(Message::Players(PlayersMessage::Cancel)),
                         ]
-                        .spacing(8)
+                        .spacing(14)
                         .align_y(iced::Alignment::Center)
                         .into();
                     }
                 }
-                row![
-                    text(p.name.clone()).size(18).width(Length::Fill),
-                    button(text("Rename").size(16))
-                        .padding(12)
-                        .on_press(Message::Players(PlayersMessage::StartEdit(
-                            p.id,
-                            p.name.clone()
-                        ))),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center)
+                container(
+                    row![
+                        text(p.name.clone()).size(26).width(Length::Fill),
+                        style::touch_button("Rename", 20)
+                            .width(Length::Fixed(200.0))
+                            .style(button::secondary)
+                            .on_press(Message::Players(PlayersMessage::StartEdit(
+                                p.id,
+                                p.name.clone()
+                            ))),
+                    ]
+                    .spacing(14)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding([10, 20])
+                .width(Length::Fill)
+                .style(style::panel)
                 .into()
             })
             .collect::<Vec<Element<Message>>>(),
     )
-    .spacing(10);
+    .spacing(12);
 
-    let mut content = column![
+    let header = container(
         row![
-            text("Manage Players").size(30),
+            text("Players").size(38),
             iced::widget::horizontal_space(),
-            button(text("Back").size(18))
-                .padding(10)
+            style::touch_button("Back", 20)
+                .width(Length::Fixed(200.0))
+                .style(button::secondary)
                 .on_press(Message::GoHome),
         ]
         .align_y(iced::Alignment::Center),
-        scrollable(rows).height(Length::Fill),
-    ]
-    .spacing(20);
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(style::header);
+
+    let mut content = column![header, scrollable(rows).height(Length::Fill)].spacing(style::GAP);
 
     if let Some(e) = &state.error {
         content = content.push(
-            container(text(e.clone()).size(16))
-                .padding(10)
+            container(text(e.clone()).size(20))
+                .padding(16)
                 .width(Length::Fill)
                 .style(style::panel_danger),
         );
     }
 
-    container(content.padding(20))
+    container(content.padding(style::GAP))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

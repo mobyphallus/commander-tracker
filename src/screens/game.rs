@@ -410,22 +410,26 @@ pub fn view<'a>(
     let top_bar = container(
         row![
             text(format!(
-                "Turn {} - {}'s turn - {}",
+                "Turn {} \u{00b7} {} \u{00b7} {}",
                 state.turn_number,
                 state.seats[state.active_seat].player.name,
                 format_duration(state.turn_seconds)
             ))
-            .size(18),
+            .size(24),
             iced::widget::horizontal_space(),
-            button(text(if state.paused { "Resume" } else { "Pause" }).size(18))
-                .padding(16)
-                .on_press(Message::Game(GameMessage::TogglePause)),
-            button(text("Next Turn").size(18))
-                .padding(16)
+            style::touch_button(
+                if state.paused { "Resume" } else { "Pause" },
+                20,
+            )
+            .width(Length::Fixed(170.0))
+            .style(button::secondary)
+            .on_press(Message::Game(GameMessage::TogglePause)),
+            style::touch_button("Next Turn", 22)
+                .width(Length::Fixed(230.0))
                 .style(button::primary)
                 .on_press(Message::Game(GameMessage::NextTurn)),
-            button(text("Abandon Game").size(18))
-                .padding(16)
+            style::touch_button("Abandon", 20)
+                .width(Length::Fixed(180.0))
                 .style(button::danger)
                 .on_press(Message::Game(GameMessage::AbandonGame)),
         ]
@@ -443,10 +447,10 @@ pub fn view<'a>(
                     "Logging commander damage dealt to {} - tap an opponent's tile to add it",
                     state.seats[focus].player.name
                 ))
-                .size(15),
+                .size(20),
                 iced::widget::horizontal_space(),
-                button(text("Done").size(16))
-                    .padding(10)
+                style::touch_button("Done", 22)
+                    .width(Length::Fixed(200.0))
                     .style(button::primary)
                     .on_press(Message::Game(GameMessage::EndDamageFocus)),
             ]
@@ -574,9 +578,9 @@ fn active_counter(index: usize, state: &GameState) -> (i32, CounterTarget, Strin
 }
 
 fn action_menu_item(label: &str, message: Message) -> Element<'_, Message> {
-    button(text(label).size(17))
-        .padding(14)
+    style::touch_button(label, 22)
         .width(Length::Fill)
+        .style(button::secondary)
         .on_press(message)
         .into()
 }
@@ -586,7 +590,7 @@ fn action_menu_item(label: &str, message: Message) -> Element<'_, Message> {
 fn action_menu(index: usize, seat: &Seat) -> Element<'_, Message> {
     container(
         column![
-            text("Actions").size(14),
+            text("Actions").size(18),
             action_menu_item("Life", Message::Game(GameMessage::SwitchTab(index, SeatTab::Life))),
             action_menu_item(
                 "Commander Damage",
@@ -649,12 +653,12 @@ fn seat_panel<'a>(
 
     let caption = container(
         column![
-            text(seat.player.name.clone()).size(20),
-            text(subtitle).size(12),
+            text(seat.player.name.clone()).size(26),
+            text(subtitle).size(16),
         ]
         .spacing(2),
     )
-    .padding(10)
+    .padding(12)
     .width(Length::Fill)
     .style(|_theme: &iced::Theme| container::Style {
         background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.45).into()),
@@ -663,12 +667,13 @@ fn seat_panel<'a>(
     });
 
     let kill_button = container(
-        button(text("Commander Killed").size(14))
-            .padding(10)
+        style::touch_button("Commander Killed", 18)
+            .width(Length::Fixed(260.0))
+            .style(button::secondary)
             .on_press(Message::Game(GameMessage::MarkKilled(index))),
     )
     .width(Length::Fill)
-    .padding(10)
+    .padding(12)
     .center_x(Length::Fill);
 
     // Top caption and bottom kill button float above everything else in the
@@ -715,16 +720,16 @@ fn eliminated_tile<'a>(
 
     let scrim = container(
         column![
-            text("ELIMINATED").size(24),
-            text(seat.player.name.clone()).size(18),
-            text(seat.commander.name.clone()).size(13),
-            text(format!("Final: {} life, {} poison", seat.life, seat.poison)).size(13),
-            button(text("Back In").size(14))
-                .padding(10)
+            text("ELIMINATED").size(36),
+            text(seat.player.name.clone()).size(26),
+            text(seat.commander.name.clone()).size(18),
+            text(format!("Final: {} life, {} poison", seat.life, seat.poison)).size(18),
+            style::touch_button("Back In", 22)
+                .width(Length::Fixed(220.0))
                 .style(button::secondary)
                 .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
         ]
-        .spacing(8)
+        .spacing(14)
         .align_x(iced::Alignment::Center),
     )
     .width(Length::Fill)
@@ -748,28 +753,30 @@ fn zero_life_check_view(state: &GameState, seat: usize) -> Element<'_, Message> 
     let s = &state.seats[seat];
     container(
         column![
-            text(format!("{} is at {} life. Are they out?", s.player.name, s.life)).size(26),
-            text(
-                "Some effects keep a player from losing at 0 or below - say no to keep them in."
-            )
-            .size(14),
+            text(format!("{} is at {} life.", s.player.name, s.life)).size(46),
+            text("Are they out?").size(36),
+            text("Some effects keep a player from losing at 0 or below - say no to keep them in.")
+                .size(18),
             row![
-                button(text("Yes, they're out").size(18))
-                    .padding(16)
+                style::cta_button("Yes, they're out", 26)
+                    .width(Length::Fixed(380.0))
                     .style(button::danger)
                     .on_press(Message::Game(GameMessage::AnswerZeroLifeCheck(true))),
-                button(text("No, keep playing").size(18))
-                    .padding(16)
+                style::cta_button("No, keep playing", 26)
+                    .width(Length::Fixed(380.0))
                     .style(button::secondary)
                     .on_press(Message::Game(GameMessage::AnswerZeroLifeCheck(false))),
             ]
-            .spacing(12),
+            .spacing(20),
         ]
-        .spacing(18)
-        .padding(24),
+        .spacing(26)
+        .align_x(iced::Alignment::Center)
+        .padding(30),
     )
     .width(Length::Fill)
     .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
     .into()
 }
 
@@ -782,19 +789,24 @@ fn mark_kill_view(state: &GameState, victim: usize) -> Element<'_, Message> {
         .enumerate()
         .filter(|(j, _)| *j != victim)
         .map(|(j, other)| {
+            let label = format!("{} ({})", other.player.name, other.commander.name);
             button(
-                text(format!("{} ({})", other.player.name, other.commander.name)).size(18),
+                container(text(label).size(24))
+                    .padding([0, 24])
+                    .center_y(Length::Fill),
             )
-            .padding(14)
+            .padding(0)
+            .height(Length::Fixed(style::TOUCH_H))
             .width(Length::Fill)
+            .style(button::secondary)
             .on_press(Message::Game(GameMessage::ConfirmKill(victim, Some(j))))
             .into()
         })
         .collect();
     options.push(
-        button(text("Board wipe / unknown").size(18))
-            .padding(14)
+        style::touch_button("Board wipe / unknown", 24)
             .width(Length::Fill)
+            .style(button::secondary)
             .on_press(Message::Game(GameMessage::ConfirmKill(victim, None)))
             .into(),
     );
@@ -805,14 +817,16 @@ fn mark_kill_view(state: &GameState, victim: usize) -> Element<'_, Message> {
                 "{}'s {} was killed - by whom?",
                 victim_seat.player.name, victim_seat.commander.name
             ))
-            .size(24),
-            scrollable(column(options).spacing(10)).height(Length::Fixed(320.0)),
-            button(text("Cancel").size(16))
-                .padding(12)
+            .size(38),
+            scrollable(column(options).spacing(14)).height(Length::Fill),
+            style::cta_button("Cancel", 24)
+                .width(Length::Fixed(300.0))
+                .style(button::secondary)
                 .on_press(Message::Game(GameMessage::CancelMarkKilled)),
         ]
-        .spacing(16)
-        .padding(24),
+        .spacing(22)
+        .align_x(iced::Alignment::Center)
+        .padding(30),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -826,8 +840,7 @@ fn declare_winner_view(state: &GameState, winner: usize) -> Element<'_, Message>
             .iter()
             .map(|r| {
                 let selected = state.pending_reason == Some(*r);
-                button(text(r.label()).size(18))
-                    .padding(12)
+                style::touch_button(r.label(), 24)
                     .width(Length::Fill)
                     .style(if selected {
                         button::primary
@@ -839,9 +852,9 @@ fn declare_winner_view(state: &GameState, winner: usize) -> Element<'_, Message>
             })
             .collect::<Vec<Element<Message>>>(),
     )
-    .spacing(8);
+    .spacing(12);
 
-    let mut confirm = button(text("Confirm & Save Game").size(20)).padding(16);
+    let mut confirm = style::cta_button("Confirm & Save", 26).width(Length::Fixed(420.0));
     if state.pending_reason.is_some() {
         confirm = confirm
             .style(button::success)
@@ -854,19 +867,21 @@ fn declare_winner_view(state: &GameState, winner: usize) -> Element<'_, Message>
                 "{} wins with {}!",
                 winner_seat.player.name, winner_seat.commander.name
             ))
-            .size(26),
-            text("How did they win?").size(18),
-            scrollable(reasons).height(Length::Fixed(320.0)),
+            .size(42),
+            text("How did they win?").size(26),
+            scrollable(reasons).height(Length::Fill),
             row![
                 confirm,
-                button(text("Cancel").size(18))
-                    .padding(16)
+                style::cta_button("Cancel", 24)
+                    .width(Length::Fixed(280.0))
+                    .style(button::secondary)
                     .on_press(Message::Game(GameMessage::CancelDeclareWinner)),
             ]
-            .spacing(12),
+            .spacing(20),
         ]
-        .spacing(16)
-        .padding(24),
+        .spacing(22)
+        .align_x(iced::Alignment::Center)
+        .padding(30),
     )
     .width(Length::Fill)
     .height(Length::Fill)

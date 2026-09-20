@@ -1,5 +1,36 @@
-use iced::widget::container;
-use iced::{Border, Color, Shadow, Theme, Vector};
+use iced::widget::{button, container, text, Button};
+use iced::{Border, Color, Length, Shadow, Theme, Vector};
+
+// Sizing tuned for the machine this runs on: a 3000x2000 panel at 1.6x
+// scale, so ~1875x1210 logical px, ~6.5 logical px per mm. A finger needs
+// roughly 9mm, hence the 60px floor on anything tappable.
+/// Standard tappable row/button height.
+pub const TOUCH_H: f32 = 76.0;
+/// Primary call-to-action height.
+pub const TOUCH_H_LG: f32 = 104.0;
+/// Page padding and the gap between major blocks.
+pub const GAP: u16 = 18;
+
+/// A button sized for fingers, with its label centered. Callers still set
+/// width, style and `on_press`.
+pub fn touch_button<'a, Msg: 'a>(label: &'a str, size: u16) -> Button<'a, Msg> {
+    sized_button(label, size, TOUCH_H)
+}
+
+/// A taller button for the main action on a screen.
+pub fn cta_button<'a, Msg: 'a>(label: &'a str, size: u16) -> Button<'a, Msg> {
+    sized_button(label, size, TOUCH_H_LG)
+}
+
+fn sized_button<'a, Msg: 'a>(label: &'a str, size: u16, height: f32) -> Button<'a, Msg> {
+    button(
+        container(text(label).size(size))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .padding(0)
+    .height(Length::Fixed(height))
+}
 
 pub fn app_theme() -> Theme {
     let palette = iced::theme::Palette {

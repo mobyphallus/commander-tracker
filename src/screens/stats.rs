@@ -5,6 +5,7 @@ use rusqlite::Connection;
 use crate::app::Message;
 use crate::db;
 use crate::model::{MatchupStat, PlayerStat};
+use crate::style;
 
 pub struct StatsState {
     pub matchups: Vec<MatchupStat>,
@@ -31,57 +32,81 @@ pub fn view(state: &StatsState) -> Element<'_, Message> {
                 } else {
                     0.0
                 };
-                row![
-                    text(p.player_name.clone()).size(18).width(Length::Fixed(160.0)),
-                    text(format!("{} games", p.games)).size(16).width(Length::Fixed(100.0)),
-                    text(format!("{} wins", p.wins)).size(16).width(Length::Fixed(100.0)),
-                    text(format!("{:.0}%", pct)).size(16),
-                ]
-                .spacing(12)
+                container(
+                    row![
+                        text(p.player_name.clone()).size(26).width(Length::Fill),
+                        text(format!("{} games", p.games)).size(22).width(Length::Fixed(160.0)),
+                        text(format!("{} wins", p.wins)).size(22).width(Length::Fixed(160.0)),
+                        text(format!("{:.0}%", pct)).size(26).width(Length::Fixed(100.0)),
+                    ]
+                    .spacing(16)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding([0, 20])
+                .height(Length::Fixed(style::TOUCH_H))
+                .center_y(Length::Fixed(style::TOUCH_H))
+                .width(Length::Fill)
+                .style(style::panel)
                 .into()
             })
             .collect::<Vec<Element<Message>>>(),
     )
-    .spacing(8);
+    .spacing(10);
 
     let matchup_rows = column(
         state
             .matchups
             .iter()
             .map(|m| {
-                row![
-                    text(format!("{} vs {}", m.commander_a, m.commander_b))
-                        .size(16)
-                        .width(Length::Fixed(300.0)),
-                    text(format!("{}-{}", m.a_wins, m.b_wins))
-                        .size(16)
-                        .width(Length::Fixed(80.0)),
-                    text(format!("{} games", m.games)).size(16),
-                ]
-                .spacing(12)
+                container(
+                    row![
+                        text(format!("{} vs {}", m.commander_a, m.commander_b))
+                            .size(22)
+                            .width(Length::Fill),
+                        text(format!("{}-{}", m.a_wins, m.b_wins))
+                            .size(24)
+                            .width(Length::Fixed(120.0)),
+                        text(format!("{} games", m.games)).size(20).width(Length::Fixed(160.0)),
+                    ]
+                    .spacing(16)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding([0, 20])
+                .height(Length::Fixed(style::TOUCH_H))
+                .center_y(Length::Fixed(style::TOUCH_H))
+                .width(Length::Fill)
+                .style(style::panel)
                 .into()
             })
             .collect::<Vec<Element<Message>>>(),
     )
-    .spacing(8);
+    .spacing(10);
+
+    let header = container(
+        row![
+            text("Stats").size(38),
+            iced::widget::horizontal_space(),
+            style::touch_button("Back", 20)
+                .width(Length::Fixed(200.0))
+                .style(button::secondary)
+                .on_press(Message::GoHome),
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(style::header);
 
     container(
         column![
-            row![
-                text("Stats").size(30),
-                button(text("Back").size(18))
-                    .padding(10)
-                    .on_press(Message::GoHome),
-            ]
-            .spacing(16)
-            .align_y(iced::Alignment::Center),
-            text("Player win rates").size(22),
-            scrollable(player_rows).height(Length::Fixed(240.0)),
-            text("Commander matchups").size(22),
-            scrollable(matchup_rows).height(Length::Fill),
+            header,
+            text("Player win rates").size(28),
+            scrollable(player_rows).height(Length::FillPortion(2)),
+            text("Commander matchups").size(28),
+            scrollable(matchup_rows).height(Length::FillPortion(3)),
         ]
-        .spacing(16)
-        .padding(20),
+        .spacing(style::GAP)
+        .padding(style::GAP),
     )
     .width(Length::Fill)
     .height(Length::Fill)

@@ -426,7 +426,7 @@ pub fn view<'a>(
 /// as the real board so it's an accurate preview, just shrunk down.
 fn layout_preview(table: &TableLayout) -> Element<'static, Message> {
     container(layout::render_table(table, |idx| {
-        container(text((idx + 1).to_string()).size(16))
+        container(text((idx + 1).to_string()).size(22))
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x(Length::Fill)
@@ -434,8 +434,8 @@ fn layout_preview(table: &TableLayout) -> Element<'static, Message> {
             .style(style::panel)
             .into()
     }))
-    .width(Length::Fixed(160.0))
-    .height(Length::Fixed(100.0))
+    .width(Length::Fixed(300.0))
+    .height(Length::Fixed(190.0))
     .into()
 }
 
@@ -447,31 +447,36 @@ fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
         .map(|opt| {
             let label = opt.name.clone();
             button(
-                column![layout_preview(&opt), text(label).size(15)]
-                    .spacing(8)
+                column![layout_preview(&opt), text(label).size(22)]
+                    .spacing(14)
                     .align_x(iced::Alignment::Center),
             )
-            .padding(12)
+            .padding(20)
             .style(button::secondary)
             .on_press(Message::Setup(SetupMessage::ChooseLayout(opt)))
             .into()
         })
         .collect::<Vec<Element<Message>>>())
-    .spacing(20)
+    .spacing(24)
     .wrap();
 
     container(
         column![
-            text("How are you sitting?").size(30),
-            text(format!("{} players - pick the arrangement that matches your table", state.pod_size)).size(15),
+            text("How are you sitting?").size(44),
+            text(format!(
+                "{} players - pick the arrangement that matches your table",
+                state.pod_size
+            ))
+            .size(18),
             scrollable(cards).width(Length::Fill),
-            button(text("Back").size(16))
-                .padding(10)
+            style::touch_button("Back", 20)
+                .width(Length::Fixed(240.0))
+                .style(button::secondary)
                 .on_press(Message::Setup(SetupMessage::BackToPodSizeChoice)),
         ]
-        .spacing(24)
+        .spacing(28)
         .align_x(iced::Alignment::Center)
-        .padding(20),
+        .padding(style::GAP),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -483,24 +488,32 @@ fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
 fn pod_size_view<'a>() -> Element<'a, Message> {
     let buttons = row((MIN_POD..=MAX_POD)
         .map(|n| {
-            button(text(n.to_string()).size(28))
-                .padding(24)
-                .style(button::primary)
-                .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)))
-                .into()
+            button(
+                container(text(n.to_string()).size(46))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
+            .padding(0)
+            .width(Length::Fixed(140.0))
+            .height(Length::Fixed(140.0))
+            .style(button::primary)
+            .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)))
+            .into()
         })
         .collect::<Vec<Element<Message>>>())
-    .spacing(16);
+    .spacing(20)
+    .wrap();
 
     container(
         column![
-            text("How many players?").size(32),
+            text("How many players?").size(48),
             buttons,
-            button(text("Back").size(16))
-                .padding(10)
+            style::touch_button("Back", 20)
+                .width(Length::Fixed(240.0))
+                .style(button::secondary)
                 .on_press(Message::GoHome),
         ]
-        .spacing(32)
+        .spacing(44)
         .align_x(iced::Alignment::Center),
     )
     .width(Length::Fill)
@@ -516,19 +529,21 @@ fn grid_view<'a>(
 ) -> Element<'a, Message> {
     let header = container(
         row![
-            text("Set up your pod").size(26),
+            text("Set up your pod").size(32),
             iced::widget::horizontal_space(),
-            button(text("Change Layout").size(14))
-                .padding(10)
+            style::touch_button("Layout", 18)
+                .width(Length::Fixed(160.0))
+                .style(button::secondary)
                 .on_press(Message::Setup(SetupMessage::BackToLayoutChoice)),
-            button(text("Change Player Count").size(14))
-                .padding(10)
+            style::touch_button("Player Count", 18)
+                .width(Length::Fixed(220.0))
+                .style(button::secondary)
                 .on_press(Message::Setup(SetupMessage::BackToPodSizeChoice)),
         ]
-        .spacing(8)
+        .spacing(12)
         .align_y(iced::Alignment::Center),
     )
-    .padding(14)
+    .padding(16)
     .width(Length::Fill)
     .style(style::header);
 
@@ -536,22 +551,23 @@ fn grid_view<'a>(
         Some(table) => {
             layout::render_table(table, |idx| seat_tile(idx, &state.seats[idx], image_cache))
         }
-        None => text("Pick a layout first.").size(16).into(),
+        None => text("Pick a layout first.").size(20).into(),
     };
 
-    let mut start_button = button(text("Start Game").size(24)).padding(20);
+    let mut start_button = style::cta_button("Start Game", 30).width(Length::Fixed(480.0));
     if state.all_seats_ready() {
         start_button = start_button
             .style(button::success)
             .on_press(Message::Setup(SetupMessage::StartGame));
     }
 
-    let mut content = column![header, container(board).height(Length::Fill)].spacing(14);
+    let mut content =
+        column![header, container(board).height(Length::Fill)].spacing(style::GAP);
 
     if let Some(e) = &state.error {
         content = content.push(
-            container(text(e.clone()).size(16))
-                .padding(10)
+            container(text(e.clone()).size(20))
+                .padding(16)
                 .width(Length::Fill)
                 .style(style::panel_danger),
         );
@@ -559,7 +575,7 @@ fn grid_view<'a>(
 
     content = content.push(container(start_button).center_x(Length::Fill));
 
-    container(content.padding(20))
+    container(content.padding(style::GAP))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -616,10 +632,10 @@ fn seat_tile<'a>(
         (Some(player), None) => button(
             container(
                 column![
-                    text(player.name.clone()).size(22),
-                    text("Tap to pick a commander").size(14),
+                    text(player.name.clone()).size(30),
+                    text("Tap to pick a commander").size(18),
                 ]
-                .spacing(8)
+                .spacing(10)
                 .align_x(iced::Alignment::Center),
             )
             .width(Length::Fill)
@@ -633,7 +649,7 @@ fn seat_tile<'a>(
         .on_press(Message::Setup(SetupMessage::EditSeat(index)))
         .into(),
         _ => button(
-            container(text("+ Add Player").size(24))
+            container(text(format!("+ Add Player {}", index + 1)).size(32))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center_x(Length::Fill)
@@ -666,23 +682,24 @@ fn editor_overlay<'a>(
     };
 
     let top = row![
-        button(text("\u{2190} Back to Grid").size(16))
-            .padding(10)
+        style::touch_button("\u{2190} Back to Grid", 20)
+            .width(Length::Fixed(280.0))
+            .style(button::secondary)
             .on_press(Message::Setup(SetupMessage::BackToGrid)),
     ];
 
-    let mut content = column![top, body].spacing(20);
+    let mut content = column![top, body].spacing(style::GAP).height(Length::Fill);
 
     if let Some(e) = &state.error {
         content = content.push(
-            container(text(e.clone()).size(16))
-                .padding(10)
+            container(text(e.clone()).size(20))
+                .padding(16)
                 .width(Length::Fill)
                 .style(style::panel_danger),
         );
     }
 
-    container(content.padding(24))
+    container(content.padding(style::GAP))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -695,32 +712,35 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
     let existing = row(available
         .into_iter()
         .map(|p| {
-            button(text(p.name.clone()).size(18))
-                .padding(14)
+            style::touch_button(&p.name, 24)
+                .width(Length::Fixed(300.0))
+                .style(button::secondary)
                 .on_press(Message::Setup(SetupMessage::PickExistingPlayer(p.clone())))
                 .into()
         })
         .collect::<Vec<Element<Message>>>())
-    .spacing(8)
+    .spacing(14)
     .wrap();
 
     column![
-        text("Who's sitting here?").size(26),
-        scrollable(existing).height(Length::Fixed(180.0)),
+        text("Who's sitting here?").size(40),
+        scrollable(existing).height(Length::Fill),
         row![
             text_input("New player name", &state.new_player_name)
-                .size(20)
-                .padding(14)
+                .size(26)
+                .padding(22)
                 .on_input(|s| Message::Setup(SetupMessage::NewPlayerNameChanged(s)))
                 .on_submit(Message::Setup(SetupMessage::CreatePlayer)),
-            button(text("Add Player").size(18))
-                .padding(14)
+            style::touch_button("Add Player", 22)
+                .width(Length::Fixed(240.0))
                 .style(button::primary)
                 .on_press(Message::Setup(SetupMessage::CreatePlayer)),
         ]
-        .spacing(8),
+        .spacing(14)
+        .align_y(iced::Alignment::Center),
     ]
-    .spacing(16)
+    .spacing(22)
+    .height(Length::Fill)
     .into()
 }
 
@@ -730,21 +750,22 @@ fn commander_picker<'a>(
 ) -> Element<'a, Message> {
     let history_row: Element<Message> = if history.is_empty() {
         text("No commanders played yet - search below to add one.")
-            .size(14)
+            .size(18)
             .into()
     } else {
         row(history
             .iter()
             .map(|c| {
-                button(text(c.name.clone()).size(16))
-                    .padding(10)
+                style::touch_button(&c.name, 20)
+                    .width(Length::Fixed(320.0))
+                    .style(button::secondary)
                     .on_press(Message::Setup(SetupMessage::PickHistoryCommander(
                         c.clone(),
                     )))
                     .into()
             })
             .collect::<Vec<Element<Message>>>())
-        .spacing(8)
+        .spacing(12)
         .wrap()
         .into()
     };
@@ -754,41 +775,49 @@ fn commander_picker<'a>(
             .commander_results
             .iter()
             .map(|c| {
-                button(text(format!("{}  [{}]", c.name, c.color_identity)).size(16))
-                    .padding(10)
-                    .width(Length::Fill)
-                    .on_press(Message::Setup(SetupMessage::PickCommanderName(c.clone())))
-                    .into()
+                button(
+                    container(text(format!("{}   [{}]", c.name, c.color_identity)).size(22))
+                        .padding([0, 20])
+                        .center_y(Length::Fill),
+                )
+                .padding(0)
+                .height(Length::Fixed(style::TOUCH_H))
+                .width(Length::Fill)
+                .style(button::secondary)
+                .on_press(Message::Setup(SetupMessage::PickCommanderName(c.clone())))
+                .into()
             })
             .collect::<Vec<Element<Message>>>(),
     )
-    .spacing(6);
+    .spacing(10);
 
     let search_label = if state.searching {
-        "Searching Scryfall..."
+        "Searching..."
     } else {
-        "Search Scryfall"
+        "Search"
     };
 
     column![
-        text("Pick a commander").size(26),
-        text("This player's commanders:").size(15),
-        scrollable(history_row).height(Length::Fixed(90.0)),
+        text("Pick a commander").size(40),
+        text("This player's commanders").size(18),
+        scrollable(history_row).height(Length::Fixed(190.0)),
         row![
             text_input("Commander name", &state.commander_query)
-                .size(20)
-                .padding(14)
+                .size(26)
+                .padding(22)
                 .on_input(|s| Message::Setup(SetupMessage::CommanderQueryChanged(s)))
                 .on_submit(Message::Setup(SetupMessage::SearchCommanders)),
-            button(text(search_label).size(18))
-                .padding(14)
+            style::touch_button(search_label, 22)
+                .width(Length::Fixed(220.0))
                 .style(button::primary)
                 .on_press(Message::Setup(SetupMessage::SearchCommanders)),
         ]
-        .spacing(8),
+        .spacing(14)
+        .align_y(iced::Alignment::Center),
         scrollable(results).height(Length::Fill),
     ]
-    .spacing(14)
+    .spacing(18)
+    .height(Length::Fill)
     .into()
 }
 
@@ -804,43 +833,46 @@ fn art_gallery<'a>(
         .map(|card| {
             let thumb: Element<Message> = match card.small_url.as_deref().and_then(|u| image_cache.get(u)) {
                 Some(handle) => image(handle.clone())
-                    .width(Length::Fixed(180.0))
-                    .height(Length::Fixed(130.0))
+                    .width(Length::Fixed(300.0))
+                    .height(Length::Fixed(220.0))
                     .content_fit(ContentFit::Cover)
                     .into(),
-                None => container(text("...").size(14))
-                    .width(Length::Fixed(180.0))
-                    .height(Length::Fixed(130.0))
-                    .center_x(Length::Fixed(180.0))
-                    .center_y(Length::Fixed(130.0))
+                None => container(text("...").size(20))
+                    .width(Length::Fixed(300.0))
+                    .height(Length::Fixed(220.0))
+                    .center_x(Length::Fixed(300.0))
+                    .center_y(Length::Fixed(220.0))
                     .into(),
             };
             button(
-                column![thumb, text(card.set_name.clone()).size(12)]
-                    .spacing(4)
+                column![thumb, text(card.set_name.clone()).size(16)]
+                    .spacing(8)
                     .align_x(iced::Alignment::Center),
             )
-            .padding(6)
+            .padding(10)
+            .style(button::secondary)
             .on_press(Message::Setup(SetupMessage::PickArt(card.clone())))
             .into()
         })
         .collect();
 
     let status = if state.loading_art_options {
-        text("Loading every printing from Scryfall...").size(14)
+        text("Loading every printing from Scryfall...").size(18)
     } else {
-        text(format!("{} printings found", state.art_options.len())).size(14)
+        text(format!("{} printings found", state.art_options.len())).size(18)
     };
 
     column![
-        text(format!("Choose art for {}", target.name)).size(26),
+        text(format!("Choose art for {}", target.name)).size(40),
         status,
-        scrollable(row(tiles).spacing(10).wrap()).height(Length::Fill),
-        button(text("Back to search").size(16))
-            .padding(10)
+        scrollable(row(tiles).spacing(16).wrap()).height(Length::Fill),
+        style::touch_button("Back to search", 20)
+            .width(Length::Fixed(280.0))
+            .style(button::secondary)
             .on_press(Message::Setup(SetupMessage::CancelArtPick)),
     ]
-    .spacing(14)
+    .spacing(18)
+    .height(Length::Fill)
     .into()
 }
 
@@ -867,22 +899,25 @@ fn seat_summary<'a>(
 
     column![
         container(portrait).width(Length::Fill).height(Length::FillPortion(4)),
-        text(format!("{} is playing {}", player.name, commander.name)).size(24),
-        text(format!("Color identity: {}", commander.color_identity)).size(16),
+        text(format!("{} is playing {}", player.name, commander.name)).size(32),
+        text(format!("Color identity: {}", commander.color_identity)).size(18),
         row![
-            button(text("Change Player").size(16))
-                .padding(14)
+            style::touch_button("Change Player", 20)
+                .width(Length::Fill)
+                .style(button::secondary)
                 .on_press(Message::Setup(SetupMessage::ClearSeatPlayer)),
-            button(text("Change Commander").size(16))
-                .padding(14)
+            style::touch_button("Change Commander", 20)
+                .width(Length::Fill)
+                .style(button::secondary)
                 .on_press(Message::Setup(SetupMessage::ClearSeatCommander)),
-            button(text("Change Art").size(16))
-                .padding(14)
+            style::touch_button("Change Art", 20)
+                .width(Length::Fill)
+                .style(button::secondary)
                 .on_press(Message::Setup(SetupMessage::ChangeArt)),
         ]
-        .spacing(8),
+        .spacing(14),
     ]
-    .spacing(14)
+    .spacing(18)
     .height(Length::Fill)
     .into()
 }

@@ -5,6 +5,7 @@ use rusqlite::Connection;
 use crate::app::Message;
 use crate::db;
 use crate::model::{GameDetail, GameSummary};
+use crate::style;
 
 pub struct HistoryState {
     pub games: Vec<GameSummary>,
@@ -52,37 +53,48 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
                     _ => "No winner recorded".to_string(),
                 };
                 let reason = g.win_reason.map(|r| r.label()).unwrap_or("-");
-                button(column![
-                    text(g.started_at.format("%Y-%m-%d %H:%M").to_string()).size(14),
-                    text(format!(
-                        "{winner} ({reason}, turn {}) - {} players",
-                        g.ending_turn, g.pod_size
-                    ))
-                    .size(16),
-                ])
-                .padding(12)
+                button(
+                    column![
+                        text(winner).size(26),
+                        text(format!(
+                            "{} \u{00b7} {reason} \u{00b7} turn {} \u{00b7} {} players",
+                            g.started_at.format("%Y-%m-%d %H:%M"),
+                            g.ending_turn,
+                            g.pod_size
+                        ))
+                        .size(17),
+                    ]
+                    .spacing(6),
+                )
+                .padding(20)
                 .width(Length::Fill)
+                .style(button::secondary)
                 .on_press(Message::History(HistoryMessage::ViewGame(g.id)))
                 .into()
             })
             .collect::<Vec<Element<Message>>>(),
     )
-    .spacing(8);
+    .spacing(12);
+
+    let header = container(
+        row![
+            text("Game History").size(38),
+            iced::widget::horizontal_space(),
+            style::touch_button("Back", 20)
+                .width(Length::Fixed(200.0))
+                .style(button::secondary)
+                .on_press(Message::GoHome),
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(style::header);
 
     container(
-        column![
-            row![
-                text("Game History").size(30),
-                button(text("Back").size(18))
-                    .padding(10)
-                    .on_press(Message::GoHome),
-            ]
-            .spacing(16)
-            .align_y(iced::Alignment::Center),
-            scrollable(rows).height(Length::Fill),
-        ]
-        .spacing(16)
-        .padding(20),
+        column![header, scrollable(rows).height(Length::Fill)]
+            .spacing(style::GAP)
+            .padding(style::GAP),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -96,7 +108,7 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
         .map(|k| {
             let killer = k.killer.clone().unwrap_or_else(|| "unknown causes".to_string());
             text(format!("\u{1F480} {} was killed by {}", k.victim, killer))
-                .size(14)
+                .size(18)
                 .into()
         })
         .collect();
@@ -112,54 +124,68 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
                     .map(|(name, amt)| format!("{name}: {amt}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                column![
-                    text(format!(
-                        "{}{} - {}",
-                        if s.won { "\u{1F451} " } else { "" },
-                        s.player_name,
-                        s.commander_name
-                    ))
-                    .size(18),
-                    text(format!("Life: {}  Poison: {}", s.final_life, s.final_poison)).size(14),
-                    text(if dmg.is_empty() {
-                        "No commander damage taken".to_string()
-                    } else {
-                        format!("Damage taken: {dmg}")
-                    })
-                    .size(14),
-                ]
-                .spacing(4)
+                container(
+                    column![
+                        text(format!(
+                            "{}{} - {}",
+                            if s.won { "\u{1F451} " } else { "" },
+                            s.player_name,
+                            s.commander_name
+                        ))
+                        .size(26),
+                        text(format!("Life: {}   Poison: {}", s.final_life, s.final_poison))
+                            .size(18),
+                        text(if dmg.is_empty() {
+                            "No commander damage taken".to_string()
+                        } else {
+                            format!("Damage taken: {dmg}")
+                        })
+                        .size(18),
+                    ]
+                    .spacing(6),
+                )
+                .padding(18)
+                .width(Length::Fill)
+                .style(style::panel)
                 .into()
             })
             .collect::<Vec<Element<Message>>>(),
     )
-    .spacing(16);
+    .spacing(14);
+
+    let header = container(
+        row![
+            text(format!(
+                "Game on {}",
+                detail.started_at.format("%Y-%m-%d %H:%M")
+            ))
+            .size(32),
+            iced::widget::horizontal_space(),
+            style::touch_button("Back to list", 20)
+                .width(Length::Fixed(240.0))
+                .style(button::secondary)
+                .on_press(Message::History(HistoryMessage::Back)),
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(style::header);
 
     container(
         column![
-            row![
-                text(format!(
-                    "Game on {}",
-                    detail.started_at.format("%Y-%m-%d %H:%M")
-                ))
-                .size(24),
-                button(text("Back to list").size(18))
-                    .padding(10)
-                    .on_press(Message::History(HistoryMessage::Back)),
-            ]
-            .spacing(16)
-            .align_y(iced::Alignment::Center),
-            column(kill_lines).spacing(4),
+            header,
             text(format!(
                 "Win condition: {} - ended on turn {}",
                 detail.win_reason.map(|r| r.label()).unwrap_or("-"),
                 detail.ending_turn
             ))
-            .size(18),
+            .size(22),
+            column(kill_lines).spacing(6),
             scrollable(seat_rows).height(Length::Fill),
         ]
-        .spacing(16)
-        .padding(20),
+        .spacing(style::GAP)
+        .padding(style::GAP),
     )
     .width(Length::Fill)
     .height(Length::Fill)
