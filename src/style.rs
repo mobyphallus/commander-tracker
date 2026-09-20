@@ -33,14 +33,35 @@ fn sized_button<'a, Msg: 'a>(label: &'a str, size: u16, height: f32) -> Button<'
 }
 
 pub fn app_theme() -> Theme {
+    // Deep ink-black with a faint blue cast, warm parchment gold for the
+    // accent - reads like a card border rather than a default dark theme.
     let palette = iced::theme::Palette {
-        background: Color::from_rgb8(0x15, 0x13, 0x1a),
-        text: Color::from_rgb8(0xEE, 0xE9, 0xF4),
-        primary: Color::from_rgb8(0xCE, 0xA2, 0x4B),
-        success: Color::from_rgb8(0x5E, 0xB9, 0x7B),
-        danger: Color::from_rgb8(0xD9, 0x6B, 0x5E),
+        background: Color::from_rgb8(0x0C, 0x0D, 0x13),
+        text: Color::from_rgb8(0xF2, 0xEC, 0xDF),
+        primary: Color::from_rgb8(0xC8, 0xA2, 0x5C),
+        success: Color::from_rgb8(0x4F, 0xA6, 0x72),
+        danger: Color::from_rgb8(0xB4, 0x4B, 0x43),
     };
     Theme::custom("Commander Pod".to_string(), palette)
+}
+
+/// A button that matches the frosted chips used for the life total and the
+/// player name, so on-tile controls all read as one family.
+pub fn glass_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let (bg, border) = match status {
+        button::Status::Hovered | button::Status::Pressed => (0.78, 0.45),
+        _ => (0.62, 0.25),
+    };
+    button::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, bg).into()),
+        text_color: Color::WHITE,
+        border: Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, border),
+            width: 1.0,
+            radius: 18.0.into(),
+        },
+        ..button::Style::default()
+    }
 }
 
 /// The page background, and every mid-level panel that sits on it.

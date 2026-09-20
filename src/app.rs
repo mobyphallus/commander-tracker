@@ -166,7 +166,7 @@ impl App {
             Screen::Game(state) => game::view(state, &self.image_cache),
             Screen::Stats(state) => stats::view(state),
             Screen::History(state) => history::view(state),
-            Screen::Players(state) => players::view(state),
+            Screen::Players(state) => players::view(state, &self.image_cache),
         }
     }
 }

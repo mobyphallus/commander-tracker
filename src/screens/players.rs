@@ -1,10 +1,13 @@
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
-use iced::{Element, Length, Task};
+use std::collections::HashMap;
+
+use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
+use iced::{ContentFit, Element, Length, Task};
 use rusqlite::Connection;
 
 use crate::app::Message;
+use crate::art;
 use crate::db;
-use crate::model::{Commander, Player};
+use crate::model::{ArtAnchor, Commander, Player, MAX_ART_ZOOM, MIN_ART_ZOOM};
 use crate::scryfall::{self, ScryfallCard};
 use crate::style;
 
@@ -26,6 +29,13 @@ pub struct ManagedPlayer {
     pub query: String,
     pub results: Vec<ScryfallCard>,
     pub searching: bool,
+    /// Set while picking a different printing's art for one of this
+    /// player's commanders.
+    pub art_for: Option<Commander>,
+    pub art_options: Vec<ScryfallCard>,
+    pub loading_art: bool,
+    /// Set while zooming/anchoring one commander's art.
+    pub framing: Option<Commander>,
 }
 
 impl PlayersState {
@@ -63,6 +73,14 @@ pub enum PlayersMessage {
     SearchResults(Result<Vec<ScryfallCard>, String>),
     AddCommander(ScryfallCard),
     RemoveCommander(i64),
+    ChangeArt(Commander),
+    ArtOptionsLoaded(Result<Vec<ScryfallCard>, String>),
+    PickArt(ScryfallCard),
+    CancelArt,
+    StartFraming(Commander),
+    SetArtZoom(f32),
+    SetArtAnchor(ArtAnchor),
+    DoneFraming,
 }
 
 pub fn update(
@@ -137,6 +155,10 @@ pub fn update(
                 query: String::new(),
                 results: Vec::new(),
                 searching: false,
+                art_for: None,
+                art_options: Vec::new(),
+                loading_art: false,
+                framing: None,
             });
         }
         PlayersMessage::CloseManage => state.managing = None,
@@ -199,12 +221,122 @@ pub fn update(
                 }
             }
         }
+        PlayersMessage::ChangeArt(commander) => {
+            if let Some(m) = &mut state.managing {
+                let oracle_id = commander.oracle_id.clone();
+                m.art_for = Some(commander);
+                m.art_options.clear();
+                m.loading_art = true;
+                return Task::perform(scryfall::fetch_prints(oracle_id), |res| {
+                    Message::Players(PlayersMessage::ArtOptionsLoaded(res))
+                });
+            }
+        }
+        PlayersMessage::ArtOptionsLoaded(res) => {
+            if let Some(m) = &mut state.managing {
+                m.loading_art = false;
+                match res {
+                    Ok(list) => {
+                        let thumbs: Vec<Task<Message>> = list
+                            .iter()
+                            .filter_map(|c| c.small_url.clone())
+                            .take(20)
+                            .map(|url| {
+                                let key = url.clone();
+                                Task::perform(scryfall::fetch_image(url), move |res| {
+                                    Message::ArtLoaded(key.clone(), res)
+                                })
+                            })
+                            .collect();
+                        m.art_options = list;
+                        return Task::batch(thumbs);
+                    }
+                    Err(e) => state.error = Some(format!("Couldn't load printings: {e}")),
+                }
+            }
+        }
+        PlayersMessage::PickArt(card) => {
+            let Some(m) = &mut state.managing else {
+                return Task::none();
+            };
+            let Some(target) = m.art_for.take() else {
+                return Task::none();
+            };
+            m.art_options.clear();
+            match db::upsert_commander(
+                conn,
+                &target.oracle_id,
+                &target.name,
+                card.image_url.as_deref(),
+                card.art_crop_url.as_deref(),
+                &target.color_identity,
+            ) {
+                Ok(commander) => {
+                    m.commanders =
+                        db::player_commander_history(conn, m.player.id).unwrap_or_default();
+                    if let Some(url) = commander.portrait_url() {
+                        let url = url.to_string();
+                        let key = url.clone();
+                        return Task::perform(scryfall::fetch_image(url), move |res| {
+                            Message::ArtLoaded(key.clone(), res)
+                        });
+                    }
+                }
+                Err(e) => state.error = Some(format!("Couldn't save art: {e}")),
+            }
+        }
+        PlayersMessage::CancelArt => {
+            if let Some(m) = &mut state.managing {
+                m.art_for = None;
+                m.art_options.clear();
+            }
+        }
+        PlayersMessage::StartFraming(commander) => {
+            if let Some(m) = &mut state.managing {
+                m.framing = Some(commander);
+            }
+        }
+        PlayersMessage::SetArtZoom(zoom) => {
+            if let Some(m) = &mut state.managing {
+                if let Some(c) = &mut m.framing {
+                    c.art_zoom = zoom.clamp(MIN_ART_ZOOM, MAX_ART_ZOOM);
+                    let _ =
+                        db::set_commander_framing(conn, c.id, c.art_zoom, c.art_anchor);
+                    m.commanders =
+                        db::player_commander_history(conn, m.player.id).unwrap_or_default();
+                }
+            }
+        }
+        PlayersMessage::SetArtAnchor(anchor) => {
+            if let Some(m) = &mut state.managing {
+                if let Some(c) = &mut m.framing {
+                    c.art_anchor = anchor;
+                    let _ = db::set_commander_framing(conn, c.id, c.art_zoom, anchor);
+                    m.commanders =
+                        db::player_commander_history(conn, m.player.id).unwrap_or_default();
+                }
+            }
+        }
+        PlayersMessage::DoneFraming => {
+            if let Some(m) = &mut state.managing {
+                m.framing = None;
+            }
+        }
     }
     Task::none()
 }
 
-pub fn view(state: &PlayersState) -> Element<'_, Message> {
+pub fn view<'a>(
+    state: &'a PlayersState,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
     if let Some(managed) = &state.managing {
+        if let Some(commander) = &managed.framing {
+            return framing_view(commander, image_cache);
+        }
+        if managed.art_for.is_some() {
+            return art_view(managed, image_cache);
+        }
         return manage_view(state, managed);
     }
 
@@ -367,13 +499,23 @@ fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Eleme
                     container(
                         row![
                             text(c.name.clone()).size(24).width(Length::Fill),
-                            text(c.color_identity.clone()).size(20).width(Length::Fixed(110.0)),
+                            text(c.color_identity.clone()).size(20).width(Length::Fixed(90.0)),
+                            style::touch_button("Art", 18)
+                                .width(Length::Fixed(130.0))
+                                .style(button::secondary)
+                                .on_press(Message::Players(PlayersMessage::ChangeArt(c.clone()))),
+                            style::touch_button("Frame", 18)
+                                .width(Length::Fixed(150.0))
+                                .style(button::secondary)
+                                .on_press(Message::Players(PlayersMessage::StartFraming(
+                                    c.clone()
+                                ))),
                             style::touch_button("Remove", 18)
-                                .width(Length::Fixed(170.0))
+                                .width(Length::Fixed(160.0))
                                 .style(button::danger)
                                 .on_press(Message::Players(PlayersMessage::RemoveCommander(c.id))),
                         ]
-                        .spacing(14)
+                        .spacing(12)
                         .align_y(iced::Alignment::Center),
                     )
                     .padding([10, 20])
@@ -447,4 +589,146 @@ fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Eleme
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// Pick a different printing's art for one of this player's commanders.
+fn art_view<'a>(
+    managed: &'a ManagedPlayer,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let target = managed.art_for.as_ref().unwrap();
+
+    let tiles: Vec<Element<Message>> = managed
+        .art_options
+        .iter()
+        .map(|card| {
+            let thumb: Element<Message> =
+                match card.small_url.as_deref().and_then(|u| image_cache.get(u)) {
+                    Some(handle) => image(handle.clone())
+                        .width(Length::Fixed(300.0))
+                        .height(Length::Fixed(220.0))
+                        .content_fit(ContentFit::Cover)
+                        .into(),
+                    None => container(text("...").size(20))
+                        .width(Length::Fixed(300.0))
+                        .height(Length::Fixed(220.0))
+                        .center_x(Length::Fixed(300.0))
+                        .center_y(Length::Fixed(220.0))
+                        .into(),
+                };
+            button(
+                column![thumb, text(card.set_name.clone()).size(16)]
+                    .spacing(8)
+                    .align_x(iced::Alignment::Center),
+            )
+            .padding(10)
+            .style(button::secondary)
+            .on_press(Message::Players(PlayersMessage::PickArt(card.clone())))
+            .into()
+        })
+        .collect();
+
+    let status = if managed.loading_art {
+        text("Loading every printing from Scryfall...").size(18)
+    } else {
+        text(format!("{} printings found", managed.art_options.len())).size(18)
+    };
+
+    container(
+        column![
+            text(format!("Choose art for {}", target.name)).size(40),
+            status,
+            scrollable(row(tiles).spacing(16).wrap()).height(Length::Fill),
+            style::touch_button("Back", 20)
+                .width(Length::Fixed(280.0))
+                .style(button::secondary)
+                .on_press(Message::Players(PlayersMessage::CancelArt)),
+        ]
+        .spacing(18)
+        .align_x(iced::Alignment::Center)
+        .padding(style::GAP),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+/// Zoom/anchor a commander's art so the right part shows in a seat tile.
+fn framing_view<'a>(
+    commander: &'a Commander,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let zoom = commander.art_zoom;
+
+    let preview = container(art::framed(commander, image_cache, 20))
+        .width(Length::Fixed(640.0))
+        .height(Length::Fixed(360.0))
+        .style(style::panel);
+
+    let anchor_grid = column(
+        ArtAnchor::GRID
+            .iter()
+            .map(|row_anchors| {
+                row(row_anchors
+                    .iter()
+                    .map(|a| {
+                        let selected = commander.art_anchor == *a;
+                        button(container(text("")).width(Length::Fill).height(Length::Fill))
+                            .width(Length::Fixed(72.0))
+                            .height(Length::Fixed(72.0))
+                            .style(if selected {
+                                button::primary
+                            } else {
+                                button::secondary
+                            })
+                            .on_press(Message::Players(PlayersMessage::SetArtAnchor(*a)))
+                            .into()
+                    })
+                    .collect::<Vec<Element<Message>>>())
+                .spacing(10)
+                .into()
+            })
+            .collect::<Vec<Element<Message>>>(),
+    )
+    .spacing(10);
+
+    container(
+        column![
+            text(format!("Frame {}", commander.name)).size(40),
+            text("Zoom in, then pick which part of the art stays in the tile.").size(18),
+            row![
+                preview,
+                column![text("Focus").size(20), anchor_grid]
+                    .spacing(12)
+                    .align_x(iced::Alignment::Center),
+            ]
+            .spacing(28)
+            .align_y(iced::Alignment::Center),
+            row![
+                style::touch_button("\u{2212} Zoom out", 20)
+                    .width(Length::Fixed(230.0))
+                    .style(button::secondary)
+                    .on_press(Message::Players(PlayersMessage::SetArtZoom(zoom - 0.15))),
+                container(text(format!("{:.0}%", zoom * 100.0)).size(28))
+                    .width(Length::Fixed(140.0))
+                    .center_x(Length::Fixed(140.0)),
+                style::touch_button("Zoom in +", 20)
+                    .width(Length::Fixed(230.0))
+                    .style(button::secondary)
+                    .on_press(Message::Players(PlayersMessage::SetArtZoom(zoom + 0.15))),
+            ]
+            .spacing(14)
+            .align_y(iced::Alignment::Center),
+            style::cta_button("Done", 24)
+                .width(Length::Fixed(300.0))
+                .style(button::success)
+                .on_press(Message::Players(PlayersMessage::DoneFraming)),
+        ]
+        .spacing(22)
+        .align_x(iced::Alignment::Center)
+        .padding(style::GAP),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }

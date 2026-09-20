@@ -7,7 +7,10 @@ use rusqlite::Connection;
 use crate::app::Message;
 use crate::db;
 use crate::layout::{self, TableLayout};
-use crate::model::{Commander, Player, Seat, STARTING_LIFE};
+use crate::art;
+use crate::model::{
+    ArtAnchor, Commander, Player, Seat, MAX_ART_ZOOM, MIN_ART_ZOOM, STARTING_LIFE,
+};
 use crate::scryfall::{self, ScryfallCard};
 use crate::style;
 
@@ -53,6 +56,8 @@ pub struct SetupState {
     pub art_target: Option<ArtTarget>,
     pub art_options: Vec<ScryfallCard>,
     pub loading_art_options: bool,
+    /// Set while the player is framing a seat's art (zoom + anchor).
+    pub framing: bool,
     pub error: Option<String>,
 }
 
@@ -71,6 +76,7 @@ impl SetupState {
             art_target: None,
             art_options: Vec::new(),
             loading_art_options: false,
+            framing: false,
             error: None,
         }
     }
@@ -99,6 +105,7 @@ impl SetupState {
         self.commander_results.clear();
         self.art_target = None;
         self.art_options.clear();
+        self.framing = false;
     }
 }
 
@@ -123,6 +130,10 @@ pub enum SetupMessage {
     PickArt(ScryfallCard),
     CancelArtPick,
     ChangeArt,
+    StartFraming,
+    SetArtZoom(f32),
+    SetArtAnchor(ArtAnchor),
+    DoneFraming,
     ClearSeatCommander,
     StartGame,
 }
@@ -142,6 +153,11 @@ fn load_portrait_task(commander: &Commander) -> Task<Message> {
         }
         None => Task::none(),
     }
+}
+
+fn current_commander_mut(state: &mut SetupState) -> Option<&mut Commander> {
+    let seat = state.editing_seat?;
+    state.seats.get_mut(seat)?.commander.as_mut()
 }
 
 fn load_prints_task(oracle_id: String) -> Task<Message> {
@@ -370,6 +386,31 @@ pub fn update(
             state.loading_art_options = true;
             (load_prints_task(commander.oracle_id), None)
         }
+        SetupMessage::StartFraming => {
+            state.framing = true;
+            (Task::none(), None)
+        }
+        SetupMessage::SetArtZoom(zoom) => {
+            if let Some(commander) = current_commander_mut(state) {
+                commander.art_zoom = zoom.clamp(MIN_ART_ZOOM, MAX_ART_ZOOM);
+                let (id, zoom, anchor) =
+                    (commander.id, commander.art_zoom, commander.art_anchor);
+                let _ = db::set_commander_framing(conn, id, zoom, anchor);
+            }
+            (Task::none(), None)
+        }
+        SetupMessage::SetArtAnchor(anchor) => {
+            if let Some(commander) = current_commander_mut(state) {
+                commander.art_anchor = anchor;
+                let (id, zoom) = (commander.id, commander.art_zoom);
+                let _ = db::set_commander_framing(conn, id, zoom, anchor);
+            }
+            (Task::none(), None)
+        }
+        SetupMessage::DoneFraming => {
+            state.framing = false;
+            (Task::none(), None)
+        }
         SetupMessage::ClearSeatCommander => {
             if let Some(seat) = state.editing_seat {
                 state.seats[seat].commander = None;
@@ -439,88 +480,126 @@ fn layout_preview(table: &TableLayout) -> Element<'static, Message> {
     .into()
 }
 
-fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
-    let options = layout::options_for(state.pod_size);
-
-    let cards = row(options
-        .into_iter()
-        .map(|opt| {
-            let label = opt.name.clone();
-            button(
-                column![layout_preview(&opt), text(label).size(22)]
-                    .spacing(14)
-                    .align_x(iced::Alignment::Center),
-            )
-            .padding(20)
-            .style(button::secondary)
-            .on_press(Message::Setup(SetupMessage::ChooseLayout(opt)))
-            .into()
-        })
-        .collect::<Vec<Element<Message>>>())
-    .spacing(24)
-    .wrap();
+/// A full-bleed step screen: title, subtitle, body, and a back button
+/// pinned at the bottom, so the two setup steps feel like one flow.
+fn step_screen<'a>(
+    title: &'a str,
+    subtitle: String,
+    body: Element<'a, Message>,
+    back: Message,
+) -> Element<'a, Message> {
+    let header = container(
+        column![text(title).size(46), text(subtitle).size(20)]
+            .spacing(8)
+            .align_x(iced::Alignment::Center),
+    )
+    .padding(24)
+    .width(Length::Fill)
+    .center_x(Length::Fill)
+    .style(style::header);
 
     container(
         column![
-            text("How are you sitting?").size(44),
-            text(format!(
-                "{} players - pick the arrangement that matches your table",
-                state.pod_size
-            ))
-            .size(18),
-            scrollable(cards).width(Length::Fill),
-            style::touch_button("Back", 20)
-                .width(Length::Fixed(240.0))
+            header,
+            container(body)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+            style::touch_button("Back", 22)
+                .width(Length::Fixed(280.0))
                 .style(button::secondary)
-                .on_press(Message::Setup(SetupMessage::BackToPodSizeChoice)),
+                .on_press(back),
         ]
-        .spacing(28)
+        .spacing(style::GAP)
         .align_x(iced::Alignment::Center)
         .padding(style::GAP),
     )
     .width(Length::Fill)
     .height(Length::Fill)
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
     .into()
 }
 
+fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
+    let options = layout::options_for(state.pod_size);
+
+    // Two per row keeps the previews large enough to read at a glance.
+    let mut rows: Vec<Element<Message>> = Vec::new();
+    for chunk in options.chunks(2) {
+        let cards: Vec<Element<Message>> = chunk
+            .iter()
+            .map(|opt| {
+                let label = opt.name.clone();
+                button(
+                    column![layout_preview(opt), text(label).size(24)]
+                        .spacing(16)
+                        .align_x(iced::Alignment::Center),
+                )
+                .padding(24)
+                .style(button::secondary)
+                .on_press(Message::Setup(SetupMessage::ChooseLayout(opt.clone())))
+                .into()
+            })
+            .collect();
+        rows.push(row(cards).spacing(28).into());
+    }
+
+    step_screen(
+        "How are you sitting?",
+        format!("{} players - pick the arrangement that matches your table", state.pod_size),
+        scrollable(
+            column(rows)
+                .spacing(28)
+                .align_x(iced::Alignment::Center)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .into(),
+        Message::Setup(SetupMessage::BackToPodSizeChoice),
+    )
+}
+
 fn pod_size_view<'a>() -> Element<'a, Message> {
-    let buttons = row((MIN_POD..=MAX_POD)
-        .map(|n| {
-            button(
-                container(text(n.to_string()).size(46))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            )
-            .padding(0)
-            .width(Length::Fixed(140.0))
-            .height(Length::Fixed(140.0))
-            .style(button::primary)
-            .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)))
+    // 4 per row, so the tiles stay big instead of stringing out across the
+    // full width of the screen.
+    let counts: Vec<usize> = (MIN_POD..=MAX_POD).collect();
+    let rows: Vec<Element<Message>> = counts
+        .chunks(4)
+        .map(|chunk| {
+            row(chunk
+                .iter()
+                .map(|n| {
+                    let n = *n;
+                    button(
+                        column![
+                            text(n.to_string()).size(64),
+                            text(if n == 2 { "player" } else { "players" }).size(16),
+                        ]
+                        .spacing(2)
+                        .align_x(iced::Alignment::Center),
+                    )
+                    .padding(0)
+                    .width(Length::Fixed(190.0))
+                    .height(Length::Fixed(190.0))
+                    .style(button::primary)
+                    .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)))
+                    .into()
+                })
+                .collect::<Vec<Element<Message>>>())
+            .spacing(24)
             .into()
         })
-        .collect::<Vec<Element<Message>>>())
-    .spacing(20)
-    .wrap();
+        .collect();
 
-    container(
-        column![
-            text("How many players?").size(48),
-            buttons,
-            style::touch_button("Back", 20)
-                .width(Length::Fixed(240.0))
-                .style(button::secondary)
-                .on_press(Message::GoHome),
-        ]
-        .spacing(44)
-        .align_x(iced::Alignment::Center),
+    step_screen(
+        "How many players?",
+        "Everyone at the table, including you".to_string(),
+        column(rows)
+            .spacing(24)
+            .align_x(iced::Alignment::Center)
+            .into(),
+        Message::GoHome,
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .into()
 }
 
 fn grid_view<'a>(
@@ -588,19 +667,7 @@ fn seat_tile<'a>(
 ) -> Element<'a, Message> {
     match (&seat.player, &seat.commander) {
         (Some(player), Some(commander)) => {
-            let art: Element<Message> = match commander.portrait_url().and_then(|u| image_cache.get(u)) {
-                Some(handle) => image(handle.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .content_fit(ContentFit::Cover)
-                    .into(),
-                None => container(text("Loading art...").size(16))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
-                    .into(),
-            };
+            let art = art::framed(commander, image_cache, 18);
 
             let caption = container(
                 container(
@@ -670,7 +737,9 @@ fn editor_overlay<'a>(
     let seat_index = state.editing_seat.unwrap();
     let seat = &state.seats[seat_index];
 
-    let body: Element<Message> = if state.art_target.is_some() {
+    let body: Element<Message> = if state.framing {
+        framing_editor(seat, image_cache)
+    } else if state.art_target.is_some() {
         art_gallery(state, image_cache)
     } else if seat.player.is_none() {
         player_picker(state, players_cache)
@@ -875,6 +944,88 @@ fn art_gallery<'a>(
     .into()
 }
 
+/// Zoom and anchor the art so the part that matters ends up visible in the
+/// seat tile during play. The preview is the real renderer at tile aspect.
+fn framing_editor<'a>(
+    seat: &'a SeatSetup,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let Some(commander) = seat.commander.as_ref() else {
+        return text("Pick a commander first.").size(22).into();
+    };
+
+    let zoom = commander.art_zoom;
+    let preview = container(art::framed(commander, image_cache, 20))
+        .width(Length::Fixed(640.0))
+        .height(Length::Fixed(360.0))
+        .style(style::panel);
+
+    let anchor_grid = column(
+        ArtAnchor::GRID
+            .iter()
+            .map(|row_anchors| {
+                row(row_anchors
+                    .iter()
+                    .map(|a| {
+                        let selected = commander.art_anchor == *a;
+                        button(container(text("")).width(Length::Fill).height(Length::Fill))
+                            .width(Length::Fixed(72.0))
+                            .height(Length::Fixed(72.0))
+                            .style(if selected {
+                                button::primary
+                            } else {
+                                button::secondary
+                            })
+                            .on_press(Message::Setup(SetupMessage::SetArtAnchor(*a)))
+                            .into()
+                    })
+                    .collect::<Vec<Element<Message>>>())
+                .spacing(10)
+                .into()
+            })
+            .collect::<Vec<Element<Message>>>(),
+    )
+    .spacing(10);
+
+    let zoom_row = row![
+        style::touch_button("\u{2212} Zoom out", 20)
+            .width(Length::Fixed(230.0))
+            .style(button::secondary)
+            .on_press(Message::Setup(SetupMessage::SetArtZoom(zoom - 0.15))),
+        container(text(format!("{:.0}%", zoom * 100.0)).size(28))
+            .width(Length::Fixed(140.0))
+            .center_x(Length::Fixed(140.0)),
+        style::touch_button("Zoom in +", 20)
+            .width(Length::Fixed(230.0))
+            .style(button::secondary)
+            .on_press(Message::Setup(SetupMessage::SetArtZoom(zoom + 0.15))),
+    ]
+    .spacing(14)
+    .align_y(iced::Alignment::Center);
+
+    column![
+        text(format!("Frame {}", commander.name)).size(38),
+        text("Zoom in, then pick which part of the art stays in the tile.").size(18),
+        row![
+            preview,
+            column![text("Focus").size(20), anchor_grid]
+                .spacing(12)
+                .align_x(iced::Alignment::Center),
+        ]
+        .spacing(28)
+        .align_y(iced::Alignment::Center),
+        zoom_row,
+        style::cta_button("Done", 24)
+            .width(Length::Fixed(300.0))
+            .style(button::success)
+            .on_press(Message::Setup(SetupMessage::DoneFraming)),
+    ]
+    .spacing(22)
+    .align_x(iced::Alignment::Center)
+    .height(Length::Fill)
+    .into()
+}
+
 fn seat_summary<'a>(
     seat: &'a SeatSetup,
     image_cache: &'a HashMap<String, image::Handle>,
@@ -882,19 +1033,7 @@ fn seat_summary<'a>(
     let player = seat.player.as_ref().unwrap();
     let commander = seat.commander.as_ref().unwrap();
 
-    let portrait: Element<Message> = match commander.portrait_url().and_then(|u| image_cache.get(u)) {
-        Some(handle) => image(handle.clone())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .content_fit(ContentFit::Contain)
-            .into(),
-        None => container(text("Loading art...").size(16))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into(),
-    };
+    let portrait = art::framed(commander, image_cache, 20);
 
     column![
         container(portrait).width(Length::Fill).height(Length::FillPortion(4)),
@@ -913,6 +1052,10 @@ fn seat_summary<'a>(
                 .width(Length::Fill)
                 .style(button::secondary)
                 .on_press(Message::Setup(SetupMessage::ChangeArt)),
+            style::touch_button("Frame Art", 20)
+                .width(Length::Fill)
+                .style(button::primary)
+                .on_press(Message::Setup(SetupMessage::StartFraming)),
         ]
         .spacing(14),
     ]

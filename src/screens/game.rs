@@ -3,10 +3,11 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use iced::widget::{button, column, container, image, mouse_area, row, scrollable, stack, text};
-use iced::{Border, Color, ContentFit, Element, Length};
+use iced::{Border, Color, Element, Length};
 use rusqlite::Connection;
 
 use crate::app::Message;
+use crate::art;
 use crate::db;
 use crate::layout::{self, TableLayout};
 use crate::model::{
@@ -664,19 +665,7 @@ fn seat_panel<'a>(
         return eliminated_tile(index, seat, image_cache);
     }
 
-    let art: Element<Message> = match seat.commander.portrait_url().and_then(|u| image_cache.get(u)) {
-        Some(handle) => image(handle.clone())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .content_fit(ContentFit::Cover)
-            .into(),
-        None => container(text(seat.commander.name.clone()).size(16))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into(),
-    };
+    let art = art::framed(&seat.commander, image_cache, 18);
 
     let (value, target, subtitle) = active_counter(index, state);
 
@@ -697,9 +686,9 @@ fn seat_panel<'a>(
     // Pinned to the tile's bottom-right so it never collides with the game
     // timer, which floats dead center of the board.
     let kill_button = container(
-        style::touch_button("Commander Hate", 18)
-            .width(Length::Fixed(250.0))
-            .style(button::secondary)
+        style::touch_button("Commander Hate", 20)
+            .width(Length::Fixed(260.0))
+            .style(style::glass_button)
             .on_press(Message::Game(GameMessage::StartHate(index))),
     )
     .width(Length::Fill)
@@ -739,14 +728,7 @@ fn eliminated_tile<'a>(
     seat: &'a Seat,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
-    let art: Element<Message> = match seat.commander.portrait_url().and_then(|u| image_cache.get(u)) {
-        Some(handle) => image(handle.clone())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .content_fit(ContentFit::Cover)
-            .into(),
-        None => container(text("")).width(Length::Fill).height(Length::Fill).into(),
-    };
+    let art = art::framed(&seat.commander, image_cache, 16);
 
     let scrim = container(
         column![
@@ -829,7 +811,7 @@ fn hate_view(state: &GameState, flow: HateFlow) -> Element<'_, Message> {
                 .collect(),
         ),
         Some(kind) => {
-            let mut who: Vec<Element<Message>> = state
+            let who: Vec<Element<Message>> = state
                 .seats
                 .iter()
                 .enumerate()
@@ -849,13 +831,6 @@ fn hate_view(state: &GameState, flow: HateFlow) -> Element<'_, Message> {
                     .into()
                 })
                 .collect();
-            who.push(
-                style::cta_button("Unknown / nobody", 26)
-                    .width(Length::Fill)
-                    .style(button::secondary)
-                    .on_press(Message::Game(GameMessage::ConfirmHate(None)))
-                    .into(),
-            );
             (format!("{} - who did it?", kind.label()), who)
         }
     };

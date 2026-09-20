@@ -6,6 +6,77 @@ pub struct Player {
     pub name: String,
 }
 
+/// Which part of the art stays visible when it's cropped to a seat tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtAnchor {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl ArtAnchor {
+    pub const GRID: [[ArtAnchor; 3]; 3] = [
+        [Self::TopLeft, Self::Top, Self::TopRight],
+        [Self::Left, Self::Center, Self::Right],
+        [Self::BottomLeft, Self::Bottom, Self::BottomRight],
+    ];
+
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::TopLeft => "top_left",
+            Self::Top => "top",
+            Self::TopRight => "top_right",
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+            Self::BottomLeft => "bottom_left",
+            Self::Bottom => "bottom",
+            Self::BottomRight => "bottom_right",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "top_left" => Self::TopLeft,
+            "top" => Self::Top,
+            "top_right" => Self::TopRight,
+            "left" => Self::Left,
+            "right" => Self::Right,
+            "bottom_left" => Self::BottomLeft,
+            "bottom" => Self::Bottom,
+            "bottom_right" => Self::BottomRight,
+            _ => Self::Center,
+        }
+    }
+
+    pub fn horizontal(&self) -> iced::alignment::Horizontal {
+        use iced::alignment::Horizontal;
+        match self {
+            Self::TopLeft | Self::Left | Self::BottomLeft => Horizontal::Left,
+            Self::Top | Self::Center | Self::Bottom => Horizontal::Center,
+            _ => Horizontal::Right,
+        }
+    }
+
+    pub fn vertical(&self) -> iced::alignment::Vertical {
+        use iced::alignment::Vertical;
+        match self {
+            Self::TopLeft | Self::Top | Self::TopRight => Vertical::Top,
+            Self::Left | Self::Center | Self::Right => Vertical::Center,
+            _ => Vertical::Bottom,
+        }
+    }
+}
+
+pub const MIN_ART_ZOOM: f32 = 1.0;
+pub const MAX_ART_ZOOM: f32 = 3.0;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Commander {
     pub id: i64,
@@ -18,6 +89,10 @@ pub struct Commander {
     /// Cropped art of the currently chosen printing, used for the player's portrait.
     pub art_crop_url: Option<String>,
     pub color_identity: String,
+    /// How the art is framed in a seat tile: 1.0 fills the tile, higher
+    /// zooms in on the part `art_anchor` points at.
+    pub art_zoom: f32,
+    pub art_anchor: ArtAnchor,
 }
 
 impl Commander {

@@ -5,7 +5,7 @@ edition = "2021"
 description = "Local MTG Commander pod tracker: life, poison, commander damage, turn timers, and win-rate stats."
 
 [dependencies]
-iced = { version = "0.13", features = ["tokio", "image"] }
+iced = { version = "0.13", features = ["tokio", "image", "lazy"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

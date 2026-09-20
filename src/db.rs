@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use rusqlite::{params, Connection};
 
 use crate::model::{
-    Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailSeat, GameSummary, HateKind,
-    MatchupStat, Player, PlayerStat, WinReason,
+    ArtAnchor, Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailSeat, GameSummary,
+    HateKind, MatchupStat, Player, PlayerStat, WinReason,
 };
 
 pub fn data_dir() -> PathBuf {
@@ -37,7 +37,9 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
             name            TEXT NOT NULL,
             image_url       TEXT,
             art_crop_url    TEXT,
-            color_identity  TEXT NOT NULL DEFAULT ''
+            color_identity  TEXT NOT NULL DEFAULT '',
+            art_zoom        REAL NOT NULL DEFAULT 1.0,
+            art_anchor      TEXT NOT NULL DEFAULT 'center'
         );
 
         CREATE TABLE IF NOT EXISTS games (
@@ -87,7 +89,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
 
     migrate_scryfall_id_to_oracle_id(conn)?;
     migrate_add_ending_turn(conn)?;
-    migrate_add_hate_kind(conn)
+    migrate_add_hate_kind(conn)?;
+    migrate_add_art_framing(conn)
 }
 
 /// Early builds keyed `commanders` by a specific printing's Scryfall id. That
@@ -110,6 +113,19 @@ fn migrate_add_ending_turn(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column {
         conn.execute_batch(
             "ALTER TABLE games ADD COLUMN ending_turn INTEGER NOT NULL DEFAULT 1;",
+        )?;
+    }
+    Ok(())
+}
+
+fn migrate_add_art_framing(conn: &Connection) -> rusqlite::Result<()> {
+    let has_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('commanders') WHERE name = 'art_zoom'")?
+        .exists([])?;
+    if !has_column {
+        conn.execute_batch(
+            "ALTER TABLE commanders ADD COLUMN art_zoom REAL NOT NULL DEFAULT 1.0;
+             ALTER TABLE commanders ADD COLUMN art_anchor TEXT NOT NULL DEFAULT 'center';",
         )?;
     }
     Ok(())
@@ -188,6 +204,7 @@ pub fn remove_player_commander(
 }
 
 fn commander_from_row(row: &rusqlite::Row) -> rusqlite::Result<Commander> {
+    let anchor: String = row.get(7)?;
     Ok(Commander {
         id: row.get(0)?,
         oracle_id: row.get(1)?,
@@ -195,10 +212,26 @@ fn commander_from_row(row: &rusqlite::Row) -> rusqlite::Result<Commander> {
         image_url: row.get(3)?,
         art_crop_url: row.get(4)?,
         color_identity: row.get(5)?,
+        art_zoom: row.get::<_, f64>(6)? as f32,
+        art_anchor: ArtAnchor::from_db_str(&anchor),
     })
 }
 
-const COMMANDER_COLUMNS: &str = "id, oracle_id, name, image_url, art_crop_url, color_identity";
+const COMMANDER_COLUMNS: &str =
+    "id, oracle_id, name, image_url, art_crop_url, color_identity, art_zoom, art_anchor";
+
+pub fn set_commander_framing(
+    conn: &Connection,
+    commander_id: i64,
+    zoom: f32,
+    anchor: ArtAnchor,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE commanders SET art_zoom = ?1, art_anchor = ?2 WHERE id = ?3",
+        params![zoom as f64, anchor.as_db_str(), commander_id],
+    )?;
+    Ok(())
+}
 
 /// Records that a player picked a commander during setup, regardless of
 /// whether the game that follows is ever finished. This is what backs each
@@ -223,7 +256,8 @@ pub fn record_player_commander_use(
 /// shared with the rest of the pod.
 pub fn player_commander_history(conn: &Connection, player_id: i64) -> rusqlite::Result<Vec<Commander>> {
     let mut stmt = conn.prepare(
-        "SELECT c.id, c.oracle_id, c.name, c.image_url, c.art_crop_url, c.color_identity
+        "SELECT c.id, c.oracle_id, c.name, c.image_url, c.art_crop_url, c.color_identity,
+                c.art_zoom, c.art_anchor
          FROM commanders c
          JOIN player_commanders pc ON pc.commander_id = c.id
          WHERE pc.player_id = ?1
