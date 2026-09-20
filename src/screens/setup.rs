@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{button, column, container, image, row, scrollable, stack, text, text_input};
-use iced::{Color, ContentFit, Element, Length, Task};
+use iced::{ContentFit, Element, Length, Task};
 use rusqlite::Connection;
 
 use crate::app::Message;
@@ -603,19 +603,18 @@ fn seat_tile<'a>(
             };
 
             let caption = container(
-                column![
-                    text(player.name.clone()).size(22),
-                    text(commander.name.clone()).size(14),
-                ]
-                .spacing(2),
+                container(
+                    column![
+                        text(player.name.clone()).size(28),
+                        text(commander.name.clone()).size(18),
+                    ]
+                    .spacing(4),
+                )
+                .padding([12, 20])
+                .style(style::glass),
             )
             .padding(14)
-            .width(Length::Fill)
-            .style(|_theme: &iced::Theme| container::Style {
-                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.6).into()),
-                text_color: Some(Color::WHITE),
-                ..container::Style::default()
-            });
+            .width(Length::Fill);
 
             let overlay = container(caption)
                 .width(Length::Fill)

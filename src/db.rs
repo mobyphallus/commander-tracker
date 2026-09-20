@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use rusqlite::{params, Connection};
 
 use crate::model::{
-    Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailSeat, GameSummary, MatchupStat,
-    Player, PlayerStat, WinReason,
+    Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailSeat, GameSummary, HateKind,
+    MatchupStat, Player, PlayerStat, WinReason,
 };
 
 pub fn data_dir() -> PathBuf {
@@ -72,7 +72,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
             id                     INTEGER PRIMARY KEY,
             game_id                INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
             victim_game_player_id  INTEGER NOT NULL REFERENCES game_players(id),
-            killer_game_player_id  INTEGER REFERENCES game_players(id)
+            killer_game_player_id  INTEGER REFERENCES game_players(id),
+            kind                   TEXT NOT NULL DEFAULT 'commander_kill'
         );
 
         CREATE TABLE IF NOT EXISTS player_commanders (
@@ -85,7 +86,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     migrate_scryfall_id_to_oracle_id(conn)?;
-    migrate_add_ending_turn(conn)
+    migrate_add_ending_turn(conn)?;
+    migrate_add_hate_kind(conn)
 }
 
 /// Early builds keyed `commanders` by a specific printing's Scryfall id. That
@@ -108,6 +110,20 @@ fn migrate_add_ending_turn(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column {
         conn.execute_batch(
             "ALTER TABLE games ADD COLUMN ending_turn INTEGER NOT NULL DEFAULT 1;",
+        )?;
+    }
+    Ok(())
+}
+
+/// Kill logging grew into general "commander hate" (kills, board wipes,
+/// counterspells), so existing rows become plain commander kills.
+fn migrate_add_hate_kind(conn: &Connection) -> rusqlite::Result<()> {
+    let has_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('commander_kills') WHERE name = 'kind'")?
+        .exists([])?;
+    if !has_column {
+        conn.execute_batch(
+            "ALTER TABLE commander_kills ADD COLUMN kind TEXT NOT NULL DEFAULT 'commander_kill';",
         )?;
     }
     Ok(())
@@ -136,6 +152,37 @@ pub fn rename_player(conn: &Connection, id: i64, new_name: &str) -> rusqlite::Re
     conn.execute(
         "UPDATE players SET name = ?1 WHERE id = ?2",
         params![new_name, id],
+    )?;
+    Ok(())
+}
+
+/// How many recorded games a player appears in. Deleting someone with
+/// history would orphan those rows, so callers check this first.
+pub fn player_game_count(conn: &Connection, id: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM game_players WHERE player_id = ?1",
+        params![id],
+        |row| row.get(0),
+    )
+}
+
+pub fn delete_player(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM player_commanders WHERE player_id = ?1",
+        params![id],
+    )?;
+    conn.execute("DELETE FROM players WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn remove_player_commander(
+    conn: &Connection,
+    player_id: i64,
+    commander_id: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM player_commanders WHERE player_id = ?1 AND commander_id = ?2",
+        params![player_id, commander_id],
     )?;
     Ok(())
 }
@@ -271,9 +318,15 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
     for kill in &game.kills {
         let killer_id = kill.killer_seat.map(|i| game_player_ids[i]);
         tx.execute(
-            "INSERT INTO commander_kills (game_id, victim_game_player_id, killer_game_player_id)
-             VALUES (?1, ?2, ?3)",
-            params![game_id, game_player_ids[kill.victim_seat], killer_id],
+            "INSERT INTO commander_kills
+                (game_id, victim_game_player_id, killer_game_player_id, kind)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                game_id,
+                game_player_ids[kill.victim_seat],
+                killer_id,
+                kill.kind.as_db_str()
+            ],
         )?;
     }
 
@@ -440,19 +493,21 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
 
     let kills: Vec<GameDetailKill> = {
         let mut stmt = conn.prepare(
-            "SELECT vc.name, kc.name
+            "SELECT vp2.name, kp2.name, ck.kind
              FROM commander_kills ck
              JOIN game_players vp ON vp.id = ck.victim_game_player_id
-             JOIN commanders vc ON vc.id = vp.commander_id
+             JOIN players vp2 ON vp2.id = vp.player_id
              LEFT JOIN game_players kp ON kp.id = ck.killer_game_player_id
-             LEFT JOIN commanders kc ON kc.id = kp.commander_id
+             LEFT JOIN players kp2 ON kp2.id = kp.player_id
              WHERE ck.game_id = ?1",
         )?;
         let result = stmt
             .query_map(params![game_id], |row| {
+                let kind: String = row.get(2)?;
                 Ok(GameDetailKill {
                     victim: row.get(0)?,
                     killer: row.get(1)?,
+                    kind: HateKind::from_db_str(&kind),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;

@@ -116,11 +116,61 @@ impl WinReason {
     }
 }
 
-/// A commander being killed mid-game, and who (if anyone) is credited.
+/// The kind of interaction logged against a player mid-game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HateKind {
+    CommanderKill,
+    BoardWipe,
+    Counterspell,
+}
+
+impl HateKind {
+    pub const ALL: [HateKind; 3] = [
+        Self::CommanderKill,
+        Self::BoardWipe,
+        Self::Counterspell,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::CommanderKill => "Commander Kill",
+            Self::BoardWipe => "Board Wipe",
+            Self::Counterspell => "Counterspell",
+        }
+    }
+
+    /// Past-tense phrasing for history lines.
+    pub fn past_tense(&self) -> &'static str {
+        match self {
+            Self::CommanderKill => "had their commander killed by",
+            Self::BoardWipe => "got board wiped by",
+            Self::Counterspell => "got countered by",
+        }
+    }
+
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::CommanderKill => "commander_kill",
+            Self::BoardWipe => "board_wipe",
+            Self::Counterspell => "counterspell",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "board_wipe" => Self::BoardWipe,
+            "counterspell" => Self::Counterspell,
+            _ => Self::CommanderKill,
+        }
+    }
+}
+
+/// A piece of commander hate aimed at a seat, and who (if anyone) is credited.
 #[derive(Debug, Clone, Copy)]
 pub struct KillEvent {
     pub victim_seat: usize,
     pub killer_seat: Option<usize>,
+    pub kind: HateKind,
 }
 
 /// A fully finished game, ready to be persisted.
@@ -180,6 +230,7 @@ pub struct GameDetailSeat {
 pub struct GameDetailKill {
     pub victim: String,
     pub killer: Option<String>,
+    pub kind: HateKind,
 }
 
 /// The full box score for a single past game.

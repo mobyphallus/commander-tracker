@@ -90,6 +90,50 @@ pub fn panel_danger(theme: &Theme) -> container::Style {
     }
 }
 
+/// A translucent dark "frosted" chip. iced can't do a real backdrop blur
+/// without a custom shader, so this is the stand-in that keeps text legible
+/// over bright commander art.
+pub fn glass(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.62).into()),
+        text_color: Some(Color::WHITE),
+        border: Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.25),
+            width: 1.0,
+            radius: 18.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Heavier version for the big life number, which sits directly on the art.
+pub fn glass_strong(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.72).into()),
+        text_color: Some(Color::WHITE),
+        border: Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.3),
+            width: 1.0,
+            radius: 26.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Small round chip behind the +/- glyphs.
+pub fn glass_round(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+        text_color: Some(Color::WHITE),
+        border: Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.28),
+            width: 1.0,
+            radius: 44.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 pub fn header(theme: &Theme) -> container::Style {
     let p = theme.extended_palette();
     container::Style {

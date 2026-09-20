@@ -148,11 +148,13 @@ impl App {
                 Task::none()
             }
             Message::Players(msg) => {
-                if let Screen::Players(state) = &mut self.screen {
-                    players::update(state, &self.conn, msg);
-                }
+                let task = if let Screen::Players(state) = &mut self.screen {
+                    players::update(state, &self.conn, msg)
+                } else {
+                    Task::none()
+                };
                 self.players = db::list_players(&self.conn).unwrap_or_default();
-                Task::none()
+                task
             }
         }
     }

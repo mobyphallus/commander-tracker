@@ -106,10 +106,15 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
         .kills
         .iter()
         .map(|k| {
-            let killer = k.killer.clone().unwrap_or_else(|| "unknown causes".to_string());
-            text(format!("\u{1F480} {} was killed by {}", k.victim, killer))
-                .size(18)
-                .into()
+            let killer = k.killer.clone().unwrap_or_else(|| "someone unknown".to_string());
+            text(format!(
+                "\u{1F480} {} {} {}",
+                k.victim,
+                k.kind.past_tense(),
+                killer
+            ))
+            .size(18)
+            .into()
         })
         .collect();
 

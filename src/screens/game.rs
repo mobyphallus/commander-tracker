@@ -9,7 +9,9 @@ use rusqlite::Connection;
 use crate::app::Message;
 use crate::db;
 use crate::layout::{self, TableLayout};
-use crate::model::{FinishedGame, KillEvent, Seat, LETHAL_COMMANDER_DAMAGE, LETHAL_POISON, WinReason};
+use crate::model::{
+    FinishedGame, HateKind, KillEvent, Seat, LETHAL_COMMANDER_DAMAGE, LETHAL_POISON, WinReason,
+};
 use crate::style;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +33,9 @@ pub struct GameState {
     pub paused: bool,
     pub seat_tab: Vec<SeatTab>,
     pub kills: Vec<KillEvent>,
-    pub marking_kill_for: Option<usize>,
+    /// The in-progress "commander hate" log: which seat it happened to, and
+    /// what kind once picked (the next step asks who did it).
+    pub hate_flow: Option<HateFlow>,
     /// A seat that just hit 0 life and hasn't been asked "are they out?" yet
     /// (or was asked and said no, until they drop to 0 again).
     pub pending_life_check: Option<usize>,
@@ -49,6 +53,12 @@ pub struct GameState {
     /// While set, every OTHER seat's tile swaps its life display for a
     /// quick +/- on the commander damage *that seat* has dealt to this one.
     pub damage_focus: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HateFlow {
+    pub victim: usize,
+    pub kind: Option<HateKind>,
 }
 
 /// Any counter that can be adjusted with the hold-to-repeat left/right zones.
@@ -97,7 +107,7 @@ impl GameState {
             paused: false,
             seat_tab,
             kills: Vec::new(),
-            marking_kill_for: None,
+            hate_flow: None,
             pending_life_check: None,
             zero_life_prompt_dismissed,
             pending_winner: None,
@@ -153,9 +163,10 @@ pub enum GameMessage {
     EndDamageFocus,
     ToggleEliminated(usize),
     AnswerZeroLifeCheck(bool),
-    MarkKilled(usize),
-    CancelMarkKilled,
-    ConfirmKill(usize, Option<usize>),
+    StartHate(usize),
+    PickHateKind(HateKind),
+    CancelHate,
+    ConfirmHate(Option<usize>),
     StartDeclareWinner(usize),
     CancelDeclareWinner,
     PickWinReason(WinReason),
@@ -299,20 +310,33 @@ pub fn update(
             }
             (iced::Task::none(), None)
         }
-        GameMessage::MarkKilled(seat) => {
-            state.marking_kill_for = Some(seat);
-            (iced::Task::none(), None)
-        }
-        GameMessage::CancelMarkKilled => {
-            state.marking_kill_for = None;
-            (iced::Task::none(), None)
-        }
-        GameMessage::ConfirmKill(victim, killer) => {
-            state.kills.push(KillEvent {
-                victim_seat: victim,
-                killer_seat: killer,
+        GameMessage::StartHate(seat) => {
+            state.hate_flow = Some(HateFlow {
+                victim: seat,
+                kind: None,
             });
-            state.marking_kill_for = None;
+            (iced::Task::none(), None)
+        }
+        GameMessage::PickHateKind(kind) => {
+            if let Some(flow) = &mut state.hate_flow {
+                flow.kind = Some(kind);
+            }
+            (iced::Task::none(), None)
+        }
+        GameMessage::CancelHate => {
+            state.hate_flow = None;
+            (iced::Task::none(), None)
+        }
+        GameMessage::ConfirmHate(culprit) => {
+            if let Some(flow) = state.hate_flow.take() {
+                if let Some(kind) = flow.kind {
+                    state.kills.push(KillEvent {
+                        victim_seat: flow.victim,
+                        killer_seat: culprit,
+                        kind,
+                    });
+                }
+            }
             (iced::Task::none(), None)
         }
         GameMessage::StartDeclareWinner(seat) => {
@@ -403,8 +427,8 @@ pub fn view<'a>(
     if let Some(winner) = state.pending_winner {
         return declare_winner_view(state, winner);
     }
-    if let Some(victim) = state.marking_kill_for {
-        return mark_kill_view(state, victim);
+    if let Some(flow) = state.hate_flow {
+        return hate_view(state, flow);
     }
 
     let top_bar = container(
@@ -517,16 +541,21 @@ pub fn view<'a>(
 /// the tap and opens the seat's action menu instead.
 fn split_counter<'a>(seat: usize, value: i32, target: CounterTarget) -> Element<'a, Message> {
     let zone = |sign: i32, glyph: &'static str| {
+        // The glyph sits on its own frosted chip so it reads over bright
+        // art; the tap area is still the whole half of the tile.
+        let chip = container(text(glyph).size(38).color(Color::WHITE))
+            .width(Length::Fixed(84.0))
+            .height(Length::Fixed(84.0))
+            .center_x(Length::Fixed(84.0))
+            .center_y(Length::Fixed(84.0))
+            .style(style::glass_round);
+
         mouse_area(
-            container(
-                text(glyph)
-                    .size(34)
-                    .color(Color::from_rgba(1.0, 1.0, 1.0, 0.45)),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
+            container(chip)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
         )
         .on_press(Message::Game(GameMessage::CounterPressStart(seat, target, sign)))
         .on_move(move |point| Message::Game(GameMessage::CounterPressMove(target, sign, point.y)))
@@ -539,9 +568,9 @@ fn split_counter<'a>(seat: usize, value: i32, target: CounterTarget) -> Element<
         .height(Length::Fill);
 
     let number = container(
-        text(value.to_string())
-            .size(76)
-            .color(Color::WHITE),
+        container(text(value.to_string()).size(76).color(Color::WHITE))
+            .padding([10, 34])
+            .style(style::glass_strong),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -652,29 +681,30 @@ fn seat_panel<'a>(
     let (value, target, subtitle) = active_counter(index, state);
 
     let caption = container(
-        column![
-            text(seat.player.name.clone()).size(26),
-            text(subtitle).size(16),
-        ]
-        .spacing(2),
+        container(
+            column![
+                text(seat.player.name.clone()).size(26),
+                text(subtitle).size(16),
+            ]
+            .spacing(2),
+        )
+        .padding([10, 18])
+        .style(style::glass),
     )
     .padding(12)
-    .width(Length::Fill)
-    .style(|_theme: &iced::Theme| container::Style {
-        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.45).into()),
-        text_color: Some(Color::WHITE),
-        ..container::Style::default()
-    });
+    .width(Length::Fill);
 
+    // Pinned to the tile's bottom-right so it never collides with the game
+    // timer, which floats dead center of the board.
     let kill_button = container(
-        style::touch_button("Commander Killed", 18)
-            .width(Length::Fixed(260.0))
+        style::touch_button("Commander Hate", 18)
+            .width(Length::Fixed(250.0))
             .style(button::secondary)
-            .on_press(Message::Game(GameMessage::MarkKilled(index))),
+            .on_press(Message::Game(GameMessage::StartHate(index))),
     )
     .width(Length::Fill)
-    .padding(12)
-    .center_x(Length::Fill);
+    .padding(16)
+    .align_x(iced::alignment::Horizontal::Right);
 
     // Top caption and bottom kill button float above everything else in the
     // stack, so they still capture their own taps; the vertical space
@@ -780,49 +810,69 @@ fn zero_life_check_view(state: &GameState, seat: usize) -> Element<'_, Message> 
     .into()
 }
 
-fn mark_kill_view(state: &GameState, victim: usize) -> Element<'_, Message> {
-    let victim_seat = &state.seats[victim];
+/// Two steps: what kind of hate landed on this seat, then who's responsible.
+fn hate_view(state: &GameState, flow: HateFlow) -> Element<'_, Message> {
+    let victim_seat = &state.seats[flow.victim];
 
-    let mut options: Vec<Element<Message>> = state
-        .seats
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| *j != victim)
-        .map(|(j, other)| {
-            let label = format!("{} ({})", other.player.name, other.commander.name);
-            button(
-                container(text(label).size(24))
-                    .padding([0, 24])
-                    .center_y(Length::Fill),
-            )
-            .padding(0)
-            .height(Length::Fixed(style::TOUCH_H))
-            .width(Length::Fill)
-            .style(button::secondary)
-            .on_press(Message::Game(GameMessage::ConfirmKill(victim, Some(j))))
-            .into()
-        })
-        .collect();
-    options.push(
-        style::touch_button("Board wipe / unknown", 24)
-            .width(Length::Fill)
-            .style(button::secondary)
-            .on_press(Message::Game(GameMessage::ConfirmKill(victim, None)))
-            .into(),
-    );
+    let (heading, options): (String, Vec<Element<Message>>) = match flow.kind {
+        None => (
+            format!("What happened to {}?", victim_seat.player.name),
+            HateKind::ALL
+                .iter()
+                .map(|k| {
+                    style::cta_button(k.label(), 28)
+                        .width(Length::Fill)
+                        .style(button::secondary)
+                        .on_press(Message::Game(GameMessage::PickHateKind(*k)))
+                        .into()
+                })
+                .collect(),
+        ),
+        Some(kind) => {
+            let mut who: Vec<Element<Message>> = state
+                .seats
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != flow.victim)
+                .map(|(j, other)| {
+                    let label = format!("{} ({})", other.player.name, other.commander.name);
+                    button(
+                        container(text(label).size(26))
+                            .padding([0, 24])
+                            .center_y(Length::Fill),
+                    )
+                    .padding(0)
+                    .height(Length::Fixed(style::TOUCH_H_LG))
+                    .width(Length::Fill)
+                    .style(button::secondary)
+                    .on_press(Message::Game(GameMessage::ConfirmHate(Some(j))))
+                    .into()
+                })
+                .collect();
+            who.push(
+                style::cta_button("Unknown / nobody", 26)
+                    .width(Length::Fill)
+                    .style(button::secondary)
+                    .on_press(Message::Game(GameMessage::ConfirmHate(None)))
+                    .into(),
+            );
+            (format!("{} - who did it?", kind.label()), who)
+        }
+    };
 
     container(
         column![
+            text(heading).size(40),
             text(format!(
-                "{}'s {} was killed - by whom?",
+                "{} playing {}",
                 victim_seat.player.name, victim_seat.commander.name
             ))
-            .size(38),
-            scrollable(column(options).spacing(14)).height(Length::Fill),
+            .size(20),
+            scrollable(column(options).spacing(16)).height(Length::Fill),
             style::cta_button("Cancel", 24)
                 .width(Length::Fixed(300.0))
                 .style(button::secondary)
-                .on_press(Message::Game(GameMessage::CancelMarkKilled)),
+                .on_press(Message::Game(GameMessage::CancelHate)),
         ]
         .spacing(22)
         .align_x(iced::Alignment::Center)
