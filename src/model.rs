@@ -7,72 +7,41 @@ pub struct Player {
 }
 
 /// Which part of the art stays visible when it's cropped to a seat tile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArtAnchor {
-    TopLeft,
-    Top,
-    TopRight,
-    Left,
-    Center,
-    Right,
-    BottomLeft,
-    Bottom,
-    BottomRight,
+/// How a commander's art is framed inside one seat's tile: how far it's
+/// zoomed past "just covers the tile", and where it's panned to.
+///
+/// Pan is normalised to [-1, 1] on each axis, where +/-1 is as far as the
+/// art can move before an edge would show. Storing the fraction rather than
+/// pixels means the same framing holds at any tile size, which matters
+/// because the same art is drawn into tiles of very different shapes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArtFraming {
+    pub zoom: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
 }
 
-impl ArtAnchor {
-    pub const GRID: [[ArtAnchor; 3]; 3] = [
-        [Self::TopLeft, Self::Top, Self::TopRight],
-        [Self::Left, Self::Center, Self::Right],
-        [Self::BottomLeft, Self::Bottom, Self::BottomRight],
-    ];
-
-    pub fn as_db_str(&self) -> &'static str {
-        match self {
-            Self::TopLeft => "top_left",
-            Self::Top => "top",
-            Self::TopRight => "top_right",
-            Self::Left => "left",
-            Self::Center => "center",
-            Self::Right => "right",
-            Self::BottomLeft => "bottom_left",
-            Self::Bottom => "bottom",
-            Self::BottomRight => "bottom_right",
-        }
-    }
-
-    pub fn from_db_str(s: &str) -> Self {
-        match s {
-            "top_left" => Self::TopLeft,
-            "top" => Self::Top,
-            "top_right" => Self::TopRight,
-            "left" => Self::Left,
-            "right" => Self::Right,
-            "bottom_left" => Self::BottomLeft,
-            "bottom" => Self::Bottom,
-            "bottom_right" => Self::BottomRight,
-            _ => Self::Center,
-        }
-    }
-
-    pub fn horizontal(&self) -> iced::alignment::Horizontal {
-        use iced::alignment::Horizontal;
-        match self {
-            Self::TopLeft | Self::Left | Self::BottomLeft => Horizontal::Left,
-            Self::Top | Self::Center | Self::Bottom => Horizontal::Center,
-            _ => Horizontal::Right,
-        }
-    }
-
-    pub fn vertical(&self) -> iced::alignment::Vertical {
-        use iced::alignment::Vertical;
-        match self {
-            Self::TopLeft | Self::Top | Self::TopRight => Vertical::Top,
-            Self::Left | Self::Center | Self::Right => Vertical::Center,
-            _ => Vertical::Bottom,
+impl Default for ArtFraming {
+    fn default() -> Self {
+        Self {
+            zoom: MIN_ART_ZOOM,
+            pan_x: 0.0,
+            pan_y: 0.0,
         }
     }
 }
+
+impl ArtFraming {
+    pub fn clamped(self) -> Self {
+        Self {
+            zoom: self.zoom.clamp(MIN_ART_ZOOM, MAX_ART_ZOOM),
+            pan_x: self.pan_x.clamp(-1.0, 1.0),
+            pan_y: self.pan_y.clamp(-1.0, 1.0),
+        }
+    }
+}
+
+
 
 pub const MIN_ART_ZOOM: f32 = 1.0;
 pub const MAX_ART_ZOOM: f32 = 3.0;
@@ -89,10 +58,9 @@ pub struct Commander {
     /// Cropped art of the currently chosen printing, used for the player's portrait.
     pub art_crop_url: Option<String>,
     pub color_identity: String,
-    /// How the art is framed in a seat tile: 1.0 fills the tile, higher
-    /// zooms in on the part `art_anchor` points at.
-    pub art_zoom: f32,
-    pub art_anchor: ArtAnchor,
+    /// How this art sits in the tile it's currently being shown in.
+    /// Resolved per layout and seat when the commander is placed.
+    pub framing: ArtFraming,
 }
 
 impl Commander {
@@ -101,8 +69,33 @@ impl Commander {
     }
 }
 
-/// Lethal commander damage from a single source, per the rules.
+/// One entry in a player's saved commander list: a single commander, or a
+/// partner pair they've saved as one deck. Picking either half of a saved
+/// pair during setup brings the other with it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedDeck {
+    pub commander: Commander,
+    pub partner: Option<Commander>,
+}
+
+impl SavedDeck {
+    pub fn label(&self) -> String {
+        match &self.partner {
+            Some(p) => format!("{} + {}", self.commander.name, p.name),
+            None => self.commander.name.clone(),
+        }
+    }
+}
+
+/// Lethal commander damage from a single source, per the rules. With a
+/// partner pair each commander carries its own threshold, so 20 from one
+/// and 20 from the other is survivable.
 pub const LETHAL_COMMANDER_DAMAGE: i32 = 21;
+
+/// Which of a seat's commanders something refers to. A seat always has a
+/// primary; a partner pair adds the second.
+pub const PRIMARY: usize = 0;
+pub const PARTNER: usize = 1;
 pub const LETHAL_POISON: i32 = 10;
 
 /// One seat at the table for the game currently being set up / played.
@@ -110,11 +103,19 @@ pub const LETHAL_POISON: i32 = 10;
 pub struct Seat {
     pub player: Player,
     pub commander: Commander,
+    /// The second commander of a partner pair, if this deck runs one.
+    pub partner: Option<Commander>,
     pub life: i32,
     pub poison: i32,
-    /// Commander damage taken by this seat, keyed by the seat index it came from.
-    pub commander_damage_taken: HashMap<usize, i32>,
+    /// Commander damage taken by this seat, keyed by which commander dealt
+    /// it: `(source seat index, PRIMARY | PARTNER)`. Keyed per commander
+    /// rather than per seat because each one has its own lethal threshold.
+    pub commander_damage_taken: HashMap<(usize, usize), i32>,
     pub eliminated: bool,
+    /// How this seat went out, recorded the moment it happens. Who got the
+    /// kill and which turn it was are both impossible to reconstruct at the
+    /// end of the game, so they are never inferred later.
+    pub elimination: Option<Elimination>,
 }
 
 impl Seat {
@@ -122,16 +123,56 @@ impl Seat {
         Self {
             player,
             commander,
+            partner: None,
             life: starting_life,
             poison: 0,
             commander_damage_taken: HashMap::new(),
             eliminated: false,
+            elimination: None,
         }
     }
 
-    pub fn damage_from(&self, seat_index: usize) -> i32 {
-        *self.commander_damage_taken.get(&seat_index).unwrap_or(&0)
+    /// Put a seat out, with the record of why. Always use this rather than
+    /// setting `eliminated`: the flag and the record must not drift apart.
+    pub fn mark_out(&mut self, elimination: Elimination) {
+        self.eliminated = true;
+        self.elimination = Some(elimination);
     }
+
+    /// Undo a call. The old record goes with it - a seat that is back in the
+    /// game did not die on the turn we thought it did.
+    pub fn bring_back(&mut self) {
+        self.eliminated = false;
+        self.elimination = None;
+    }
+
+    pub fn with_partner(mut self, partner: Option<Commander>) -> Self {
+        self.partner = partner;
+        self
+    }
+
+    pub fn commander_in(&self, slot: usize) -> &Commander {
+        match slot {
+            PARTNER => self.partner.as_ref().unwrap_or(&self.commander),
+            _ => &self.commander,
+        }
+    }
+
+    /// Both commanders' names, as the deck is usually referred to.
+    pub fn deck_name(&self) -> String {
+        match &self.partner {
+            Some(p) => format!("{} + {}", self.commander.name, p.name),
+            None => self.commander.name.clone(),
+        }
+    }
+
+    pub fn damage_from(&self, seat_index: usize, slot: usize) -> i32 {
+        *self
+            .commander_damage_taken
+            .get(&(seat_index, slot))
+            .unwrap_or(&0)
+    }
+
 }
 
 pub const STARTING_LIFE: i32 = 40;
@@ -189,6 +230,83 @@ impl WinReason {
             _ => Self::Other,
         }
     }
+}
+
+/// Why a seat went out. The first three are worked out from the board -
+/// nobody is asked - and the last two are what a player picks when they are
+/// marked out by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutCause {
+    LifeLoss,
+    CommanderDamage,
+    Poison,
+    Concede,
+    Other,
+}
+
+impl OutCause {
+    /// The causes a player can actually choose. Dying to life loss, poison
+    /// or commander damage is observed, not declared.
+    pub const CHOOSABLE: [OutCause; 2] = [Self::Concede, Self::Other];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::LifeLoss => "Life Loss",
+            Self::CommanderDamage => "Commander Damage",
+            Self::Poison => "Poison",
+            Self::Concede => "Conceded",
+            Self::Other => "Other",
+        }
+    }
+
+    /// Past-tense phrasing for history lines.
+    pub fn past_tense(&self) -> &'static str {
+        match self {
+            Self::LifeLoss => "died",
+            Self::CommanderDamage => "died to commander damage",
+            Self::Poison => "died to poison",
+            Self::Concede => "conceded",
+            Self::Other => "went out",
+        }
+    }
+
+    /// Whether this cause leaves any doubt about who is responsible. Lethal
+    /// commander damage names its own killer; a concede has none by
+    /// definition. Everything else has to be asked.
+    pub fn needs_killer_prompt(&self) -> bool {
+        matches!(self, Self::LifeLoss | Self::Poison | Self::Other)
+    }
+
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::LifeLoss => "life_loss",
+            Self::CommanderDamage => "commander_damage",
+            Self::Poison => "poison",
+            Self::Concede => "concede",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "life_loss" => Self::LifeLoss,
+            "commander_damage" => Self::CommanderDamage,
+            "poison" => Self::Poison,
+            "concede" => Self::Concede,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// How and when a seat went out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Elimination {
+    pub cause: OutCause,
+    /// Who gets the kill. `None` is a real answer, not missing data - a
+    /// concede, a board state, or simply nobody in particular.
+    pub killer_seat: Option<usize>,
+    /// The 1-indexed turn number the seat went out on.
+    pub turn: u32,
 }
 
 /// The kind of interaction logged against a player mid-game.
@@ -277,6 +395,66 @@ pub struct PlayerStat {
     pub wins: i64,
 }
 
+/// How much commander hate a player has dished out, and of what kind.
+#[derive(Debug, Clone)]
+pub struct HaterStat {
+    pub player_name: String,
+    pub total: i64,
+    pub kills: i64,
+    pub wipes: i64,
+    pub counters: i64,
+    /// Games they've played, so "hate per game" is comparable across people
+    /// who've sat down different numbers of times.
+    pub games: i64,
+}
+
+impl HaterStat {
+    pub fn per_game(&self) -> f64 {
+        if self.games == 0 {
+            0.0
+        } else {
+            self.total as f64 / self.games as f64
+        }
+    }
+}
+
+/// How often a commander is on the receiving end.
+#[derive(Debug, Clone)]
+pub struct HatedCommanderStat {
+    pub commander_name: String,
+    pub total: i64,
+    pub kills: i64,
+    pub wipes: i64,
+    pub counters: i64,
+    /// Times this commander has been at the table, for a "hate per game" rate.
+    pub appearances: i64,
+}
+
+impl HatedCommanderStat {
+    pub fn per_appearance(&self) -> f64 {
+        if self.appearances == 0 {
+            0.0
+        } else {
+            self.total as f64 / self.appearances as f64
+        }
+    }
+}
+
+/// A specific grudge: this player keeps going after this commander.
+#[derive(Debug, Clone)]
+pub struct GrudgeStat {
+    pub hater_name: String,
+    pub commander_name: String,
+    pub victim_name: String,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WinReasonStat {
+    pub reason: WinReason,
+    pub games: i64,
+}
+
 /// One row in the game history list.
 #[derive(Debug, Clone)]
 pub struct GameSummary {
@@ -290,6 +468,15 @@ pub struct GameSummary {
     pub ending_turn: i64,
 }
 
+/// A seat's elimination as it comes back out of the database, with the
+/// killer resolved to a name.
+#[derive(Debug, Clone)]
+pub struct GameDetailOut {
+    pub cause: OutCause,
+    pub killer_name: Option<String>,
+    pub turn: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct GameDetailSeat {
     pub player_name: String,
@@ -299,6 +486,8 @@ pub struct GameDetailSeat {
     pub won: bool,
     /// (source commander name, amount) for commander damage taken this game.
     pub damage_taken: Vec<(String, i32)>,
+    /// How and when they went out, if they did. The winner never has one.
+    pub out: Option<GameDetailOut>,
 }
 
 #[derive(Debug, Clone)]

@@ -15,7 +15,7 @@ pub enum HomeMessage {
 fn tile<'a>(label: &'a str, sub: &'a str, message: Message, primary: bool) -> Element<'a, Message> {
     button(
         container(
-            column![text(label).size(34), text(sub).size(15)]
+            column![text(label).size(style::T_HEADING), text(sub).size(style::T_CAPTION)]
                 .spacing(6)
                 .align_x(iced::Alignment::Center),
         )
@@ -26,9 +26,9 @@ fn tile<'a>(label: &'a str, sub: &'a str, message: Message, primary: bool) -> El
     .width(Length::Fill)
     .height(Length::Fill)
     .style(if primary {
-        button::primary
+        style::primary
     } else {
-        button::secondary
+        style::secondary
     })
     .on_press(message)
     .into()
@@ -37,8 +37,8 @@ fn tile<'a>(label: &'a str, sub: &'a str, message: Message, primary: bool) -> El
 pub fn view<'a>() -> Element<'a, Message> {
     let header = container(
         column![
-            text("Commander Pod").size(54),
-            text("Life, damage and win tracking for your playgroup").size(16),
+            text("Commander Pod").size(style::T_DISPLAY),
+            text("Life, damage and win tracking for your playgroup").size(style::T_CAPTION),
         ]
         .spacing(6)
         .align_x(iced::Alignment::Center),

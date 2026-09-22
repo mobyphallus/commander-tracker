@@ -6,12 +6,13 @@ use rusqlite::Connection;
 
 use crate::app::Message;
 use crate::db;
-use crate::layout::{self, TableLayout};
+use crate::layout::{self, SeatOrientation, TableLayout, TurnDirection};
 use crate::art;
 use crate::model::{
-    ArtAnchor, Commander, Player, Seat, MAX_ART_ZOOM, MIN_ART_ZOOM, STARTING_LIFE,
+    ArtFraming, Commander, Player, SavedDeck, Seat, PARTNER, PRIMARY, STARTING_LIFE,
 };
-use crate::scryfall::{self, ScryfallCard};
+use crate::panned_image;
+use crate::scryfall::{self, Cooldown, ScryfallCard, ScryfallError};
 use crate::style;
 
 pub const MIN_POD: usize = 2;
@@ -22,6 +23,8 @@ pub enum SetupStage {
     ChoosePodSize,
     ChooseLayout,
     Grid,
+    /// Last step before the game: who leads, and which way turns pass.
+    TurnOrder,
 }
 
 /// The commander a player picked by name; art is chosen next, but this
@@ -38,9 +41,28 @@ pub struct ArtTarget {
 pub struct SeatSetup {
     pub player: Option<Player>,
     pub commander: Option<Commander>,
+    /// The second commander of a partner pair. Optional and unvalidated -
+    /// the table knows its own rules, so any commander can be paired.
+    pub partner: Option<Commander>,
     /// Commanders this specific player has piloted before - personal to
     /// them, never shared with the rest of the pod.
-    pub commander_history: Vec<Commander>,
+    pub commander_history: Vec<SavedDeck>,
+}
+
+impl SeatSetup {
+    pub fn commander_in(&self, slot: usize) -> Option<&Commander> {
+        match slot {
+            PARTNER => self.partner.as_ref(),
+            _ => self.commander.as_ref(),
+        }
+    }
+
+    pub fn set_commander_in(&mut self, slot: usize, commander: Option<Commander>) {
+        match slot {
+            PARTNER => self.partner = commander,
+            _ => self.commander = commander,
+        }
+    }
 }
 
 pub struct SetupState {
@@ -58,6 +80,16 @@ pub struct SetupState {
     pub loading_art_options: bool,
     /// Set while the player is framing a seat's art (zoom + anchor).
     pub framing: bool,
+    /// Non-zero while Scryfall has us locked out for exceeding the rate
+    /// limit; no search or art lookup is sent until it runs back down.
+    pub cooldown: Cooldown,
+    /// Which of the edited seat's commanders the picker is filling: PRIMARY
+    /// normally, PARTNER while adding or changing a partner.
+    pub editing_slot: usize,
+    /// The seat that takes the first turn. None until someone is picked, so
+    /// the game can't start on an arbitrary default.
+    pub first_seat: Option<usize>,
+    pub turn_direction: TurnDirection,
     pub error: Option<String>,
 }
 
@@ -77,6 +109,10 @@ impl SetupState {
             art_options: Vec::new(),
             loading_art_options: false,
             framing: false,
+            cooldown: Cooldown::default(),
+            editing_slot: PRIMARY,
+            first_seat: None,
+            turn_direction: TurnDirection::Clockwise,
             error: None,
         }
     }
@@ -123,23 +159,43 @@ pub enum SetupMessage {
     ClearSeatPlayer,
     CommanderQueryChanged(String),
     SearchCommanders,
-    SearchResults(Result<Vec<ScryfallCard>, String>),
+    SearchResults(Result<Vec<ScryfallCard>, ScryfallError>),
     PickCommanderName(ScryfallCard),
-    PickHistoryCommander(Commander),
-    ArtOptionsLoaded(Result<Vec<ScryfallCard>, String>),
+    PickHistoryCommander(SavedDeck),
+    ArtOptionsLoaded(Result<Vec<ScryfallCard>, ScryfallError>),
     PickArt(ScryfallCard),
     CancelArtPick,
-    ChangeArt,
-    StartFraming,
-    SetArtZoom(f32),
-    SetArtAnchor(ArtAnchor),
+    /// (which of the seat's commanders to restyle)
+    ChangeArt(usize),
+    StartFraming(usize),
+    AddPartner,
+    /// Fired continuously while the art is being dragged or pinched.
+    FramingChanged(ArtFraming),
     DoneFraming,
-    ClearSeatCommander,
+    /// (which of the seat's commanders to clear)
+    ClearSeatCommander(usize),
+    CooldownTick,
+    ReviewTurnOrder,
+    BackToGridFromTurnOrder,
+    ChooseFirstSeat(usize),
+    RandomFirstSeat,
+    SetTurnDirection(TurnDirection),
     StartGame,
 }
 
 pub enum Action {
-    StartGame(Vec<Seat>, TableLayout),
+    /// Seats, the table they're sitting at, and the seat indices in the
+    /// order they'll take turns (first player first).
+    StartGame(Vec<Seat>, TableLayout, Vec<usize>),
+}
+
+/// The order the pod will actually play in, or None until a first player is
+/// chosen. Shared by the turn-order screen and the start handler so the
+/// preview can never disagree with what the game uses.
+fn planned_turn_order(state: &SetupState) -> Option<Vec<usize>> {
+    let table = state.table_layout.as_ref()?;
+    let first = state.first_seat?;
+    Some(table.turn_order(first, state.turn_direction))
 }
 
 fn load_portrait_task(commander: &Commander) -> Task<Message> {
@@ -155,9 +211,29 @@ fn load_portrait_task(commander: &Commander) -> Task<Message> {
     }
 }
 
+/// Loads the framing this commander was last given in this exact tile, so
+/// art placed into a seat already looks the way it was left rather than
+/// reverting to a bare centre crop.
+fn resolve_framing(
+    state: &SetupState,
+    conn: &Connection,
+    seat: usize,
+    mut commander: Commander,
+) -> Commander {
+    if let Some(layout) = &state.table_layout {
+        commander.framing = db::load_framing(conn, commander.id, &layout.name, seat);
+    }
+    commander
+}
+
 fn current_commander_mut(state: &mut SetupState) -> Option<&mut Commander> {
     let seat = state.editing_seat?;
-    state.seats.get_mut(seat)?.commander.as_mut()
+    let slot = state.editing_slot;
+    let seat = state.seats.get_mut(seat)?;
+    match slot {
+        PARTNER => seat.partner.as_mut(),
+        _ => seat.commander.as_mut(),
+    }
 }
 
 fn load_prints_task(oracle_id: String) -> Task<Message> {
@@ -177,6 +253,9 @@ pub fn update(
             state.pod_size = n;
             state.seats = vec![SeatSetup::default(); n];
             state.table_layout = None;
+            // The seats are new, so a previously chosen leader would point
+            // at someone who is no longer at the table.
+            state.first_seat = None;
             state.stage = SetupStage::ChooseLayout;
             (Task::none(), None)
         }
@@ -189,6 +268,17 @@ pub fn update(
         SetupMessage::ChooseLayout(layout) => {
             state.table_layout = Some(layout);
             state.stage = SetupStage::Grid;
+            // Tiles change shape with the layout, and framing is stored per
+            // layout and seat, so every placed commander needs its framing
+            // for the NEW tile rather than the one it was framed in.
+            for seat_index in 0..state.seats.len() {
+                for slot in [PRIMARY, PARTNER] {
+                    if let Some(commander) = state.seats[seat_index].commander_in(slot).cloned() {
+                        let reframed = resolve_framing(state, conn, seat_index, commander);
+                        state.seats[seat_index].set_commander_in(slot, Some(reframed));
+                    }
+                }
+            }
             (Task::none(), None)
         }
         SetupMessage::BackToLayoutChoice => {
@@ -199,11 +289,13 @@ pub fn update(
         }
         SetupMessage::EditSeat(i) => {
             state.editing_seat = Some(i);
+            state.editing_slot = PRIMARY;
             state.clear_editor_fields();
             (Task::none(), None)
         }
         SetupMessage::BackToGrid => {
             state.editing_seat = None;
+            state.editing_slot = PRIMARY;
             state.clear_editor_fields();
             (Task::none(), None)
         }
@@ -255,7 +347,7 @@ pub fn update(
         }
         SetupMessage::SearchCommanders => {
             let query = state.commander_query.clone();
-            if query.trim().is_empty() {
+            if query.trim().is_empty() || state.cooldown.active() {
                 return (Task::none(), None);
             }
             state.searching = true;
@@ -269,8 +361,14 @@ pub fn update(
         SetupMessage::SearchResults(res) => {
             state.searching = false;
             match res {
-                Ok(list) => state.commander_results = list,
-                Err(e) => state.error = Some(format!("Scryfall search failed: {e}")),
+                Ok(list) => {
+                    state.commander_results = list;
+                    state.error = None;
+                }
+                Err(e) => {
+                    state.cooldown.absorb(&e);
+                    state.error = Some(e.to_string());
+                }
             }
             (Task::none(), None)
         }
@@ -296,18 +394,33 @@ pub fn update(
             state.art_options = vec![card];
             (Task::batch([prints_task, default_thumb_task]), None)
         }
-        SetupMessage::PickHistoryCommander(commander) => {
+        SetupMessage::PickHistoryCommander(deck) => {
             let Some(seat) = state.editing_seat else {
                 return (Task::none(), None);
             };
             if let Some(player) = &state.seats[seat].player {
-                let _ = db::record_player_commander_use(conn, player.id, commander.id);
+                let _ = db::record_player_commander_use(conn, player.id, deck.commander.id);
+                if let Some(p) = &deck.partner {
+                    let _ = db::record_player_commander_use(conn, player.id, p.id);
+                }
             }
-            let task = load_portrait_task(&commander);
-            state.seats[seat].commander = Some(commander);
+            let mut tasks = vec![load_portrait_task(&deck.commander)];
+            let slot = state.editing_slot;
+            let commander = resolve_framing(state, conn, seat, deck.commander);
+            state.seats[seat].set_commander_in(slot, Some(commander));
+            // A saved pair comes as one deck: taking half of it without the
+            // other half would silently drop the partner.
+            if slot == PRIMARY {
+                if let Some(partner) = deck.partner {
+                    tasks.push(load_portrait_task(&partner));
+                    let partner = resolve_framing(state, conn, seat, partner);
+                    state.seats[seat].partner = Some(partner);
+                }
+            }
             state.editing_seat = None;
+            state.editing_slot = PRIMARY;
             state.clear_editor_fields();
-            (task, None)
+            (Task::batch(tasks), None)
         }
         SetupMessage::ArtOptionsLoaded(res) => {
             state.loading_art_options = false;
@@ -328,7 +441,8 @@ pub fn update(
                     (Task::batch(thumb_tasks), None)
                 }
                 Err(e) => {
-                    state.error = Some(format!("Couldn't load printings: {e}"));
+                    state.cooldown.absorb(&e);
+                    state.error = Some(e.to_string());
                     (Task::none(), None)
                 }
             }
@@ -353,11 +467,29 @@ pub fn update(
                     if let Some(player) = &state.seats[seat].player {
                         let _ = db::record_player_commander_use(conn, player.id, commander.id);
                     }
-                    let task = load_portrait_task(&commander);
-                    state.seats[seat].commander = Some(commander);
-                    state.editing_seat = None;
+                    let mut tasks = vec![load_portrait_task(&commander)];
+                    let slot = state.editing_slot;
+
+                    // If this player has already saved that commander as
+                    // half of a pair, the other half comes with it.
+                    let saved_partner = (slot == PRIMARY)
+                        .then(|| state.seats[seat].player.as_ref())
+                        .flatten()
+                        .and_then(|player| db::saved_partner(conn, player.id, commander.id));
+
+                    let commander = resolve_framing(state, conn, seat, commander);
+                    state.seats[seat].set_commander_in(slot, Some(commander));
+                    if let Some(partner) = saved_partner {
+                        tasks.push(load_portrait_task(&partner));
+                        let partner = resolve_framing(state, conn, seat, partner);
+                        state.seats[seat].partner = Some(partner);
+                    }
                     state.clear_editor_fields();
-                    (task, None)
+                    // Straight into framing: this is the moment the art is
+                    // chosen, which is the only point framing happens.
+                    state.editing_slot = slot;
+                    state.framing = true;
+                    (Task::batch(tasks), None)
                 }
                 Err(e) => {
                     state.error = Some(format!("Couldn't save commander: {e}"));
@@ -370,11 +502,17 @@ pub fn update(
             state.art_options.clear();
             (Task::none(), None)
         }
-        SetupMessage::ChangeArt => {
+        SetupMessage::AddPartner => {
+            state.editing_slot = PARTNER;
+            state.clear_editor_fields();
+            (Task::none(), None)
+        }
+        SetupMessage::ChangeArt(slot) => {
+            state.editing_slot = slot;
             let Some(seat) = state.editing_seat else {
                 return (Task::none(), None);
             };
-            let Some(commander) = state.seats[seat].commander.clone() else {
+            let Some(commander) = state.seats[seat].commander_in(slot).cloned() else {
                 return (Task::none(), None);
             };
             state.art_target = Some(ArtTarget {
@@ -386,42 +524,102 @@ pub fn update(
             state.loading_art_options = true;
             (load_prints_task(commander.oracle_id), None)
         }
-        SetupMessage::StartFraming => {
+        SetupMessage::StartFraming(slot) => {
+            state.editing_slot = slot;
             state.framing = true;
             (Task::none(), None)
         }
-        SetupMessage::SetArtZoom(zoom) => {
+        SetupMessage::FramingChanged(framing) => {
+            // Kept in memory while the gesture runs; written once on Done so
+            // a drag isn't a few hundred database writes.
             if let Some(commander) = current_commander_mut(state) {
-                commander.art_zoom = zoom.clamp(MIN_ART_ZOOM, MAX_ART_ZOOM);
-                let (id, zoom, anchor) =
-                    (commander.id, commander.art_zoom, commander.art_anchor);
-                let _ = db::set_commander_framing(conn, id, zoom, anchor);
-            }
-            (Task::none(), None)
-        }
-        SetupMessage::SetArtAnchor(anchor) => {
-            if let Some(commander) = current_commander_mut(state) {
-                commander.art_anchor = anchor;
-                let (id, zoom) = (commander.id, commander.art_zoom);
-                let _ = db::set_commander_framing(conn, id, zoom, anchor);
+                commander.framing = framing.clamped();
             }
             (Task::none(), None)
         }
         SetupMessage::DoneFraming => {
             state.framing = false;
+            if let (Some(seat_index), Some(layout)) = (state.editing_seat, &state.table_layout) {
+                let layout_name = layout.name.clone();
+                let slot = state.editing_slot;
+                if let Some(commander) = state.seats[seat_index].commander_in(slot) {
+                    let _ = db::save_framing(
+                        conn,
+                        commander.id,
+                        &layout_name,
+                        seat_index,
+                        commander.framing,
+                    );
+                }
+            }
             (Task::none(), None)
         }
-        SetupMessage::ClearSeatCommander => {
+        SetupMessage::ClearSeatCommander(slot) => {
+            state.editing_slot = slot;
             if let Some(seat) = state.editing_seat {
-                state.seats[seat].commander = None;
+                state.seats[seat].set_commander_in(slot, None);
+                // Dropping the primary drops the partner with it: a partner
+                // on its own isn't a deck, and the picker would otherwise
+                // reopen on a seat that still looks half-filled.
+                if slot == PRIMARY {
+                    state.seats[seat].partner = None;
+                }
             }
             state.art_target = None;
             state.art_options.clear();
             (Task::none(), None)
         }
+        SetupMessage::CooldownTick => {
+            state.cooldown.tick();
+            if !state.cooldown.active() {
+                state.error = None;
+            }
+            (Task::none(), None)
+        }
+        SetupMessage::ReviewTurnOrder => {
+            if !state.all_seats_ready() {
+                state.error = Some("Every seat needs a player and a commander.".into());
+                return (Task::none(), None);
+            }
+            state.error = None;
+            state.stage = SetupStage::TurnOrder;
+            (Task::none(), None)
+        }
+        SetupMessage::BackToGridFromTurnOrder => {
+            state.stage = SetupStage::Grid;
+            state.error = None;
+            (Task::none(), None)
+        }
+        SetupMessage::ChooseFirstSeat(seat) => {
+            state.first_seat = Some(seat);
+            state.error = None;
+            (Task::none(), None)
+        }
+        SetupMessage::RandomFirstSeat => {
+            // A die roll's worth of randomness for picking who leads; not
+            // worth a dependency, and nothing here is adversarial.
+            let n = state.seats.len();
+            if n > 0 {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as usize)
+                    .unwrap_or(0);
+                state.first_seat = Some(nanos % n);
+                state.error = None;
+            }
+            (Task::none(), None)
+        }
+        SetupMessage::SetTurnDirection(dir) => {
+            state.turn_direction = dir;
+            (Task::none(), None)
+        }
         SetupMessage::StartGame => {
             let Some(layout) = state.table_layout.clone() else {
                 state.error = Some("Pick a table layout first.".into());
+                return (Task::none(), None);
+            };
+            let Some(turn_order) = planned_turn_order(state) else {
+                state.error = Some("Pick who takes the first turn.".into());
                 return (Task::none(), None);
             };
             if state.all_seats_ready() {
@@ -434,9 +632,10 @@ pub fn update(
                             s.commander.clone().unwrap(),
                             STARTING_LIFE,
                         )
+                        .with_partner(s.partner.clone())
                     })
                     .collect();
-                (Task::none(), Some(Action::StartGame(seats, layout)))
+                (Task::none(), Some(Action::StartGame(seats, layout, turn_order)))
             } else {
                 state.error = Some("Every seat needs a player and a commander.".into());
                 (Task::none(), None)
@@ -453,6 +652,7 @@ pub fn view<'a>(
     match state.stage {
         SetupStage::ChoosePodSize => pod_size_view(),
         SetupStage::ChooseLayout => layout_choice_view(state),
+        SetupStage::TurnOrder => turn_order_view(state, image_cache),
         SetupStage::Grid => {
             if state.editing_seat.is_some() {
                 editor_overlay(state, players_cache, image_cache)
@@ -467,7 +667,7 @@ pub fn view<'a>(
 /// as the real board so it's an accurate preview, just shrunk down.
 fn layout_preview(table: &TableLayout) -> Element<'static, Message> {
     container(layout::render_table(table, |idx| {
-        container(text((idx + 1).to_string()).size(22))
+        container(text((idx + 1).to_string()).size(style::T_ACTION))
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x(Length::Fill)
@@ -489,7 +689,7 @@ fn step_screen<'a>(
     back: Message,
 ) -> Element<'a, Message> {
     let header = container(
-        column![text(title).size(46), text(subtitle).size(20)]
+        column![text(title).size(style::T_TITLE), text(subtitle).size(style::T_LABEL)]
             .spacing(8)
             .align_x(iced::Alignment::Center),
     )
@@ -506,9 +706,9 @@ fn step_screen<'a>(
                 .height(Length::Fill)
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
-            style::touch_button("Back", 22)
+            style::touch_button("Back", style::T_ACTION)
                 .width(Length::Fixed(280.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(back),
         ]
         .spacing(style::GAP)
@@ -531,12 +731,12 @@ fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
             .map(|opt| {
                 let label = opt.name.clone();
                 button(
-                    column![layout_preview(opt), text(label).size(24)]
+                    column![layout_preview(opt), text(label).size(style::T_SUBHEAD)]
                         .spacing(16)
                         .align_x(iced::Alignment::Center),
                 )
                 .padding(24)
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Setup(SetupMessage::ChooseLayout(opt.clone())))
                 .into()
             })
@@ -560,43 +760,24 @@ fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
 }
 
 fn pod_size_view<'a>() -> Element<'a, Message> {
-    // 4 per row, so the tiles stay big instead of stringing out across the
-    // full width of the screen.
-    let counts: Vec<usize> = (MIN_POD..=MAX_POD).collect();
-    let rows: Vec<Element<Message>> = counts
-        .chunks(4)
-        .map(|chunk| {
-            row(chunk
-                .iter()
-                .map(|n| {
-                    let n = *n;
-                    button(
-                        column![
-                            text(n.to_string()).size(64),
-                            text(if n == 2 { "player" } else { "players" }).size(16),
-                        ]
-                        .spacing(2)
-                        .align_x(iced::Alignment::Center),
-                    )
-                    .padding(0)
-                    .width(Length::Fixed(190.0))
-                    .height(Length::Fixed(190.0))
-                    .style(button::primary)
-                    .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)))
-                    .into()
-                })
-                .collect::<Vec<Element<Message>>>())
-            .spacing(24)
-            .into()
+    // One row, 2 through 8, so the choice reads as a scale you run your eye
+    // along rather than a grid you have to search. It wraps if the window is
+    // ever too narrow to hold the whole scale.
+    let tiles: Vec<Element<Message>> = (MIN_POD..=MAX_POD)
+        .map(|n| {
+            style::choice_tile(n.to_string(), if n == 2 { "player" } else { "players" })
+                .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)))
+                .into()
         })
         .collect();
 
     step_screen(
         "How many players?",
         "Everyone at the table, including you".to_string(),
-        column(rows)
-            .spacing(24)
-            .align_x(iced::Alignment::Center)
+        row(tiles)
+            .spacing(style::GAP)
+            .align_y(iced::Alignment::Center)
+            .wrap()
             .into(),
         Message::GoHome,
     )
@@ -608,15 +789,15 @@ fn grid_view<'a>(
 ) -> Element<'a, Message> {
     let header = container(
         row![
-            text("Set up your pod").size(32),
+            text("Set up your pod").size(style::T_HEADING),
             iced::widget::horizontal_space(),
-            style::touch_button("Layout", 18)
+            style::touch_button("Layout", style::T_BODY)
                 .width(Length::Fixed(160.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Setup(SetupMessage::BackToLayoutChoice)),
-            style::touch_button("Player Count", 18)
+            style::touch_button("Player Count", style::T_BODY)
                 .width(Length::Fixed(220.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Setup(SetupMessage::BackToPodSizeChoice)),
         ]
         .spacing(12)
@@ -628,16 +809,23 @@ fn grid_view<'a>(
 
     let board = match &state.table_layout {
         Some(table) => {
-            layout::render_table(table, |idx| seat_tile(idx, &state.seats[idx], image_cache))
+            layout::render_table(table, |idx| {
+                seat_tile(
+                    idx,
+                    &state.seats[idx],
+                    table.seat_orientation(idx),
+                    image_cache,
+                )
+            })
         }
-        None => text("Pick a layout first.").size(20).into(),
+        None => text("Pick a layout first.").size(style::T_LABEL).into(),
     };
 
-    let mut start_button = style::cta_button("Start Game", 30).width(Length::Fixed(480.0));
+    let mut start_button = style::cta_button("Next: Turn Order", style::T_LEAD).width(Length::Fixed(480.0));
     if state.all_seats_ready() {
         start_button = start_button
-            .style(button::success)
-            .on_press(Message::Setup(SetupMessage::StartGame));
+            .style(style::success)
+            .on_press(Message::Setup(SetupMessage::ReviewTurnOrder));
     }
 
     let mut content =
@@ -645,7 +833,7 @@ fn grid_view<'a>(
 
     if let Some(e) = &state.error {
         content = content.push(
-            container(text(e.clone()).size(20))
+            container(text(e.clone()).size(style::T_LABEL))
                 .padding(16)
                 .width(Length::Fill)
                 .style(style::panel_danger),
@@ -663,17 +851,24 @@ fn grid_view<'a>(
 fn seat_tile<'a>(
     index: usize,
     seat: &'a SeatSetup,
+    facing: SeatOrientation,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
     match (&seat.player, &seat.commander) {
         (Some(player), Some(commander)) => {
-            let art = art::framed(commander, image_cache, 18);
+            let art = art::framed_pair(
+                commander,
+                seat.partner.as_ref(),
+                image_cache,
+                18,
+                facing.radians(),
+            );
 
             let caption = container(
                 container(
                     column![
-                        text(player.name.clone()).size(28),
-                        text(commander.name.clone()).size(18),
+                        text(player.name.clone()).size(style::T_SUBHEAD),
+                        text(commander.name.clone()).size(style::T_BODY),
                     ]
                     .spacing(4),
                 )
@@ -698,8 +893,8 @@ fn seat_tile<'a>(
         (Some(player), None) => button(
             container(
                 column![
-                    text(player.name.clone()).size(30),
-                    text("Tap to pick a commander").size(18),
+                    text(player.name.clone()).size(style::T_LEAD),
+                    text("Tap to pick a commander").size(style::T_BODY),
                 ]
                 .spacing(10)
                 .align_x(iced::Alignment::Center),
@@ -711,11 +906,11 @@ fn seat_tile<'a>(
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(button::secondary)
+        .style(style::secondary)
         .on_press(Message::Setup(SetupMessage::EditSeat(index)))
         .into(),
         _ => button(
-            container(text(format!("+ Add Player {}", index + 1)).size(32))
+            container(text(format!("+ Add Player {}", index + 1)).size(style::T_HEADING))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center_x(Length::Fill)
@@ -723,7 +918,7 @@ fn seat_tile<'a>(
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(button::secondary)
+        .style(style::secondary)
         .on_press(Message::Setup(SetupMessage::EditSeat(index)))
         .into(),
     }
@@ -738,21 +933,27 @@ fn editor_overlay<'a>(
     let seat = &state.seats[seat_index];
 
     let body: Element<Message> = if state.framing {
-        framing_editor(seat, image_cache)
+        framing_editor(
+            seat,
+            state.editing_slot,
+            seat_index,
+            state.table_layout.as_ref(),
+            image_cache,
+        )
     } else if state.art_target.is_some() {
         art_gallery(state, image_cache)
     } else if seat.player.is_none() {
         player_picker(state, players_cache)
-    } else if seat.commander.is_none() {
+    } else if seat.commander_in(state.editing_slot).is_none() {
         commander_picker(state, &seat.commander_history)
     } else {
         seat_summary(seat, image_cache)
     };
 
     let top = row![
-        style::touch_button("\u{2190} Back to Grid", 20)
+        style::touch_button("\u{00ab} Back to Grid", style::T_LABEL)
             .width(Length::Fixed(280.0))
-            .style(button::secondary)
+            .style(style::secondary)
             .on_press(Message::Setup(SetupMessage::BackToGrid)),
     ];
 
@@ -760,7 +961,7 @@ fn editor_overlay<'a>(
 
     if let Some(e) = &state.error {
         content = content.push(
-            container(text(e.clone()).size(20))
+            container(text(e.clone()).size(style::T_LABEL))
                 .padding(16)
                 .width(Length::Fill)
                 .style(style::panel_danger),
@@ -780,9 +981,9 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
     let existing = row(available
         .into_iter()
         .map(|p| {
-            style::touch_button(&p.name, 24)
+            style::touch_button(&p.name, style::T_SUBHEAD)
                 .width(Length::Fixed(300.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Setup(SetupMessage::PickExistingPlayer(p.clone())))
                 .into()
         })
@@ -791,17 +992,18 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
     .wrap();
 
     column![
-        text("Who's sitting here?").size(40),
+        text("Who's sitting here?").size(style::T_TITLE),
         scrollable(existing).height(Length::Fill),
         row![
             text_input("New player name", &state.new_player_name)
-                .size(26)
+                .size(style::T_SUBHEAD)
                 .padding(22)
+                .style(style::input)
                 .on_input(|s| Message::Setup(SetupMessage::NewPlayerNameChanged(s)))
                 .on_submit(Message::Setup(SetupMessage::CreatePlayer)),
-            style::touch_button("Add Player", 22)
+            style::touch_button("Add Player", style::T_ACTION)
                 .width(Length::Fixed(240.0))
-                .style(button::primary)
+                .style(style::primary)
                 .on_press(Message::Setup(SetupMessage::CreatePlayer)),
         ]
         .spacing(14)
@@ -814,21 +1016,21 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
 
 fn commander_picker<'a>(
     state: &'a SetupState,
-    history: &'a [Commander],
+    history: &'a [SavedDeck],
 ) -> Element<'a, Message> {
     let history_row: Element<Message> = if history.is_empty() {
         text("No commanders played yet - search below to add one.")
-            .size(18)
+            .size(style::T_BODY)
             .into()
     } else {
         row(history
             .iter()
-            .map(|c| {
-                style::touch_button(&c.name, 20)
+            .map(|deck| {
+                style::touch_button(deck.label(), 20)
                     .width(Length::Fixed(320.0))
-                    .style(button::secondary)
+                    .style(style::secondary)
                     .on_press(Message::Setup(SetupMessage::PickHistoryCommander(
-                        c.clone(),
+                        deck.clone(),
                     )))
                     .into()
             })
@@ -844,14 +1046,14 @@ fn commander_picker<'a>(
             .iter()
             .map(|c| {
                 button(
-                    container(text(format!("{}   [{}]", c.name, c.color_identity)).size(22))
+                    container(text(format!("{}   [{}]", c.name, c.color_identity)).size(style::T_ACTION))
                         .padding([0, 20])
                         .center_y(Length::Fill),
                 )
                 .padding(0)
                 .height(Length::Fixed(style::TOUCH_H))
                 .width(Length::Fill)
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Setup(SetupMessage::PickCommanderName(c.clone())))
                 .into()
             })
@@ -859,26 +1061,40 @@ fn commander_picker<'a>(
     )
     .spacing(10);
 
-    let search_label = if state.searching {
-        "Searching..."
+    let search_label: String = if state.cooldown.active() {
+        state.cooldown.label()
+    } else if state.searching {
+        "Searching...".into()
     } else {
-        "Search"
+        "Search".into()
+    };
+
+    let mut search_button = style::touch_button(search_label, style::T_ACTION)
+        .width(Length::Fixed(220.0))
+        .style(style::primary);
+    if !state.cooldown.active() {
+        search_button =
+            search_button.on_press(Message::Setup(SetupMessage::SearchCommanders));
+    }
+
+    let heading = if state.editing_slot == PARTNER {
+        "Pick a partner"
+    } else {
+        "Pick a commander"
     };
 
     column![
-        text("Pick a commander").size(40),
-        text("This player's commanders").size(18),
+        text(heading).size(style::T_TITLE),
+        text("This player's commanders").size(style::T_BODY),
         scrollable(history_row).height(Length::Fixed(190.0)),
         row![
             text_input("Commander name", &state.commander_query)
-                .size(26)
+                .size(style::T_SUBHEAD)
                 .padding(22)
+                .style(style::input)
                 .on_input(|s| Message::Setup(SetupMessage::CommanderQueryChanged(s)))
                 .on_submit(Message::Setup(SetupMessage::SearchCommanders)),
-            style::touch_button(search_label, 22)
-                .width(Length::Fixed(220.0))
-                .style(button::primary)
-                .on_press(Message::Setup(SetupMessage::SearchCommanders)),
+            search_button,
         ]
         .spacing(14)
         .align_y(iced::Alignment::Center),
@@ -905,7 +1121,7 @@ fn art_gallery<'a>(
                     .height(Length::Fixed(220.0))
                     .content_fit(ContentFit::Cover)
                     .into(),
-                None => container(text("...").size(20))
+                None => container(text("...").size(style::T_LABEL))
                     .width(Length::Fixed(300.0))
                     .height(Length::Fixed(220.0))
                     .center_x(Length::Fixed(300.0))
@@ -913,30 +1129,30 @@ fn art_gallery<'a>(
                     .into(),
             };
             button(
-                column![thumb, text(card.set_name.clone()).size(16)]
+                column![thumb, text(card.set_name.clone()).size(style::T_CAPTION)]
                     .spacing(8)
                     .align_x(iced::Alignment::Center),
             )
             .padding(10)
-            .style(button::secondary)
+            .style(style::secondary)
             .on_press(Message::Setup(SetupMessage::PickArt(card.clone())))
             .into()
         })
         .collect();
 
     let status = if state.loading_art_options {
-        text("Loading every printing from Scryfall...").size(18)
+        text("Loading every printing from Scryfall...").size(style::T_BODY)
     } else {
-        text(format!("{} printings found", state.art_options.len())).size(18)
+        text(format!("{} printings found", state.art_options.len())).size(style::T_BODY)
     };
 
     column![
-        text(format!("Choose art for {}", target.name)).size(40),
+        text(format!("Choose art for {}", target.name)).size(style::T_TITLE),
         status,
         scrollable(row(tiles).spacing(16).wrap()).height(Length::Fill),
-        style::touch_button("Back to search", 20)
+        style::touch_button("Back to search", style::T_LABEL)
             .width(Length::Fixed(280.0))
-            .style(button::secondary)
+            .style(style::secondary)
             .on_press(Message::Setup(SetupMessage::CancelArtPick)),
     ]
     .spacing(18)
@@ -946,81 +1162,73 @@ fn art_gallery<'a>(
 
 /// Zoom and anchor the art so the part that matters ends up visible in the
 /// seat tile during play. The preview is the real renderer at tile aspect.
+/// Drag the art around and pinch (or scroll) to zoom, inside a box shaped
+/// like the tile this art will actually occupy. The framing is remembered
+/// per layout and seat, because the same art needs a different crop in a
+/// tall head-of-table tile than in a short wide one.
 fn framing_editor<'a>(
     seat: &'a SeatSetup,
+    slot: usize,
+    seat_index: usize,
+    table: Option<&'a TableLayout>,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
-    let Some(commander) = seat.commander.as_ref() else {
-        return text("Pick a commander first.").size(22).into();
+    let Some(commander) = seat.commander_in(slot) else {
+        return text("Pick a commander first.").size(style::T_ACTION).into();
     };
 
-    let zoom = commander.art_zoom;
-    let preview = container(art::framed(commander, image_cache, 20))
-        .width(Length::Fixed(640.0))
-        .height(Length::Fixed(360.0))
-        .style(style::panel);
+    let handle = commander
+        .portrait_url()
+        .and_then(|u| image_cache.get(u))
+        .cloned();
 
-    let anchor_grid = column(
-        ArtAnchor::GRID
-            .iter()
-            .map(|row_anchors| {
-                row(row_anchors
-                    .iter()
-                    .map(|a| {
-                        let selected = commander.art_anchor == *a;
-                        button(container(text("")).width(Length::Fill).height(Length::Fill))
-                            .width(Length::Fixed(72.0))
-                            .height(Length::Fixed(72.0))
-                            .style(if selected {
-                                button::primary
-                            } else {
-                                button::secondary
-                            })
-                            .on_press(Message::Setup(SetupMessage::SetArtAnchor(*a)))
-                            .into()
-                    })
-                    .collect::<Vec<Element<Message>>>())
-                .spacing(10)
-                .into()
-            })
-            .collect::<Vec<Element<Message>>>(),
-    )
-    .spacing(10);
+    let Some(handle) = handle else {
+        return container(text("Loading art...").size(style::T_SUBHEAD))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
+    };
 
-    let zoom_row = row![
-        style::touch_button("\u{2212} Zoom out", 20)
-            .width(Length::Fixed(230.0))
-            .style(button::secondary)
-            .on_press(Message::Setup(SetupMessage::SetArtZoom(zoom - 0.15))),
-        container(text(format!("{:.0}%", zoom * 100.0)).size(28))
-            .width(Length::Fixed(140.0))
-            .center_x(Length::Fixed(140.0)),
-        style::touch_button("Zoom in +", 20)
-            .width(Length::Fixed(230.0))
-            .style(button::secondary)
-            .on_press(Message::Setup(SetupMessage::SetArtZoom(zoom + 0.15))),
-    ]
-    .spacing(14)
-    .align_y(iced::Alignment::Center);
+    // Match the real tile's proportions so what's lined up here is what
+    // shows in the game.
+    let aspect = table.map_or(1.6, |t| t.tile_aspect(seat_index));
+    let preview_h: f32 = 520.0;
+    let preview_w = (preview_h * aspect).clamp(320.0, 1100.0);
+
+    let surface = container(panned_image::editable(handle, commander.framing, |framing| {
+        Message::Setup(SetupMessage::FramingChanged(framing))
+    }))
+    .width(Length::Fixed(preview_w))
+    .height(Length::Fixed(preview_h))
+    .clip(true)
+    .style(style::panel);
+
+    let layout_note = match table {
+        Some(t) => format!(
+            "Seat {} of the {} layout \u{00b7} saved for this seat only",
+            seat_index + 1,
+            t.name
+        ),
+        None => "Pick a layout first".to_string(),
+    };
 
     column![
-        text(format!("Frame {}", commander.name)).size(38),
-        text("Zoom in, then pick which part of the art stays in the tile.").size(18),
-        row![
-            preview,
-            column![text("Focus").size(20), anchor_grid]
-                .spacing(12)
-                .align_x(iced::Alignment::Center),
-        ]
-        .spacing(28)
-        .align_y(iced::Alignment::Center),
-        zoom_row,
-        style::cta_button("Done", 24)
-            .width(Length::Fixed(300.0))
-            .style(button::success)
-            .on_press(Message::Setup(SetupMessage::DoneFraming)),
+        text(format!("Frame {}", commander.name)).size(style::T_HEADING),
+        text("Drag to move \u{00b7} pinch or scroll to zoom").size(style::T_LABEL),
+        container(surface).width(Length::Fill).center_x(Length::Fill),
+        text(layout_note).size(style::T_CAPTION),
+        container(
+            style::cta_button("Done", style::T_SUBHEAD)
+                .width(Length::Fixed(360.0))
+                .style(style::success)
+                .on_press(Message::Setup(SetupMessage::DoneFraming))
+        )
+        .width(Length::Fill)
+        .center_x(Length::Fill),
     ]
-    .spacing(22)
+    .spacing(16)
     .align_x(iced::Alignment::Center)
     .height(Length::Fill)
     .into()
@@ -1033,33 +1241,304 @@ fn seat_summary<'a>(
     let player = seat.player.as_ref().unwrap();
     let commander = seat.commander.as_ref().unwrap();
 
-    let portrait = art::framed(commander, image_cache, 20);
+    let portrait = art::framed_pair(commander, seat.partner.as_ref(), image_cache, 20, 0.0);
+
+    let heading = match &seat.partner {
+        Some(p) => format!("{} is playing {} + {}", player.name, commander.name, p.name),
+        None => format!("{} is playing {}", player.name, commander.name),
+    };
+
+    // Colour identity of a partner pair is the union of both halves.
+    let identity = match &seat.partner {
+        Some(p) => {
+            let mut letters: Vec<char> = commander
+                .color_identity
+                .chars()
+                .chain(p.color_identity.chars())
+                .collect();
+            letters.sort_unstable();
+            letters.dedup();
+            letters.into_iter().collect::<String>()
+        }
+        None => commander.color_identity.clone(),
+    };
+
+    let primary_row = row![
+        style::touch_button("Change Player", style::T_LABEL)
+            .width(Length::Fill)
+            .style(style::secondary)
+            .on_press(Message::Setup(SetupMessage::ClearSeatPlayer)),
+        style::touch_button("Change Commander", style::T_LABEL)
+            .width(Length::Fill)
+            .style(style::secondary)
+            .on_press(Message::Setup(SetupMessage::ClearSeatCommander(PRIMARY))),
+        style::touch_button("Change Art", style::T_LABEL)
+            .width(Length::Fill)
+            .style(style::secondary)
+            .on_press(Message::Setup(SetupMessage::ChangeArt(PRIMARY))),
+        style::touch_button("Frame Art", style::T_LABEL)
+            .width(Length::Fill)
+            .style(style::primary)
+            .on_press(Message::Setup(SetupMessage::StartFraming(PRIMARY))),
+    ]
+    .spacing(14);
+
+    // The partner row only appears once there is one; until then a single
+    // button offers to add one, so single-commander decks see no clutter.
+    let partner_row: Element<Message> = match &seat.partner {
+        Some(partner) => column![
+            text(format!("Partner: {}", partner.name)).size(style::T_ACTION),
+            row![
+                style::touch_button("Remove Partner", style::T_LABEL)
+                    .width(Length::Fill)
+                    .style(style::danger)
+                    .on_press(Message::Setup(SetupMessage::ClearSeatCommander(PARTNER))),
+                style::touch_button("Partner Art", style::T_LABEL)
+                    .width(Length::Fill)
+                    .style(style::secondary)
+                    .on_press(Message::Setup(SetupMessage::ChangeArt(PARTNER))),
+                style::touch_button("Frame Partner", style::T_LABEL)
+                    .width(Length::Fill)
+                    .style(style::primary)
+                    .on_press(Message::Setup(SetupMessage::StartFraming(PARTNER))),
+            ]
+            .spacing(14),
+        ]
+        .spacing(10)
+        .into(),
+        None => style::touch_button("Add Partner", style::T_LABEL)
+            .width(Length::Fixed(360.0))
+            .style(style::secondary)
+            .on_press(Message::Setup(SetupMessage::AddPartner))
+            .into(),
+    };
 
     column![
         container(portrait).width(Length::Fill).height(Length::FillPortion(4)),
-        text(format!("{} is playing {}", player.name, commander.name)).size(32),
-        text(format!("Color identity: {}", commander.color_identity)).size(18),
-        row![
-            style::touch_button("Change Player", 20)
-                .width(Length::Fill)
-                .style(button::secondary)
-                .on_press(Message::Setup(SetupMessage::ClearSeatPlayer)),
-            style::touch_button("Change Commander", 20)
-                .width(Length::Fill)
-                .style(button::secondary)
-                .on_press(Message::Setup(SetupMessage::ClearSeatCommander)),
-            style::touch_button("Change Art", 20)
-                .width(Length::Fill)
-                .style(button::secondary)
-                .on_press(Message::Setup(SetupMessage::ChangeArt)),
-            style::touch_button("Frame Art", 20)
-                .width(Length::Fill)
-                .style(button::primary)
-                .on_press(Message::Setup(SetupMessage::StartFraming)),
-        ]
-        .spacing(14),
+        text(heading).size(style::T_HEADING),
+        text(format!("Color identity: {identity}")).size(style::T_BODY),
+        primary_row,
+        partner_row,
     ]
     .spacing(18)
     .height(Length::Fill)
     .into()
+}
+
+/// The last setup step: tap who leads, set which way turns pass, then start.
+/// Every seat shows the position it will play in, so the pod can check the
+/// order against the real table before anyone draws a card.
+fn turn_order_view<'a>(
+    state: &'a SetupState,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let order = planned_turn_order(state);
+
+    let header = container(
+        row![
+            column![
+                text("Who goes first?").size(style::T_HEADING),
+                text("Tap a seat, then choose which way turns pass.").size(style::T_BODY),
+            ]
+            .spacing(6),
+            iced::widget::horizontal_space(),
+            style::touch_button("Random", style::T_LABEL)
+                .width(Length::Fixed(180.0))
+                .style(style::secondary)
+                .on_press(Message::Setup(SetupMessage::RandomFirstSeat)),
+            style::touch_button("Back", style::T_LABEL)
+                .width(Length::Fixed(160.0))
+                .style(style::secondary)
+                .on_press(Message::Setup(SetupMessage::BackToGridFromTurnOrder)),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(style::header);
+
+    let board = match &state.table_layout {
+        Some(table) => layout::render_table(table, |idx| {
+            // Position in the turn order, 1-indexed, once a leader is set.
+            let position = order
+                .as_ref()
+                .and_then(|o| o.iter().position(|&seat| seat == idx))
+                .map(|p| p + 1);
+            turn_order_tile(
+                idx,
+                &state.seats[idx],
+                position,
+                table.seat_orientation(idx),
+                image_cache,
+            )
+        }),
+        None => text("Pick a layout first.").size(style::T_LABEL).into(),
+    };
+
+    let direction_buttons = row(
+        [TurnDirection::Clockwise, TurnDirection::CounterClockwise]
+            .into_iter()
+            .map(|dir| {
+                let selected = state.turn_direction == dir;
+                style::touch_button(dir.label(), 22)
+                    .width(Length::Fixed(340.0))
+                    .style(if selected {
+                        style::primary
+                    } else {
+                        style::secondary
+                    })
+                    .on_press(Message::Setup(SetupMessage::SetTurnDirection(dir)))
+                    .into()
+            })
+            .collect::<Vec<Element<Message>>>(),
+    )
+    .spacing(16);
+
+    let summary: Element<Message> = match &order {
+        Some(order) => {
+            let names: Vec<String> = order
+                .iter()
+                .filter_map(|&seat| state.seats[seat].player.as_ref())
+                .map(|p| p.name.clone())
+                .collect();
+            // Naming the wrap-around explicitly says which way turns pass
+            // without leaning on an arrow glyph the font may not have.
+            let leader = names.first().cloned().unwrap_or_default();
+            let chain = names.join("  \u{203a}  ");
+            container(text(format!("{chain}  \u{203a}  back to {leader}")).size(style::T_ACTION))
+                .padding(16)
+                .width(Length::Fill)
+                .center_x(Length::Fill)
+                .style(style::panel)
+                .into()
+        }
+        None => container(text("Pick who takes the first turn.").size(style::T_ACTION))
+            .padding(16)
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .style(style::panel)
+            .into(),
+    };
+
+    let mut start_button = style::cta_button("Start Game", style::T_LEAD).width(Length::Fixed(480.0));
+    if order.is_some() {
+        start_button = start_button
+            .style(style::success)
+            .on_press(Message::Setup(SetupMessage::StartGame));
+    }
+
+    let mut content = column![
+        header,
+        container(board).height(Length::Fill),
+        container(direction_buttons).center_x(Length::Fill),
+        summary,
+    ]
+    .spacing(style::GAP);
+
+    if let Some(e) = &state.error {
+        content = content.push(
+            container(text(e.clone()).size(style::T_LABEL))
+                .padding(16)
+                .width(Length::Fill)
+                .style(style::panel_danger),
+        );
+    }
+
+    content = content.push(container(start_button).center_x(Length::Fill));
+
+    container(content.padding(style::GAP))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// A seat on the turn-order screen: its art, the player's name, and the
+/// position it plays in. The position sits in the middle of the tile in the
+/// same frosted chip the life counter uses in-game, so "First Player" lands
+/// where everyone is already used to looking.
+fn turn_order_tile<'a>(
+    index: usize,
+    seat: &'a SeatSetup,
+    position: Option<usize>,
+    facing: SeatOrientation,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let Some(player) = &seat.player else {
+        return container(text("Empty seat").size(style::T_LABEL))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(style::panel)
+            .into();
+    };
+
+    let art: Element<Message> = match &seat.commander {
+        Some(commander) => art::framed_pair(
+            commander,
+            seat.partner.as_ref(),
+            image_cache,
+            18,
+            facing.radians(),
+        ),
+        None => iced::widget::horizontal_space().into(),
+    };
+
+    // Centered over the art, matching the in-game life counter: the leader
+    // gets the heavier chip, everyone else the lighter one.
+    let badge: Element<Message> = match position {
+        Some(1) => container(
+            container(text("First Player").size(style::T_TITLE))
+                .padding([14, 34])
+                .style(style::glass_strong),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into(),
+        Some(p) => container(
+            container(text(format!("#{p}")).size(style::T_TITLE))
+                .padding([14, 34])
+                .style(style::glass),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into(),
+        None => iced::widget::horizontal_space().into(),
+    };
+
+    let caption = container(
+        container(text(player.name.clone()).size(style::T_SUBHEAD))
+            .padding([12, 20])
+            .style(style::glass),
+    )
+    .padding(14)
+    .width(Length::Fill);
+
+    let overlay = container(caption)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_y(iced::alignment::Vertical::Bottom);
+
+    let tile = button(stack![art, overlay, badge])
+        .padding(0)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::ghost)
+        .on_press(Message::Setup(SetupMessage::ChooseFirstSeat(index)));
+
+    container(tile)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(if position == Some(1) {
+            style::panel_active
+        } else {
+            style::panel
+        })
+        .clip(true)
+        .into()
 }

@@ -55,20 +55,20 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
                 let reason = g.win_reason.map(|r| r.label()).unwrap_or("-");
                 button(
                     column![
-                        text(winner).size(26),
+                        text(winner).size(style::T_SUBHEAD),
                         text(format!(
                             "{} \u{00b7} {reason} \u{00b7} turn {} \u{00b7} {} players",
                             g.started_at.format("%Y-%m-%d %H:%M"),
                             g.ending_turn,
                             g.pod_size
                         ))
-                        .size(17),
+                        .size(style::T_CAPTION),
                     ]
                     .spacing(6),
                 )
                 .padding(20)
                 .width(Length::Fill)
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::History(HistoryMessage::ViewGame(g.id)))
                 .into()
             })
@@ -78,11 +78,11 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
 
     let header = container(
         row![
-            text("Game History").size(38),
+            text("Game History").size(style::T_TITLE),
             iced::widget::horizontal_space(),
-            style::touch_button("Back", 20)
+            style::touch_button("Back", style::T_LABEL)
                 .width(Length::Fixed(200.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::GoHome),
         ]
         .align_y(iced::Alignment::Center),
@@ -108,12 +108,12 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
         .map(|k| {
             let killer = k.killer.clone().unwrap_or_else(|| "someone unknown".to_string());
             text(format!(
-                "\u{1F480} {} {} {}",
+                "\u{2023} {} {} {}",
                 k.victim,
                 k.kind.past_tense(),
                 killer
             ))
-            .size(18)
+            .size(style::T_BODY)
             .into()
         })
         .collect();
@@ -133,19 +133,37 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
                     column![
                         text(format!(
                             "{}{} - {}",
-                            if s.won { "\u{1F451} " } else { "" },
+                            if s.won { "Winner \u{00b7} " } else { "" },
                             s.player_name,
                             s.commander_name
                         ))
-                        .size(26),
+                        .size(style::T_SUBHEAD),
                         text(format!("Life: {}   Poison: {}", s.final_life, s.final_poison))
-                            .size(18),
+                            .size(style::T_BODY),
                         text(if dmg.is_empty() {
                             "No commander damage taken".to_string()
                         } else {
                             format!("Damage taken: {dmg}")
                         })
-                        .size(18),
+                        .size(style::T_BODY),
+                        text(match &s.out {
+                            Some(out) => match &out.killer_name {
+                                Some(killer) => format!(
+                                    "{} on turn {}, to {}",
+                                    out.cause.past_tense(),
+                                    out.turn,
+                                    killer
+                                ),
+                                None => format!(
+                                    "{} on turn {}, nobody credited",
+                                    out.cause.past_tense(),
+                                    out.turn
+                                ),
+                            },
+                            None if s.won => "Survived".to_string(),
+                            None => "Still standing at the end".to_string(),
+                        })
+                        .size(style::T_BODY),
                     ]
                     .spacing(6),
                 )
@@ -164,11 +182,11 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
                 "Game on {}",
                 detail.started_at.format("%Y-%m-%d %H:%M")
             ))
-            .size(32),
+            .size(style::T_HEADING),
             iced::widget::horizontal_space(),
-            style::touch_button("Back to list", 20)
+            style::touch_button("Back to list", style::T_LABEL)
                 .width(Length::Fixed(240.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::History(HistoryMessage::Back)),
         ]
         .align_y(iced::Alignment::Center),
@@ -185,7 +203,7 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
                 detail.win_reason.map(|r| r.label()).unwrap_or("-"),
                 detail.ending_turn
             ))
-            .size(22),
+            .size(style::T_ACTION),
             column(kill_lines).spacing(6),
             scrollable(seat_rows).height(Length::Fill),
         ]

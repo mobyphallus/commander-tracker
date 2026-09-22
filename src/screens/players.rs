@@ -5,10 +5,9 @@ use iced::{ContentFit, Element, Length, Task};
 use rusqlite::Connection;
 
 use crate::app::Message;
-use crate::art;
 use crate::db;
-use crate::model::{ArtAnchor, Commander, Player, MAX_ART_ZOOM, MIN_ART_ZOOM};
-use crate::scryfall::{self, ScryfallCard};
+use crate::model::{Commander, Player, SavedDeck};
+use crate::scryfall::{self, Cooldown, ScryfallCard, ScryfallError};
 use crate::style;
 
 pub struct PlayersState {
@@ -20,12 +19,16 @@ pub struct PlayersState {
     /// When set, we're managing this player's commander list instead of the
     /// roster.
     pub managing: Option<ManagedPlayer>,
+    /// Non-zero while Scryfall has us locked out for exceeding the rate
+    /// limit. Lives on the screen rather than on `managing` so it survives
+    /// closing and reopening a player's commander list.
+    pub cooldown: Cooldown,
     pub error: Option<String>,
 }
 
 pub struct ManagedPlayer {
     pub player: Player,
-    pub commanders: Vec<Commander>,
+    pub commanders: Vec<SavedDeck>,
     pub query: String,
     pub results: Vec<ScryfallCard>,
     pub searching: bool,
@@ -34,8 +37,8 @@ pub struct ManagedPlayer {
     pub art_for: Option<Commander>,
     pub art_options: Vec<ScryfallCard>,
     pub loading_art: bool,
-    /// Set while zooming/anchoring one commander's art.
-    pub framing: Option<Commander>,
+    /// The commander whose partner is being chosen, if any.
+    pub pairing: Option<Commander>,
 }
 
 impl PlayersState {
@@ -46,6 +49,7 @@ impl PlayersState {
             editing: None,
             confirming_delete: None,
             managing: None,
+            cooldown: Cooldown::default(),
             error: None,
         }
     }
@@ -70,17 +74,18 @@ pub enum PlayersMessage {
     CloseManage,
     QueryChanged(String),
     Search,
-    SearchResults(Result<Vec<ScryfallCard>, String>),
+    SearchResults(Result<Vec<ScryfallCard>, ScryfallError>),
     AddCommander(ScryfallCard),
     RemoveCommander(i64),
     ChangeArt(Commander),
-    ArtOptionsLoaded(Result<Vec<ScryfallCard>, String>),
+    ArtOptionsLoaded(Result<Vec<ScryfallCard>, ScryfallError>),
     PickArt(ScryfallCard),
     CancelArt,
-    StartFraming(Commander),
-    SetArtZoom(f32),
-    SetArtAnchor(ArtAnchor),
-    DoneFraming,
+    StartPairing(Commander),
+    PickPartner(Commander),
+    Unpair(Commander),
+    CancelPairing,
+    CooldownTick,
 }
 
 pub fn update(
@@ -158,7 +163,7 @@ pub fn update(
                 art_for: None,
                 art_options: Vec::new(),
                 loading_art: false,
-                framing: None,
+                pairing: None,
             });
         }
         PlayersMessage::CloseManage => state.managing = None,
@@ -168,6 +173,9 @@ pub fn update(
             }
         }
         PlayersMessage::Search => {
+            if state.cooldown.active() {
+                return Task::none();
+            }
             if let Some(m) = &mut state.managing {
                 let query = m.query.clone();
                 if query.trim().is_empty() {
@@ -182,10 +190,24 @@ pub fn update(
         PlayersMessage::SearchResults(res) => {
             if let Some(m) = &mut state.managing {
                 m.searching = false;
-                match res {
-                    Ok(list) => m.results = list,
-                    Err(e) => state.error = Some(format!("Scryfall search failed: {e}")),
+            }
+            match res {
+                Ok(list) => {
+                    if let Some(m) = &mut state.managing {
+                        m.results = list;
+                    }
+                    state.error = None;
                 }
+                Err(e) => {
+                    state.cooldown.absorb(&e);
+                    state.error = Some(e.to_string());
+                }
+            }
+        }
+        PlayersMessage::CooldownTick => {
+            state.cooldown.tick();
+            if !state.cooldown.active() {
+                state.error = None;
             }
         }
         PlayersMessage::AddCommander(card) => {
@@ -235,23 +257,28 @@ pub fn update(
         PlayersMessage::ArtOptionsLoaded(res) => {
             if let Some(m) = &mut state.managing {
                 m.loading_art = false;
-                match res {
-                    Ok(list) => {
-                        let thumbs: Vec<Task<Message>> = list
-                            .iter()
-                            .filter_map(|c| c.small_url.clone())
-                            .take(20)
-                            .map(|url| {
-                                let key = url.clone();
-                                Task::perform(scryfall::fetch_image(url), move |res| {
-                                    Message::ArtLoaded(key.clone(), res)
-                                })
+            }
+            match res {
+                Ok(list) => {
+                    let thumbs: Vec<Task<Message>> = list
+                        .iter()
+                        .filter_map(|c| c.small_url.clone())
+                        .take(20)
+                        .map(|url| {
+                            let key = url.clone();
+                            Task::perform(scryfall::fetch_image(url), move |res| {
+                                Message::ArtLoaded(key.clone(), res)
                             })
-                            .collect();
+                        })
+                        .collect();
+                    if let Some(m) = &mut state.managing {
                         m.art_options = list;
-                        return Task::batch(thumbs);
                     }
-                    Err(e) => state.error = Some(format!("Couldn't load printings: {e}")),
+                    return Task::batch(thumbs);
+                }
+                Err(e) => {
+                    state.cooldown.absorb(&e);
+                    state.error = Some(e.to_string());
                 }
             }
         }
@@ -291,35 +318,32 @@ pub fn update(
                 m.art_options.clear();
             }
         }
-        PlayersMessage::StartFraming(commander) => {
+        PlayersMessage::StartPairing(commander) => {
             if let Some(m) = &mut state.managing {
-                m.framing = Some(commander);
+                m.pairing = Some(commander);
             }
         }
-        PlayersMessage::SetArtZoom(zoom) => {
+        PlayersMessage::PickPartner(partner) => {
+            let Some(m) = &mut state.managing else {
+                return Task::none();
+            };
+            let Some(primary) = m.pairing.take() else {
+                return Task::none();
+            };
+            if primary.id != partner.id {
+                let _ = db::set_player_partner(conn, m.player.id, primary.id, Some(partner.id));
+            }
+            m.commanders = db::player_commander_history(conn, m.player.id).unwrap_or_default();
+        }
+        PlayersMessage::Unpair(commander) => {
             if let Some(m) = &mut state.managing {
-                if let Some(c) = &mut m.framing {
-                    c.art_zoom = zoom.clamp(MIN_ART_ZOOM, MAX_ART_ZOOM);
-                    let _ =
-                        db::set_commander_framing(conn, c.id, c.art_zoom, c.art_anchor);
-                    m.commanders =
-                        db::player_commander_history(conn, m.player.id).unwrap_or_default();
-                }
+                let _ = db::set_player_partner(conn, m.player.id, commander.id, None);
+                m.commanders = db::player_commander_history(conn, m.player.id).unwrap_or_default();
             }
         }
-        PlayersMessage::SetArtAnchor(anchor) => {
+        PlayersMessage::CancelPairing => {
             if let Some(m) = &mut state.managing {
-                if let Some(c) = &mut m.framing {
-                    c.art_anchor = anchor;
-                    let _ = db::set_commander_framing(conn, c.id, c.art_zoom, anchor);
-                    m.commanders =
-                        db::player_commander_history(conn, m.player.id).unwrap_or_default();
-                }
-            }
-        }
-        PlayersMessage::DoneFraming => {
-            if let Some(m) = &mut state.managing {
-                m.framing = None;
+                m.pairing = None;
             }
         }
     }
@@ -331,8 +355,8 @@ pub fn view<'a>(
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
     if let Some(managed) = &state.managing {
-        if let Some(commander) = &managed.framing {
-            return framing_view(commander, image_cache);
+        if let Some(commander) = &managed.pairing {
+            return pairing_view(managed, commander, image_cache);
         }
         if managed.art_for.is_some() {
             return art_view(managed, image_cache);
@@ -351,11 +375,11 @@ pub fn view<'a>(
 
     let header = container(
         row![
-            text("Players").size(38),
+            text("Players").size(style::T_TITLE),
             iced::widget::horizontal_space(),
-            style::touch_button("Back", 20)
+            style::touch_button("Back", style::T_LABEL)
                 .width(Length::Fixed(200.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::GoHome),
         ]
         .align_y(iced::Alignment::Center),
@@ -366,13 +390,14 @@ pub fn view<'a>(
 
     let add_row = row![
         text_input("New player name", &state.new_player_name)
-            .size(26)
+            .size(style::T_SUBHEAD)
             .padding(22)
+            .style(style::input)
             .on_input(|s| Message::Players(PlayersMessage::NewNameChanged(s)))
             .on_submit(Message::Players(PlayersMessage::CreatePlayer)),
-        style::touch_button("Add Player", 22)
+        style::touch_button("Add Player", style::T_ACTION)
             .width(Length::Fixed(240.0))
-            .style(button::primary)
+            .style(style::primary)
             .on_press(Message::Players(PlayersMessage::CreatePlayer)),
     ]
     .spacing(14)
@@ -383,7 +408,7 @@ pub fn view<'a>(
 
     if let Some(e) = &state.error {
         content = content.push(
-            container(text(e.clone()).size(20))
+            container(text(e.clone()).size(style::T_LABEL))
                 .padding(16)
                 .width(Length::Fill)
                 .style(style::panel_danger),
@@ -401,17 +426,18 @@ fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message
         if *id == p.id {
             return row![
                 text_input("Player name", name)
-                    .size(26)
+                    .size(style::T_SUBHEAD)
                     .padding(22)
+                    .style(style::input)
                     .on_input(|s| Message::Players(PlayersMessage::NameChanged(s)))
                     .on_submit(Message::Players(PlayersMessage::Save)),
-                style::touch_button("Save", 22)
+                style::touch_button("Save", style::T_ACTION)
                     .width(Length::Fixed(160.0))
-                    .style(button::success)
+                    .style(style::success)
                     .on_press(Message::Players(PlayersMessage::Save)),
-                style::touch_button("Cancel", 22)
+                style::touch_button("Cancel", style::T_ACTION)
                     .width(Length::Fixed(160.0))
-                    .style(button::secondary)
+                    .style(style::secondary)
                     .on_press(Message::Players(PlayersMessage::Cancel)),
             ]
             .spacing(14)
@@ -423,14 +449,14 @@ fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message
     if state.confirming_delete == Some(p.id) {
         return container(
             row![
-                text(format!("Delete {}?", p.name)).size(26).width(Length::Fill),
-                style::touch_button("Yes, delete", 20)
+                text(format!("Delete {}?", p.name)).size(style::T_SUBHEAD).width(Length::Fill),
+                style::touch_button("Yes, delete", style::T_LABEL)
                     .width(Length::Fixed(220.0))
-                    .style(button::danger)
+                    .style(style::danger)
                     .on_press(Message::Players(PlayersMessage::ConfirmDelete(p.id))),
-                style::touch_button("Keep", 20)
+                style::touch_button("Keep", style::T_LABEL)
                     .width(Length::Fixed(160.0))
-                    .style(button::secondary)
+                    .style(style::secondary)
                     .on_press(Message::Players(PlayersMessage::CancelDelete)),
             ]
             .spacing(14)
@@ -444,21 +470,21 @@ fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message
 
     container(
         row![
-            text(p.name.clone()).size(26).width(Length::Fill),
-            style::touch_button("Commanders", 20)
+            text(p.name.clone()).size(style::T_SUBHEAD).width(Length::Fill),
+            style::touch_button("Commanders", style::T_LABEL)
                 .width(Length::Fixed(230.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Players(PlayersMessage::ManageCommanders(p.clone()))),
-            style::touch_button("Rename", 20)
+            style::touch_button("Rename", style::T_LABEL)
                 .width(Length::Fixed(180.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Players(PlayersMessage::StartEdit(
                     p.id,
                     p.name.clone()
                 ))),
-            style::touch_button("Delete", 20)
+            style::touch_button("Delete", style::T_LABEL)
                 .width(Length::Fixed(160.0))
-                .style(button::danger)
+                .style(style::danger)
                 .on_press(Message::Players(PlayersMessage::AskDelete(p.id))),
         ]
         .spacing(14)
@@ -473,11 +499,11 @@ fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message
 fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Element<'a, Message> {
     let header = container(
         row![
-            text(format!("{}'s Commanders", managed.player.name)).size(34),
+            text(format!("{}'s Commanders", managed.player.name)).size(style::T_HEADING),
             iced::widget::horizontal_space(),
-            style::touch_button("Back", 20)
+            style::touch_button("Back", style::T_LABEL)
                 .width(Length::Fixed(200.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Players(PlayersMessage::CloseManage)),
         ]
         .align_y(iced::Alignment::Center),
@@ -488,31 +514,39 @@ fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Eleme
 
     let owned: Element<Message> = if managed.commanders.is_empty() {
         text("No commanders saved yet - search below to add one.")
-            .size(20)
+            .size(style::T_LABEL)
             .into()
     } else {
         column(
             managed
                 .commanders
                 .iter()
-                .map(|c| {
+                .map(|deck| {
+                    let c = &deck.commander;
+                    // A paired deck offers to unpair; a lone commander
+                    // offers to pick a partner from this same list.
+                    let pair_button = match &deck.partner {
+                        Some(_) => style::touch_button("Unpair", style::T_BODY)
+                            .width(Length::Fixed(170.0))
+                            .style(style::danger)
+                            .on_press(Message::Players(PlayersMessage::Unpair(c.clone()))),
+                        None => style::touch_button("Set Partner", style::T_BODY)
+                            .width(Length::Fixed(170.0))
+                            .style(style::secondary)
+                            .on_press(Message::Players(PlayersMessage::StartPairing(c.clone()))),
+                    };
                     container(
                         row![
-                            text(c.name.clone()).size(24).width(Length::Fill),
-                            text(c.color_identity.clone()).size(20).width(Length::Fixed(90.0)),
-                            style::touch_button("Art", 18)
+                            text(deck.label()).size(style::T_SUBHEAD).width(Length::Fill),
+                            text(c.color_identity.clone()).size(style::T_LABEL).width(Length::Fixed(90.0)),
+                            style::touch_button("Art", style::T_BODY)
                                 .width(Length::Fixed(130.0))
-                                .style(button::secondary)
+                                .style(style::secondary)
                                 .on_press(Message::Players(PlayersMessage::ChangeArt(c.clone()))),
-                            style::touch_button("Frame", 18)
-                                .width(Length::Fixed(150.0))
-                                .style(button::secondary)
-                                .on_press(Message::Players(PlayersMessage::StartFraming(
-                                    c.clone()
-                                ))),
-                            style::touch_button("Remove", 18)
+                            pair_button,
+                            style::touch_button("Remove", style::T_BODY)
                                 .width(Length::Fixed(160.0))
-                                .style(button::danger)
+                                .style(style::danger)
                                 .on_press(Message::Players(PlayersMessage::RemoveCommander(c.id))),
                         ]
                         .spacing(12)
@@ -535,14 +569,14 @@ fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Eleme
             .iter()
             .map(|c| {
                 button(
-                    container(text(format!("{}   [{}]", c.name, c.color_identity)).size(22))
+                    container(text(format!("{}   [{}]", c.name, c.color_identity)).size(style::T_ACTION))
                         .padding([0, 20])
                         .center_y(Length::Fill),
                 )
                 .padding(0)
                 .height(Length::Fixed(style::TOUCH_H))
                 .width(Length::Fill)
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Players(PlayersMessage::AddCommander(c.clone())))
                 .into()
             })
@@ -550,25 +584,32 @@ fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Eleme
     )
     .spacing(10);
 
-    let search_label = if managed.searching {
-        "Searching..."
+    let search_label: String = if state.cooldown.active() {
+        state.cooldown.label()
+    } else if managed.searching {
+        "Searching...".into()
     } else {
-        "Search"
+        "Search".into()
     };
+
+    let mut search_button = style::touch_button(search_label, style::T_ACTION)
+        .width(Length::Fixed(220.0))
+        .style(style::primary);
+    if !state.cooldown.active() {
+        search_button = search_button.on_press(Message::Players(PlayersMessage::Search));
+    }
 
     let mut content = column![
         header,
         scrollable(owned).height(Length::FillPortion(2)),
         row![
             text_input("Add a commander by name", &managed.query)
-                .size(26)
+                .size(style::T_SUBHEAD)
                 .padding(22)
+                .style(style::input)
                 .on_input(|s| Message::Players(PlayersMessage::QueryChanged(s)))
                 .on_submit(Message::Players(PlayersMessage::Search)),
-            style::touch_button(search_label, 22)
-                .width(Length::Fixed(220.0))
-                .style(button::primary)
-                .on_press(Message::Players(PlayersMessage::Search)),
+            search_button,
         ]
         .spacing(14)
         .align_y(iced::Alignment::Center),
@@ -578,7 +619,7 @@ fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Eleme
 
     if let Some(e) = &state.error {
         content = content.push(
-            container(text(e.clone()).size(20))
+            container(text(e.clone()).size(style::T_LABEL))
                 .padding(16)
                 .width(Length::Fill)
                 .style(style::panel_danger),
@@ -609,7 +650,7 @@ fn art_view<'a>(
                         .height(Length::Fixed(220.0))
                         .content_fit(ContentFit::Cover)
                         .into(),
-                    None => container(text("...").size(20))
+                    None => container(text("...").size(style::T_LABEL))
                         .width(Length::Fixed(300.0))
                         .height(Length::Fixed(220.0))
                         .center_x(Length::Fixed(300.0))
@@ -617,31 +658,31 @@ fn art_view<'a>(
                         .into(),
                 };
             button(
-                column![thumb, text(card.set_name.clone()).size(16)]
+                column![thumb, text(card.set_name.clone()).size(style::T_CAPTION)]
                     .spacing(8)
                     .align_x(iced::Alignment::Center),
             )
             .padding(10)
-            .style(button::secondary)
+            .style(style::secondary)
             .on_press(Message::Players(PlayersMessage::PickArt(card.clone())))
             .into()
         })
         .collect();
 
     let status = if managed.loading_art {
-        text("Loading every printing from Scryfall...").size(18)
+        text("Loading every printing from Scryfall...").size(style::T_BODY)
     } else {
-        text(format!("{} printings found", managed.art_options.len())).size(18)
+        text(format!("{} printings found", managed.art_options.len())).size(style::T_BODY)
     };
 
     container(
         column![
-            text(format!("Choose art for {}", target.name)).size(40),
+            text(format!("Choose art for {}", target.name)).size(style::T_TITLE),
             status,
             scrollable(row(tiles).spacing(16).wrap()).height(Length::Fill),
-            style::touch_button("Back", 20)
+            style::touch_button("Back", style::T_LABEL)
                 .width(Length::Fixed(280.0))
-                .style(button::secondary)
+                .style(style::secondary)
                 .on_press(Message::Players(PlayersMessage::CancelArt)),
         ]
         .spacing(18)
@@ -653,79 +694,49 @@ fn art_view<'a>(
     .into()
 }
 
-/// Zoom/anchor a commander's art so the right part shows in a seat tile.
-fn framing_view<'a>(
-    commander: &'a Commander,
-    image_cache: &'a HashMap<String, image::Handle>,
+
+/// Pick which of this player's other commanders pairs with `primary` as a
+/// saved partner deck. Only their own saved commanders are offered - a
+/// partner has to be something they already play.
+fn pairing_view<'a>(
+    managed: &'a ManagedPlayer,
+    primary: &'a Commander,
+    _image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
-    let zoom = commander.art_zoom;
-
-    let preview = container(art::framed(commander, image_cache, 20))
-        .width(Length::Fixed(640.0))
-        .height(Length::Fixed(360.0))
-        .style(style::panel);
-
-    let anchor_grid = column(
-        ArtAnchor::GRID
-            .iter()
-            .map(|row_anchors| {
-                row(row_anchors
-                    .iter()
-                    .map(|a| {
-                        let selected = commander.art_anchor == *a;
-                        button(container(text("")).width(Length::Fill).height(Length::Fill))
-                            .width(Length::Fixed(72.0))
-                            .height(Length::Fixed(72.0))
-                            .style(if selected {
-                                button::primary
-                            } else {
-                                button::secondary
-                            })
-                            .on_press(Message::Players(PlayersMessage::SetArtAnchor(*a)))
-                            .into()
-                    })
-                    .collect::<Vec<Element<Message>>>())
-                .spacing(10)
+    let candidates: Vec<Element<Message>> = managed
+        .commanders
+        .iter()
+        .filter(|d| d.commander.id != primary.id && d.partner.is_none())
+        .map(|d| {
+            style::touch_button(d.commander.name.clone(), 22)
+                .width(Length::Fill)
+                .style(style::secondary)
+                .on_press(Message::Players(PlayersMessage::PickPartner(
+                    d.commander.clone(),
+                )))
                 .into()
-            })
-            .collect::<Vec<Element<Message>>>(),
-    )
-    .spacing(10);
+        })
+        .collect();
+
+    let body: Element<Message> = if candidates.is_empty() {
+        text("No other unpaired commanders saved for this player yet.")
+            .size(style::T_ACTION)
+            .into()
+    } else {
+        scrollable(column(candidates).spacing(12)).height(Length::Fill).into()
+    };
 
     container(
         column![
-            text(format!("Frame {}", commander.name)).size(40),
-            text("Zoom in, then pick which part of the art stays in the tile.").size(18),
-            row![
-                preview,
-                column![text("Focus").size(20), anchor_grid]
-                    .spacing(12)
-                    .align_x(iced::Alignment::Center),
-            ]
-            .spacing(28)
-            .align_y(iced::Alignment::Center),
-            row![
-                style::touch_button("\u{2212} Zoom out", 20)
-                    .width(Length::Fixed(230.0))
-                    .style(button::secondary)
-                    .on_press(Message::Players(PlayersMessage::SetArtZoom(zoom - 0.15))),
-                container(text(format!("{:.0}%", zoom * 100.0)).size(28))
-                    .width(Length::Fixed(140.0))
-                    .center_x(Length::Fixed(140.0)),
-                style::touch_button("Zoom in +", 20)
-                    .width(Length::Fixed(230.0))
-                    .style(button::secondary)
-                    .on_press(Message::Players(PlayersMessage::SetArtZoom(zoom + 0.15))),
-            ]
-            .spacing(14)
-            .align_y(iced::Alignment::Center),
-            style::cta_button("Done", 24)
-                .width(Length::Fixed(300.0))
-                .style(button::success)
-                .on_press(Message::Players(PlayersMessage::DoneFraming)),
+            text(format!("Pair with {}", primary.name)).size(style::T_HEADING),
+            text("Picking either half of a saved pair brings the other with it.").size(style::T_BODY),
+            body,
+            style::touch_button("Cancel", style::T_ACTION)
+                .width(Length::Fixed(280.0))
+                .style(style::secondary)
+                .on_press(Message::Players(PlayersMessage::CancelPairing)),
         ]
-        .spacing(22)
-        .align_x(iced::Alignment::Center)
+        .spacing(style::GAP)
         .padding(style::GAP),
     )
     .width(Length::Fill)

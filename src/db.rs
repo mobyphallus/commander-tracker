@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::model::{
-    ArtAnchor, Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailSeat, GameSummary,
-    HateKind, MatchupStat, Player, PlayerStat, WinReason,
+    ArtFraming, Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailOut,
+    GameDetailSeat, GameSummary, GrudgeStat, HateKind, HatedCommanderStat, HaterStat, MatchupStat,
+    OutCause, Player, PlayerStat, SavedDeck, WinReason, WinReasonStat,
 };
 
 pub fn data_dir() -> PathBuf {
@@ -78,6 +79,15 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
             kind                   TEXT NOT NULL DEFAULT 'commander_kill'
         );
 
+        CREATE TABLE IF NOT EXISTS eliminations (
+            id                     INTEGER PRIMARY KEY,
+            game_id                INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+            victim_game_player_id  INTEGER NOT NULL REFERENCES game_players(id),
+            killer_game_player_id  INTEGER REFERENCES game_players(id),
+            cause                  TEXT NOT NULL,
+            turn                   INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS player_commanders (
             player_id     INTEGER NOT NULL REFERENCES players(id),
             commander_id  INTEGER NOT NULL REFERENCES commanders(id),
@@ -90,7 +100,54 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     migrate_scryfall_id_to_oracle_id(conn)?;
     migrate_add_ending_turn(conn)?;
     migrate_add_hate_kind(conn)?;
-    migrate_add_art_framing(conn)
+    migrate_add_art_framing(conn)?;
+    migrate_add_partners(conn)?;
+    migrate_add_art_framing_table(conn)
+}
+
+/// Framing moved off the commander row and onto a per-tile table: the same
+/// art needs a different crop in a tall head-of-table tile than in a short
+/// wide one, so it's keyed by layout and seat. The old `commanders.art_zoom`
+/// / `art_anchor` columns are left in place but no longer read - the anchor
+/// was only ever a 3x3 grid, and can't be translated into a free pan.
+fn migrate_add_art_framing_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS art_framing (
+            commander_id INTEGER NOT NULL REFERENCES commanders(id),
+            layout_name  TEXT NOT NULL,
+            seat         INTEGER NOT NULL,
+            zoom         REAL NOT NULL,
+            pan_x        REAL NOT NULL,
+            pan_y        REAL NOT NULL,
+            PRIMARY KEY (commander_id, layout_name, seat)
+        );",
+    )?;
+    let has_pair: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('player_commanders') WHERE name = 'partner_commander_id'")?
+        .exists([])?;
+    if !has_pair {
+        conn.execute_batch(
+            "ALTER TABLE player_commanders ADD COLUMN partner_commander_id INTEGER REFERENCES commanders(id);",
+        )?;
+    }
+    Ok(())
+}
+
+/// Partner pairs put a second commander in a seat, and make commander
+/// damage a per-commander total rather than a per-seat one. Existing rows
+/// are single-commander games, so they default to no partner and all damage
+/// attributed to the primary.
+fn migrate_add_partners(conn: &Connection) -> rusqlite::Result<()> {
+    let has_partner: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('game_players') WHERE name = 'partner_commander_id'")?
+        .exists([])?;
+    if !has_partner {
+        conn.execute_batch(
+            "ALTER TABLE game_players ADD COLUMN partner_commander_id INTEGER REFERENCES commanders(id);
+             ALTER TABLE commander_damage ADD COLUMN source_slot INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    Ok(())
 }
 
 /// Early builds keyed `commanders` by a specific printing's Scryfall id. That
@@ -204,7 +261,6 @@ pub fn remove_player_commander(
 }
 
 fn commander_from_row(row: &rusqlite::Row) -> rusqlite::Result<Commander> {
-    let anchor: String = row.get(7)?;
     Ok(Commander {
         id: row.get(0)?,
         oracle_id: row.get(1)?,
@@ -212,23 +268,120 @@ fn commander_from_row(row: &rusqlite::Row) -> rusqlite::Result<Commander> {
         image_url: row.get(3)?,
         art_crop_url: row.get(4)?,
         color_identity: row.get(5)?,
-        art_zoom: row.get::<_, f64>(6)? as f32,
-        art_anchor: ArtAnchor::from_db_str(&anchor),
+        // Framing is per layout and seat, so it isn't carried on the
+        // commander row; callers resolve it with `load_framing` once they
+        // know which tile the art is going into.
+        framing: ArtFraming::default(),
     })
 }
 
 const COMMANDER_COLUMNS: &str =
-    "id, oracle_id, name, image_url, art_crop_url, color_identity, art_zoom, art_anchor";
+    "id, oracle_id, name, image_url, art_crop_url, color_identity";
 
-pub fn set_commander_framing(
+/// The framing this commander's art was last given in this exact tile.
+/// Missing rows mean "never framed here", which renders as a plain cover.
+pub fn load_framing(
     conn: &Connection,
     commander_id: i64,
-    zoom: f32,
-    anchor: ArtAnchor,
+    layout_name: &str,
+    seat: usize,
+) -> ArtFraming {
+    conn.query_row(
+        "SELECT zoom, pan_x, pan_y FROM art_framing
+         WHERE commander_id = ?1 AND layout_name = ?2 AND seat = ?3",
+        params![commander_id, layout_name, seat as i64],
+        |row| {
+            Ok(ArtFraming {
+                zoom: row.get::<_, f64>(0)? as f32,
+                pan_x: row.get::<_, f64>(1)? as f32,
+                pan_y: row.get::<_, f64>(2)? as f32,
+            })
+        },
+    )
+    .map(ArtFraming::clamped)
+    .unwrap_or_default()
+}
+
+pub fn save_framing(
+    conn: &Connection,
+    commander_id: i64,
+    layout_name: &str,
+    seat: usize,
+    framing: ArtFraming,
 ) -> rusqlite::Result<()> {
+    let framing = framing.clamped();
     conn.execute(
-        "UPDATE commanders SET art_zoom = ?1, art_anchor = ?2 WHERE id = ?3",
-        params![zoom as f64, anchor.as_db_str(), commander_id],
+        "INSERT INTO art_framing (commander_id, layout_name, seat, zoom, pan_x, pan_y)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(commander_id, layout_name, seat) DO UPDATE SET
+            zoom = excluded.zoom, pan_x = excluded.pan_x, pan_y = excluded.pan_y",
+        params![
+            commander_id,
+            layout_name,
+            seat as i64,
+            framing.zoom as f64,
+            framing.pan_x as f64,
+            framing.pan_y as f64
+        ],
+    )?;
+    Ok(())
+}
+
+/// The partner saved alongside `commander_id` in this player's list, if
+/// they've paired the two as a deck.
+pub fn saved_partner(
+    conn: &Connection,
+    player_id: i64,
+    commander_id: i64,
+) -> Option<Commander> {
+    let partner_id: i64 = conn
+        .query_row(
+            "SELECT partner_commander_id FROM player_commanders
+             WHERE player_id = ?1 AND commander_id = ?2 AND partner_commander_id IS NOT NULL",
+            params![player_id, commander_id],
+            |row| row.get(0),
+        )
+        .ok()?;
+    conn.query_row(
+        &format!("SELECT {COMMANDER_COLUMNS} FROM commanders WHERE id = ?1"),
+        params![partner_id],
+        commander_from_row,
+    )
+    .ok()
+}
+
+/// Pairs two of a player's commanders as one deck, in both directions so
+/// picking either half brings the other along. `partner` of None unpairs.
+pub fn set_player_partner(
+    conn: &Connection,
+    player_id: i64,
+    commander_id: i64,
+    partner: Option<i64>,
+) -> rusqlite::Result<()> {
+    // Clear whatever either commander was previously paired with, so a
+    // commander can never end up claimed by two different pairs.
+    conn.execute(
+        "UPDATE player_commanders SET partner_commander_id = NULL
+         WHERE player_id = ?1 AND (commander_id = ?2 OR partner_commander_id = ?2)",
+        params![player_id, commander_id],
+    )?;
+    let Some(partner_id) = partner else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE player_commanders SET partner_commander_id = NULL
+         WHERE player_id = ?1 AND (commander_id = ?2 OR partner_commander_id = ?2)",
+        params![player_id, partner_id],
+    )?;
+    conn.execute(
+        "UPDATE player_commanders SET partner_commander_id = ?3
+         WHERE player_id = ?1 AND commander_id = ?2",
+        params![player_id, commander_id, partner_id],
+    )?;
+    conn.execute(
+        "UPDATE player_commanders SET partner_commander_id = ?3
+         WHERE player_id = ?1 AND commander_id = ?2",
+        params![player_id, partner_id, commander_id],
     )?;
     Ok(())
 }
@@ -254,17 +407,48 @@ pub fn record_player_commander_use(
 /// Commanders this specific player has piloted before, most recently used
 /// first. Deliberately scoped per player: one person's "quick picks" aren't
 /// shared with the rest of the pod.
-pub fn player_commander_history(conn: &Connection, player_id: i64) -> rusqlite::Result<Vec<Commander>> {
+pub fn player_commander_history(
+    conn: &Connection,
+    player_id: i64,
+) -> rusqlite::Result<Vec<SavedDeck>> {
     let mut stmt = conn.prepare(
         "SELECT c.id, c.oracle_id, c.name, c.image_url, c.art_crop_url, c.color_identity,
-                c.art_zoom, c.art_anchor
+                pc.partner_commander_id
          FROM commanders c
          JOIN player_commanders pc ON pc.commander_id = c.id
          WHERE pc.player_id = ?1
          ORDER BY pc.last_used_at DESC",
     )?;
-    let rows = stmt.query_map(params![player_id], commander_from_row)?;
-    rows.collect()
+    let rows: Vec<(Commander, Option<i64>)> = stmt
+        .query_map(params![player_id], |row| {
+            Ok((commander_from_row(row)?, row.get::<_, Option<i64>>(6)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    // A pairing is stored on both halves, so walk the list emitting each
+    // pair once - otherwise the same deck shows up twice under two names.
+    let mut seen: Vec<i64> = Vec::new();
+    let mut decks = Vec::new();
+    for (commander, partner_id) in rows {
+        if seen.contains(&commander.id) {
+            continue;
+        }
+        seen.push(commander.id);
+        let partner = match partner_id {
+            Some(id) => {
+                seen.push(id);
+                conn.query_row(
+                    &format!("SELECT {COMMANDER_COLUMNS} FROM commanders WHERE id = ?1"),
+                    params![id],
+                    commander_from_row,
+                )
+                .ok()
+            }
+            None => None,
+        };
+        decks.push(SavedDeck { commander, partner });
+    }
+    Ok(decks)
 }
 
 /// Inserts a commander cached from Scryfall if we haven't seen its oracle
@@ -315,12 +499,14 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
         let won = game.winner_seat == Some(seat_index);
         tx.execute(
             "INSERT INTO game_players
-                (game_id, player_id, commander_id, seat, final_life, final_poison, won)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (game_id, player_id, commander_id, partner_commander_id, seat,
+                 final_life, final_poison, won)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 game_id,
                 seat.player.id,
                 seat.commander.id,
+                seat.partner.as_ref().map(|p| p.id),
                 seat_index as i64,
                 seat.life,
                 seat.poison,
@@ -331,22 +517,41 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
     }
 
     for (seat_index, seat) in game.seats.iter().enumerate() {
-        for (&source_index, &amount) in seat.commander_damage_taken.iter() {
+        for (&(source_index, source_slot), &amount) in seat.commander_damage_taken.iter() {
             if amount <= 0 {
                 continue;
             }
             tx.execute(
                 "INSERT INTO commander_damage
-                    (game_id, target_game_player_id, source_game_player_id, amount)
-                 VALUES (?1, ?2, ?3, ?4)",
+                    (game_id, target_game_player_id, source_game_player_id, source_slot, amount)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     game_id,
                     game_player_ids[seat_index],
                     game_player_ids[source_index],
+                    source_slot as i64,
                     amount
                 ],
             )?;
         }
+    }
+
+    for (seat_index, seat) in game.seats.iter().enumerate() {
+        let Some(out) = seat.elimination else {
+            continue;
+        };
+        tx.execute(
+            "INSERT INTO eliminations
+                (game_id, victim_game_player_id, killer_game_player_id, cause, turn)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                game_id,
+                game_player_ids[seat_index],
+                out.killer_seat.map(|i| game_player_ids[i]),
+                out.cause.as_db_str(),
+                out.turn as i64
+            ],
+        )?;
     }
 
     for kill in &game.kills {
@@ -416,6 +621,116 @@ pub fn player_stats(conn: &Connection) -> rusqlite::Result<Vec<PlayerStat>> {
     rows.collect()
 }
 
+/// Who dishes out the most commander hate, with a breakdown by kind and a
+/// per-game rate so someone with one brutal night doesn't outrank a repeat
+/// offender.
+pub fn hater_stats(conn: &Connection) -> rusqlite::Result<Vec<HaterStat>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT p.name,
+               COUNT(*) AS total,
+               SUM(CASE WHEN ck.kind = 'commander_kill' THEN 1 ELSE 0 END) AS kills,
+               SUM(CASE WHEN ck.kind = 'board_wipe' THEN 1 ELSE 0 END) AS wipes,
+               SUM(CASE WHEN ck.kind = 'counterspell' THEN 1 ELSE 0 END) AS counters,
+               (SELECT COUNT(*) FROM game_players gp WHERE gp.player_id = p.id) AS games
+        FROM commander_kills ck
+        JOIN game_players kp ON kp.id = ck.killer_game_player_id
+        JOIN players p ON p.id = kp.player_id
+        GROUP BY p.id, p.name
+        ORDER BY total DESC, p.name
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(HaterStat {
+            player_name: row.get(0)?,
+            total: row.get(1)?,
+            kills: row.get(2)?,
+            wipes: row.get(3)?,
+            counters: row.get(4)?,
+            games: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Which commanders draw the most heat.
+pub fn hated_commander_stats(conn: &Connection) -> rusqlite::Result<Vec<HatedCommanderStat>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT c.name,
+               COUNT(*) AS total,
+               SUM(CASE WHEN ck.kind = 'commander_kill' THEN 1 ELSE 0 END) AS kills,
+               SUM(CASE WHEN ck.kind = 'board_wipe' THEN 1 ELSE 0 END) AS wipes,
+               SUM(CASE WHEN ck.kind = 'counterspell' THEN 1 ELSE 0 END) AS counters,
+               (SELECT COUNT(*) FROM game_players gp WHERE gp.commander_id = c.id) AS appearances
+        FROM commander_kills ck
+        JOIN game_players vp ON vp.id = ck.victim_game_player_id
+        JOIN commanders c ON c.id = vp.commander_id
+        GROUP BY c.id, c.name
+        ORDER BY total DESC, c.name
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(HatedCommanderStat {
+            commander_name: row.get(0)?,
+            total: row.get(1)?,
+            kills: row.get(2)?,
+            wipes: row.get(3)?,
+            counters: row.get(4)?,
+            appearances: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Specific grudges: this player keeps targeting this commander.
+pub fn grudge_stats(conn: &Connection) -> rusqlite::Result<Vec<GrudgeStat>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT hater.name, c.name, victim.name, COUNT(*) AS total
+        FROM commander_kills ck
+        JOIN game_players kp ON kp.id = ck.killer_game_player_id
+        JOIN players hater ON hater.id = kp.player_id
+        JOIN game_players vp ON vp.id = ck.victim_game_player_id
+        JOIN players victim ON victim.id = vp.player_id
+        JOIN commanders c ON c.id = vp.commander_id
+        GROUP BY hater.id, c.id, victim.id
+        ORDER BY total DESC, hater.name
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(GrudgeStat {
+            hater_name: row.get(0)?,
+            commander_name: row.get(1)?,
+            victim_name: row.get(2)?,
+            total: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// How games in this pod actually end.
+pub fn win_reason_stats(conn: &Connection) -> rusqlite::Result<Vec<WinReasonStat>> {
+    let mut stmt = conn.prepare(
+        "SELECT win_reason, COUNT(*) FROM games
+         WHERE win_reason IS NOT NULL
+         GROUP BY win_reason ORDER BY COUNT(*) DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let reason: String = row.get(0)?;
+        Ok(WinReasonStat {
+            reason: WinReason::from_db_str(&reason),
+            games: row.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Average number of turns a finished game runs to.
+pub fn average_game_turns(conn: &Connection) -> rusqlite::Result<Option<f64>> {
+    conn.query_row("SELECT AVG(ending_turn) FROM games", [], |row| row.get(0))
+}
+
 fn parse_dt(s: &str) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -463,6 +778,7 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
         id: i64,
         player_id: i64,
         commander_id: i64,
+        partner_commander_id: Option<i64>,
         final_life: i32,
         final_poison: i32,
         won: bool,
@@ -470,7 +786,8 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
 
     let seat_rows: Vec<SeatRow> = {
         let mut stmt = conn.prepare(
-            "SELECT id, player_id, commander_id, final_life, final_poison, won
+            "SELECT id, player_id, commander_id, partner_commander_id,
+                    final_life, final_poison, won
              FROM game_players WHERE game_id = ?1 ORDER BY seat",
         )?;
         let result = stmt
@@ -479,9 +796,10 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
                     id: row.get(0)?,
                     player_id: row.get(1)?,
                     commander_id: row.get(2)?,
-                    final_life: row.get(3)?,
-                    final_poison: row.get(4)?,
-                    won: row.get::<_, i64>(5)? != 0,
+                    partner_commander_id: row.get(3)?,
+                    final_life: row.get(4)?,
+                    final_poison: row.get(5)?,
+                    won: row.get::<_, i64>(6)? != 0,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -495,18 +813,29 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
             params![r.player_id],
             |row| row.get(0),
         )?;
-        let commander_name: String = conn.query_row(
+        let mut commander_name: String = conn.query_row(
             "SELECT name FROM commanders WHERE id = ?1",
             params![r.commander_id],
             |row| row.get(0),
         )?;
+        if let Some(partner_id) = r.partner_commander_id {
+            let partner: String = conn.query_row(
+                "SELECT name FROM commanders WHERE id = ?1",
+                params![partner_id],
+                |row| row.get(0),
+            )?;
+            commander_name = format!("{commander_name} + {partner}");
+        }
 
         let damage_taken: Vec<(String, i32)> = {
             let mut stmt = conn.prepare(
-                "SELECT c.name, cd.amount
+                "SELECT CASE WHEN cd.source_slot = 1 THEN COALESCE(pc.name, c.name)
+                             ELSE c.name END,
+                        cd.amount
                  FROM commander_damage cd
                  JOIN game_players sp ON sp.id = cd.source_game_player_id
                  JOIN commanders c ON c.id = sp.commander_id
+                 LEFT JOIN commanders pc ON pc.id = sp.partner_commander_id
                  WHERE cd.target_game_player_id = ?1",
             )?;
             let result = stmt
@@ -515,6 +844,24 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
             result
         };
 
+        let out = conn
+            .query_row(
+                "SELECT e.cause, e.turn, p.name
+                 FROM eliminations e
+                 LEFT JOIN game_players kp ON kp.id = e.killer_game_player_id
+                 LEFT JOIN players p ON p.id = kp.player_id
+                 WHERE e.victim_game_player_id = ?1",
+                params![r.id],
+                |row| {
+                    Ok(GameDetailOut {
+                        cause: OutCause::from_db_str(&row.get::<_, String>(0)?),
+                        turn: row.get::<_, i64>(1)? as u32,
+                        killer_name: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+
         seats.push(GameDetailSeat {
             player_name,
             commander_name,
@@ -522,6 +869,7 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
             final_poison: r.final_poison,
             won: r.won,
             damage_taken,
+            out,
         });
     }
 

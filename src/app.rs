@@ -32,6 +32,7 @@ pub enum Message {
     Game(game::GameMessage),
     History(history::HistoryMessage),
     Players(players::PlayersMessage),
+    Stats(stats::StatsMessage),
     ArtLoaded(String, Result<Vec<u8>, String>),
     GoHome,
 }
@@ -77,6 +78,16 @@ impl App {
                 }
                 Subscription::batch(subs)
             }
+            // Only ticks while a Scryfall rate-limit lockout is counting
+            // down, so the wait is visible on the search button.
+            Screen::Setup(state) if state.cooldown.active() => {
+                iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::Setup(setup::SetupMessage::CooldownTick))
+            }
+            Screen::Players(state) if state.cooldown.active() => {
+                iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::Players(players::PlayersMessage::CooldownTick))
+            }
             _ => Subscription::none(),
         }
     }
@@ -85,8 +96,16 @@ impl App {
         match message {
             Message::ArtLoaded(id, result) => {
                 if let Ok(bytes) = result {
-                    self.image_cache
-                        .insert(id, image::Handle::from_bytes(bytes));
+                    // Decoded up front rather than handed over as raw bytes:
+                    // framing needs the art's real pixel dimensions to work
+                    // out how it covers a tile, and an undecoded handle
+                    // never exposes them.
+                    if let Ok(decoded) = ::image::load_from_memory(&bytes) {
+                        let rgba = decoded.to_rgba8();
+                        let (w, h) = (rgba.width(), rgba.height());
+                        self.image_cache
+                            .insert(id, image::Handle::from_rgba(w, h, rgba.into_raw()));
+                    }
                 }
                 Task::none()
             }
@@ -114,8 +133,9 @@ impl App {
             Message::Setup(msg) => {
                 let task = if let Screen::Setup(state) = &mut self.screen {
                     let (task, action) = setup::update(state, &self.conn, msg);
-                    if let Some(setup::Action::StartGame(seats, layout)) = action {
-                        self.screen = Screen::Game(game::GameState::new(seats, layout));
+                    if let Some(setup::Action::StartGame(seats, layout, turn_order)) = action {
+                        self.screen =
+                            Screen::Game(game::GameState::new(seats, layout, turn_order));
                     }
                     task
                 } else {
@@ -144,6 +164,12 @@ impl App {
             Message::History(msg) => {
                 if let Screen::History(state) = &mut self.screen {
                     history::update(state, &self.conn, msg);
+                }
+                Task::none()
+            }
+            Message::Stats(msg) => {
+                if let Screen::Stats(state) = &mut self.screen {
+                    stats::update(state, msg);
                 }
                 Task::none()
             }
