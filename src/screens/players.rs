@@ -350,6 +350,141 @@ pub fn update(
     Task::none()
 }
 
+// ---------------------------------------------------------------------------
+// Layout rhythm
+//
+// One padding scale for the whole screen, all of it derived from
+// [`style::GAP`], and one set of column widths so every row in every list
+// breaks at the same places.
+// ---------------------------------------------------------------------------
+
+/// Row padding: snug vertically, a full gap in from the edge. With a
+/// [`style::TOUCH_H`] control inside, every row lands on the same height.
+const ROW_PAD: [u16; 2] = [style::GAP_SM, style::GAP];
+
+/// Vertical padding that puts a [`style::T_SUBHEAD`] field on exactly the
+/// standard touch height, so a row being renamed is the same height as the
+/// row it replaced. iced's default line height is 1.3x the font size.
+const FIELD_PAD: [f32; 2] = [style::FIELD_PAD, style::GAP as f32];
+
+/// Action column widths. Shared by the roster and the commander list so the
+/// right-hand edge of every list is one straight line.
+const W_BACK: f32 = 200.0;
+const W_WIDE: f32 = 240.0;
+const W_ACTION: f32 = 180.0;
+const W_NARROW: f32 = 150.0;
+/// The colour-identity column - short strings like "WUB", but wide enough
+/// for all five.
+const W_IDENTITY: f32 = 120.0;
+/// One art thumbnail.
+const ART_W: f32 = 300.0;
+const ART_H: f32 = 220.0;
+
+// ---------------------------------------------------------------------------
+// Shared pieces
+// ---------------------------------------------------------------------------
+
+/// The title block every view on this screen starts with, with the way out
+/// in the top right where it is on every other screen.
+fn screen_header<'a>(title: String, size: u16, back: Message) -> Element<'a, Message> {
+    container(
+        row![
+            text(title).size(size),
+            iced::widget::horizontal_space(),
+            style::touch_button("Back", style::T_LABEL)
+                .width(Length::Fixed(W_BACK))
+                .style(style::secondary)
+                .on_press(back),
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(style::GAP)
+    .width(Length::Fill)
+    .style(style::header)
+    .into()
+}
+
+/// Something deliberate to look at when a list is empty - centred, so it
+/// reads as a state of the screen rather than as rows that failed to draw.
+fn empty_state<'a>(headline: &'a str, note: &'a str) -> Element<'a, Message> {
+    container(
+        column![
+            text(headline).size(style::T_LEAD).color(style::TEXT),
+            text(note).size(style::T_BODY).color(style::TEXT_MUTED),
+        ]
+        .spacing(style::GAP_XS)
+        .align_x(iced::Alignment::Center),
+    )
+    .padding(style::GAP * 2)
+    .center_x(Length::Fill)
+    .style(style::panel)
+    .into()
+}
+
+/// [`empty_state`] floated in the middle of whatever space is left, for the
+/// cases where the empty list *is* the whole screen.
+fn empty_fill<'a>(headline: &'a str, note: &'a str) -> Element<'a, Message> {
+    container(empty_state(headline, note))
+        .width(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+}
+
+/// A quiet heading over a list, so the two halves of the commander screen
+/// say what they are. Takes an owned `String` as happily as a literal, for
+/// the lines that have to be built at render time.
+fn section_label<'a>(label: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    text(label)
+        .size(style::T_CAPTION)
+        .color(style::TEXT_MUTED)
+        .into()
+}
+
+/// A text field and the button that commits it, held in one panel so they
+/// read as a single control rather than as a field that happens to have a
+/// button next to it.
+fn field_pod<'a>(
+    field: impl Into<Element<'a, Message>>,
+    action: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    container(
+        row![field.into(), action.into()]
+            .spacing(style::GAP_XS)
+            .align_y(iced::Alignment::Center),
+    )
+    .padding(style::GAP_XS)
+    .width(Length::Fill)
+    .style(style::panel)
+    .into()
+}
+
+/// One row of a list: a name that takes the slack, then the actions in a
+/// fixed-width cluster on the right.
+fn list_row<'a>(
+    body: impl Into<Element<'a, Message>>,
+    style_fn: fn(&iced::Theme) -> container::Style,
+) -> Element<'a, Message> {
+    container(body.into())
+        .padding(ROW_PAD)
+        .width(Length::Fill)
+        .style(style_fn)
+        .into()
+}
+
+/// The error banner. Errors here are sentences ("that player is in 3 games"),
+/// so they get a full-width panel rather than a toast.
+fn error_banner<'a>(message: &'a str) -> Element<'a, Message> {
+    container(text(message).size(style::T_LABEL))
+        .padding(style::GAP)
+        .width(Length::Fill)
+        .style(style::panel_danger)
+        .into()
+}
+
+// ---------------------------------------------------------------------------
+// Roster
+// ---------------------------------------------------------------------------
+
 pub fn view<'a>(
     state: &'a PlayersState,
     image_cache: &'a HashMap<String, image::Handle>,
@@ -364,55 +499,48 @@ pub fn view<'a>(
         return manage_view(state, managed);
     }
 
-    let rows = column(
-        state
-            .players
-            .iter()
-            .map(|p| player_row(state, p))
-            .collect::<Vec<Element<Message>>>(),
-    )
-    .spacing(12);
+    let roster: Element<Message> = if state.players.is_empty() {
+        empty_fill(
+            "No players yet",
+            "Add everyone who sits at this table - they'll keep their commanders and their record.",
+        )
+    } else {
+        scrollable(
+            column(
+                state
+                    .players
+                    .iter()
+                    .map(|p| player_row(state, p))
+                    .collect::<Vec<Element<Message>>>(),
+            )
+            .spacing(style::GAP_SM),
+        )
+        .height(Length::Fill)
+        .into()
+    };
 
-    let header = container(
-        row![
-            text("Players").size(style::T_TITLE),
-            iced::widget::horizontal_space(),
-            style::touch_button("Back", style::T_LABEL)
-                .width(Length::Fixed(200.0))
-                .style(style::secondary)
-                .on_press(Message::GoHome),
-        ]
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .style(style::header);
-
-    let add_row = row![
+    let add_row = field_pod(
         text_input("New player name", &state.new_player_name)
             .size(style::T_SUBHEAD)
-            .padding(22)
+            .padding(FIELD_PAD)
             .style(style::input)
             .on_input(|s| Message::Players(PlayersMessage::NewNameChanged(s)))
             .on_submit(Message::Players(PlayersMessage::CreatePlayer)),
         style::touch_button("Add Player", style::T_ACTION)
-            .width(Length::Fixed(240.0))
+            .width(Length::Fixed(W_WIDE))
             .style(style::primary)
             .on_press(Message::Players(PlayersMessage::CreatePlayer)),
-    ]
-    .spacing(14)
-    .align_y(iced::Alignment::Center);
+    );
 
-    let mut content = column![header, add_row, scrollable(rows).height(Length::Fill)]
-        .spacing(style::GAP);
+    let mut content = column![
+        screen_header("Players".to_string(), style::T_TITLE, Message::GoHome),
+        add_row,
+        roster,
+    ]
+    .spacing(style::GAP);
 
     if let Some(e) = &state.error {
-        content = content.push(
-            container(text(e.clone()).size(style::T_LABEL))
-                .padding(16)
-                .width(Length::Fill)
-                .style(style::panel_danger),
-        );
+        content = content.push(error_banner(e));
     }
 
     container(content.padding(style::GAP))
@@ -422,100 +550,114 @@ pub fn view<'a>(
 }
 
 fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message> {
+    // Renaming: the field stands in for the name, and the row is lit so it's
+    // obvious which person is being edited.
     if let Some((id, name)) = &state.editing {
         if *id == p.id {
-            return row![
-                text_input("Player name", name)
-                    .size(style::T_SUBHEAD)
-                    .padding(22)
-                    .style(style::input)
-                    .on_input(|s| Message::Players(PlayersMessage::NameChanged(s)))
-                    .on_submit(Message::Players(PlayersMessage::Save)),
-                style::touch_button("Save", style::T_ACTION)
-                    .width(Length::Fixed(160.0))
-                    .style(style::success)
-                    .on_press(Message::Players(PlayersMessage::Save)),
-                style::touch_button("Cancel", style::T_ACTION)
-                    .width(Length::Fixed(160.0))
-                    .style(style::secondary)
-                    .on_press(Message::Players(PlayersMessage::Cancel)),
-            ]
-            .spacing(14)
-            .align_y(iced::Alignment::Center)
-            .into();
+            return list_row(
+                row![
+                    text_input("Player name", name)
+                        .size(style::T_SUBHEAD)
+                        .padding(FIELD_PAD)
+                        .style(style::input)
+                        .on_input(|s| Message::Players(PlayersMessage::NameChanged(s)))
+                        .on_submit(Message::Players(PlayersMessage::Save)),
+                    row![
+                        style::touch_button("Save", style::T_LABEL)
+                            .width(Length::Fixed(W_ACTION))
+                            .style(style::success)
+                            .on_press(Message::Players(PlayersMessage::Save)),
+                        style::touch_button("Cancel", style::T_LABEL)
+                            .width(Length::Fixed(W_NARROW))
+                            .style(style::ghost)
+                            .on_press(Message::Players(PlayersMessage::Cancel)),
+                    ]
+                    .spacing(style::GAP_SM),
+                ]
+                .spacing(style::GAP)
+                .align_y(iced::Alignment::Center),
+                style::panel_active,
+            );
         }
     }
 
+    // Confirming a delete: the whole row turns into the question, and this
+    // is the one moment the destructive action is allowed to shout.
     if state.confirming_delete == Some(p.id) {
-        return container(
+        return list_row(
             row![
-                text(format!("Delete {}?", p.name)).size(style::T_SUBHEAD).width(Length::Fill),
-                style::touch_button("Yes, delete", style::T_LABEL)
-                    .width(Length::Fixed(220.0))
-                    .style(style::danger)
-                    .on_press(Message::Players(PlayersMessage::ConfirmDelete(p.id))),
-                style::touch_button("Keep", style::T_LABEL)
-                    .width(Length::Fixed(160.0))
-                    .style(style::secondary)
-                    .on_press(Message::Players(PlayersMessage::CancelDelete)),
+                column![
+                    text(format!("Delete {}?", p.name))
+                        .size(style::T_SUBHEAD)
+                        .color(style::TEXT),
+                    text("This can't be undone.")
+                        .size(style::T_CAPTION)
+                        .color(style::TEXT_MUTED),
+                ]
+                .spacing(style::GAP_XS)
+                .width(Length::Fill),
+                row![
+                    style::touch_button("Yes, delete", style::T_LABEL)
+                        .width(Length::Fixed(W_WIDE))
+                        .style(style::danger)
+                        .on_press(Message::Players(PlayersMessage::ConfirmDelete(p.id))),
+                    style::touch_button("Keep", style::T_LABEL)
+                        .width(Length::Fixed(W_NARROW))
+                        .style(style::secondary)
+                        .on_press(Message::Players(PlayersMessage::CancelDelete)),
+                ]
+                .spacing(style::GAP_SM),
             ]
-            .spacing(14)
+            .spacing(style::GAP)
             .align_y(iced::Alignment::Center),
-        )
-        .padding([10, 20])
-        .width(Length::Fill)
-        .style(style::panel_danger)
-        .into();
+            style::panel_danger,
+        );
     }
 
-    container(
+    // Resting state. Delete is a ghost: findable, but it doesn't sit there
+    // in red next to the two harmless actions - the confirmation step is
+    // where the warning belongs.
+    list_row(
         row![
-            text(p.name.clone()).size(style::T_SUBHEAD).width(Length::Fill),
-            style::touch_button("Commanders", style::T_LABEL)
-                .width(Length::Fixed(230.0))
-                .style(style::secondary)
-                .on_press(Message::Players(PlayersMessage::ManageCommanders(p.clone()))),
-            style::touch_button("Rename", style::T_LABEL)
-                .width(Length::Fixed(180.0))
-                .style(style::secondary)
-                .on_press(Message::Players(PlayersMessage::StartEdit(
-                    p.id,
-                    p.name.clone()
-                ))),
-            style::touch_button("Delete", style::T_LABEL)
-                .width(Length::Fixed(160.0))
-                .style(style::danger)
-                .on_press(Message::Players(PlayersMessage::AskDelete(p.id))),
+            text(p.name.clone())
+                .size(style::T_SUBHEAD)
+                .color(style::TEXT)
+                .width(Length::Fill),
+            row![
+                style::touch_button("Commanders", style::T_LABEL)
+                    .width(Length::Fixed(W_WIDE))
+                    .style(style::secondary)
+                    .on_press(Message::Players(PlayersMessage::ManageCommanders(p.clone()))),
+                style::touch_button("Rename", style::T_LABEL)
+                    .width(Length::Fixed(W_ACTION))
+                    .style(style::secondary)
+                    .on_press(Message::Players(PlayersMessage::StartEdit(
+                        p.id,
+                        p.name.clone()
+                    ))),
+                style::touch_button("Delete", style::T_LABEL)
+                    .width(Length::Fixed(W_NARROW))
+                    .style(style::danger_ghost)
+                    .on_press(Message::Players(PlayersMessage::AskDelete(p.id))),
+            ]
+            .spacing(style::GAP_SM),
         ]
-        .spacing(14)
+        .spacing(style::GAP)
         .align_y(iced::Alignment::Center),
+        style::panel,
     )
-    .padding([10, 20])
-    .width(Length::Fill)
-    .style(style::panel)
-    .into()
 }
 
-fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Element<'a, Message> {
-    let header = container(
-        row![
-            text(format!("{}'s Commanders", managed.player.name)).size(style::T_HEADING),
-            iced::widget::horizontal_space(),
-            style::touch_button("Back", style::T_LABEL)
-                .width(Length::Fixed(200.0))
-                .style(style::secondary)
-                .on_press(Message::Players(PlayersMessage::CloseManage)),
-        ]
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .style(style::header);
+// ---------------------------------------------------------------------------
+// One player's commanders
+// ---------------------------------------------------------------------------
 
+fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Element<'a, Message> {
     let owned: Element<Message> = if managed.commanders.is_empty() {
-        text("No commanders saved yet - search below to add one.")
-            .size(style::T_LABEL)
-            .into()
+        empty_state(
+            "No commanders saved yet",
+            "Search below and tap a card to add it to this player's decks.",
+        )
     } else {
         column(
             managed
@@ -526,63 +668,94 @@ fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Eleme
                     // A paired deck offers to unpair; a lone commander
                     // offers to pick a partner from this same list.
                     let pair_button = match &deck.partner {
-                        Some(_) => style::touch_button("Unpair", style::T_BODY)
-                            .width(Length::Fixed(170.0))
-                            .style(style::danger)
+                        Some(_) => style::touch_button("Unpair", style::T_LABEL)
+                            .width(Length::Fixed(W_ACTION))
+                            .style(style::ghost)
                             .on_press(Message::Players(PlayersMessage::Unpair(c.clone()))),
-                        None => style::touch_button("Set Partner", style::T_BODY)
-                            .width(Length::Fixed(170.0))
+                        None => style::touch_button("Set Partner", style::T_LABEL)
+                            .width(Length::Fixed(W_ACTION))
                             .style(style::secondary)
                             .on_press(Message::Players(PlayersMessage::StartPairing(c.clone()))),
                     };
-                    container(
+                    list_row(
                         row![
-                            text(deck.label()).size(style::T_SUBHEAD).width(Length::Fill),
-                            text(c.color_identity.clone()).size(style::T_LABEL).width(Length::Fixed(90.0)),
-                            style::touch_button("Art", style::T_BODY)
-                                .width(Length::Fixed(130.0))
-                                .style(style::secondary)
-                                .on_press(Message::Players(PlayersMessage::ChangeArt(c.clone()))),
-                            pair_button,
-                            style::touch_button("Remove", style::T_BODY)
-                                .width(Length::Fixed(160.0))
-                                .style(style::danger)
-                                .on_press(Message::Players(PlayersMessage::RemoveCommander(c.id))),
+                            text(deck.label())
+                                .size(style::T_SUBHEAD)
+                                .color(style::TEXT)
+                                .width(Length::Fill),
+                            text(c.color_identity.clone())
+                                .size(style::T_LABEL)
+                                .color(style::TEXT_MUTED)
+                                .width(Length::Fixed(W_IDENTITY)),
+                            row![
+                                style::touch_button("Art", style::T_LABEL)
+                                    .width(Length::Fixed(W_NARROW))
+                                    .style(style::secondary)
+                                    .on_press(Message::Players(PlayersMessage::ChangeArt(
+                                        c.clone()
+                                    ))),
+                                pair_button,
+                                style::touch_button("Remove", style::T_LABEL)
+                                    .width(Length::Fixed(W_NARROW))
+                                    .style(style::danger_ghost)
+                                    .on_press(Message::Players(PlayersMessage::RemoveCommander(
+                                        c.id
+                                    ))),
+                            ]
+                            .spacing(style::GAP_SM),
                         ]
-                        .spacing(12)
+                        .spacing(style::GAP)
                         .align_y(iced::Alignment::Center),
+                        style::panel,
                     )
-                    .padding([10, 20])
+                })
+                .collect::<Vec<Element<Message>>>(),
+        )
+        .spacing(style::GAP_SM)
+        .into()
+    };
+
+    let results: Element<Message> = if managed.results.is_empty() {
+        empty_state(
+            "Nothing found yet",
+            "Type part of a commander's name and search - results land here.",
+        )
+    } else {
+        column(
+            managed
+                .results
+                .iter()
+                .map(|c| {
+                    button(
+                        container(
+                            row![
+                                text(c.name.clone())
+                                    .size(style::T_ACTION)
+                                    .color(style::TEXT)
+                                    .width(Length::Fill),
+                                text(c.color_identity.clone())
+                                    .size(style::T_LABEL)
+                                    .color(style::TEXT_MUTED)
+                                    .width(Length::Fixed(W_IDENTITY)),
+                            ]
+                            .spacing(style::GAP)
+                            .align_y(iced::Alignment::Center),
+                        )
+                        .padding([0, style::GAP])
+                        .center_y(Length::Fill),
+                    )
+                    .padding(0)
+                    .height(Length::Fixed(style::TOUCH_H))
                     .width(Length::Fill)
-                    .style(style::panel)
+                    .style(style::row_button)
+                    .on_press(Message::Players(PlayersMessage::AddCommander(c.clone())))
                     .into()
                 })
                 .collect::<Vec<Element<Message>>>(),
         )
-        .spacing(12)
+        .spacing(style::GAP_SM)
         .into()
     };
-
-    let results = column(
-        managed
-            .results
-            .iter()
-            .map(|c| {
-                button(
-                    container(text(format!("{}   [{}]", c.name, c.color_identity)).size(style::T_ACTION))
-                        .padding([0, 20])
-                        .center_y(Length::Fill),
-                )
-                .padding(0)
-                .height(Length::Fixed(style::TOUCH_H))
-                .width(Length::Fill)
-                .style(style::secondary)
-                .on_press(Message::Players(PlayersMessage::AddCommander(c.clone())))
-                .into()
-            })
-            .collect::<Vec<Element<Message>>>(),
-    )
-    .spacing(10);
 
     let search_label: String = if state.cooldown.active() {
         state.cooldown.label()
@@ -593,37 +766,44 @@ fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Eleme
     };
 
     let mut search_button = style::touch_button(search_label, style::T_ACTION)
-        .width(Length::Fixed(220.0))
+        .width(Length::Fixed(W_WIDE))
         .style(style::primary);
     if !state.cooldown.active() {
         search_button = search_button.on_press(Message::Players(PlayersMessage::Search));
     }
 
     let mut content = column![
-        header,
-        scrollable(owned).height(Length::FillPortion(2)),
-        row![
-            text_input("Add a commander by name", &managed.query)
-                .size(style::T_SUBHEAD)
-                .padding(22)
-                .style(style::input)
-                .on_input(|s| Message::Players(PlayersMessage::QueryChanged(s)))
-                .on_submit(Message::Players(PlayersMessage::Search)),
-            search_button,
+        screen_header(
+            format!("{}'s Commanders", managed.player.name),
+            style::T_HEADING,
+            Message::Players(PlayersMessage::CloseManage),
+        ),
+        column![
+            section_label("Saved decks"),
+            scrollable(owned).height(Length::Fill),
         ]
-        .spacing(14)
-        .align_y(iced::Alignment::Center),
-        scrollable(results).height(Length::FillPortion(3)),
+        .spacing(style::GAP_SM)
+        .height(Length::FillPortion(2)),
+        column![
+            section_label("Add a commander"),
+            field_pod(
+                text_input("Search Scryfall by name", &managed.query)
+                    .size(style::T_SUBHEAD)
+                    .padding(FIELD_PAD)
+                    .style(style::input)
+                    .on_input(|s| Message::Players(PlayersMessage::QueryChanged(s)))
+                    .on_submit(Message::Players(PlayersMessage::Search)),
+                search_button,
+            ),
+            scrollable(results).height(Length::Fill),
+        ]
+        .spacing(style::GAP_SM)
+        .height(Length::FillPortion(3)),
     ]
     .spacing(style::GAP);
 
     if let Some(e) = &state.error {
-        content = content.push(
-            container(text(e.clone()).size(style::T_LABEL))
-                .padding(16)
-                .width(Length::Fill)
-                .style(style::panel_danger),
-        );
+        content = content.push(error_banner(e));
     }
 
     container(content.padding(style::GAP))
@@ -646,54 +826,75 @@ fn art_view<'a>(
             let thumb: Element<Message> =
                 match card.small_url.as_deref().and_then(|u| image_cache.get(u)) {
                     Some(handle) => image(handle.clone())
-                        .width(Length::Fixed(300.0))
-                        .height(Length::Fixed(220.0))
+                        .width(Length::Fixed(ART_W))
+                        .height(Length::Fixed(ART_H))
                         .content_fit(ContentFit::Cover)
                         .into(),
-                    None => container(text("...").size(style::T_LABEL))
-                        .width(Length::Fixed(300.0))
-                        .height(Length::Fixed(220.0))
-                        .center_x(Length::Fixed(300.0))
-                        .center_y(Length::Fixed(220.0))
-                        .into(),
+                    None => container(
+                        text("Loading")
+                            .size(style::T_CAPTION)
+                            .color(style::TEXT_MUTED),
+                    )
+                    .center_x(Length::Fixed(ART_W))
+                    .center_y(Length::Fixed(ART_H))
+                    .into(),
                 };
             button(
-                column![thumb, text(card.set_name.clone()).size(style::T_CAPTION)]
-                    .spacing(8)
-                    .align_x(iced::Alignment::Center),
+                column![
+                    thumb,
+                    text(card.set_name.clone())
+                        .size(style::T_CAPTION)
+                        .color(style::TEXT_MUTED),
+                ]
+                .spacing(style::GAP_XS)
+                .align_x(iced::Alignment::Center),
             )
-            .padding(10)
+            .padding(style::GAP_XS)
             .style(style::secondary)
             .on_press(Message::Players(PlayersMessage::PickArt(card.clone())))
             .into()
         })
         .collect();
 
-    let status = if managed.loading_art {
-        text("Loading every printing from Scryfall...").size(style::T_BODY)
+    let body: Element<Message> = if tiles.is_empty() {
+        let (headline, note) = if managed.loading_art {
+            ("Looking up printings", "Fetching every version from Scryfall.")
+        } else {
+            (
+                "No printings found",
+                "Scryfall had nothing else for this card - the current art stays.",
+            )
+        };
+        empty_fill(headline, note)
     } else {
-        text(format!("{} printings found", managed.art_options.len())).size(style::T_BODY)
+        scrollable(row(tiles).spacing(style::GAP).wrap())
+            .height(Length::Fill)
+            .into()
+    };
+
+    let status = if managed.loading_art {
+        "Loading every printing from Scryfall...".to_string()
+    } else {
+        format!("{} printings found", managed.art_options.len())
     };
 
     container(
         column![
-            text(format!("Choose art for {}", target.name)).size(style::T_TITLE),
-            status,
-            scrollable(row(tiles).spacing(16).wrap()).height(Length::Fill),
-            style::touch_button("Back", style::T_LABEL)
-                .width(Length::Fixed(280.0))
-                .style(style::secondary)
-                .on_press(Message::Players(PlayersMessage::CancelArt)),
+            screen_header(
+                format!("Art for {}", target.name),
+                style::T_HEADING,
+                Message::Players(PlayersMessage::CancelArt),
+            ),
+            section_label(status),
+            body,
         ]
-        .spacing(18)
-        .align_x(iced::Alignment::Center)
+        .spacing(style::GAP)
         .padding(style::GAP),
     )
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
-
 
 /// Pick which of this player's other commanders pairs with `primary` as a
 /// saved partner deck. Only their own saved commanders are offered - a
@@ -708,9 +909,9 @@ fn pairing_view<'a>(
         .iter()
         .filter(|d| d.commander.id != primary.id && d.partner.is_none())
         .map(|d| {
-            style::touch_button(d.commander.name.clone(), 22)
+            style::touch_button(d.commander.name.clone(), style::T_ACTION)
                 .width(Length::Fill)
-                .style(style::secondary)
+                .style(style::row_button)
                 .on_press(Message::Players(PlayersMessage::PickPartner(
                     d.commander.clone(),
                 )))
@@ -719,22 +920,25 @@ fn pairing_view<'a>(
         .collect();
 
     let body: Element<Message> = if candidates.is_empty() {
-        text("No other unpaired commanders saved for this player yet.")
-            .size(style::T_ACTION)
-            .into()
+        empty_fill(
+            "Nothing to pair with",
+            "This player needs a second unpaired commander saved before the two can share a seat.",
+        )
     } else {
-        scrollable(column(candidates).spacing(12)).height(Length::Fill).into()
+        scrollable(column(candidates).spacing(style::GAP_SM))
+            .height(Length::Fill)
+            .into()
     };
 
     container(
         column![
-            text(format!("Pair with {}", primary.name)).size(style::T_HEADING),
-            text("Picking either half of a saved pair brings the other with it.").size(style::T_BODY),
+            screen_header(
+                format!("Pair with {}", primary.name),
+                style::T_HEADING,
+                Message::Players(PlayersMessage::CancelPairing),
+            ),
+            section_label("Picking either half of a saved pair brings the other with it"),
             body,
-            style::touch_button("Cancel", style::T_ACTION)
-                .width(Length::Fixed(280.0))
-                .style(style::secondary)
-                .on_press(Message::Players(PlayersMessage::CancelPairing)),
         ]
         .spacing(style::GAP)
         .padding(style::GAP),

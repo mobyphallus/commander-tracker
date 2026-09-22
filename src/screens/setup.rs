@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{button, column, container, image, row, scrollable, stack, text, text_input};
-use iced::{ContentFit, Element, Length, Task};
+use iced::{Alignment, ContentFit, Element, Length, Task};
 use rusqlite::Connection;
 
 use crate::app::Message;
@@ -650,7 +650,7 @@ pub fn view<'a>(
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
     match state.stage {
-        SetupStage::ChoosePodSize => pod_size_view(),
+        SetupStage::ChoosePodSize => pod_size_view(state),
         SetupStage::ChooseLayout => layout_choice_view(state),
         SetupStage::TurnOrder => turn_order_view(state, image_cache),
         SetupStage::Grid => {
@@ -663,65 +663,310 @@ pub fn view<'a>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Wizard chrome
+//
+// Setup is one four-step wizard, so every step is built out of the same three
+// bands: a header that says which step this is, a body that fills whatever is
+// left, and a footer whose back button and primary action never move. A thumb
+// that learns the footer on step one is still right on step four.
+// ---------------------------------------------------------------------------
+
+/// Pod size, table layout, seats, turn order.
+const STEP_COUNT: usize = 4;
+
+/// The page rhythm, in the pixel units padding wants. Everything on this
+/// screen is one of these four numbers - the shared gap, its two sub-units
+/// and double it - so there are no stray 7s and 13s.
+const PAD: f32 = style::GAP as f32;
+const PAD_HALF: f32 = style::GAP_SM as f32;
+const PAD_TIGHT: f32 = style::GAP_XS as f32;
+const PAD_DOUBLE: f32 = PAD * 2.0;
+
+/// The vertical padding that brings a [`style::T_SUBHEAD`] text field up to
+/// [`style::TOUCH_H`], so typed fields are as tappable as the buttons next to
+/// them. Derived rather than guessed: iced lays text out at 1.3x its size.
+
+/// Fixed widths, so the same kind of control is the same size everywhere:
+/// the way back, the one action that moves you on, a header utility, a card
+/// in a picker, and a piece of commander art.
+const BACK_W: f32 = 260.0;
+const CTA_W: f32 = 460.0;
+const UTILITY_W: f32 = 220.0;
+const CARD_W: f32 = 320.0;
+const ART_W: f32 = 300.0;
+const ART_H: f32 = 220.0;
+/// The table diagram on the layout step, at roughly the screen's own shape
+/// so the preview is a scale model rather than a squashed one.
+const PREVIEW_W: f32 = 300.0;
+const PREVIEW_H: f32 = 190.0;
+
+/// "Step 2 of 4", plus a dot per step so the distance left to travel is
+/// readable without counting words.
+fn step_eyebrow<'a>(step: usize) -> Element<'a, Message> {
+    let dots = row((1..=STEP_COUNT)
+        .map(|n| {
+            text("\u{2022}")
+                .size(style::T_HEADING)
+                .color(if n <= step { style::ACCENT_BRIGHT } else { style::SURFACE_3 })
+                .into()
+        })
+        .collect::<Vec<Element<Message>>>())
+    .spacing(PAD_HALF)
+    .align_y(Alignment::Center);
+
+    row![
+        text(format!("STEP {step} OF {STEP_COUNT}"))
+            .size(style::T_CAPTION)
+            .color(style::ACCENT_BRIGHT),
+        dots,
+    ]
+    .spacing(PAD)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// A label in the same slot as the step counter, for the seat editor, which
+/// is a detour inside step three rather than a step of its own.
+fn pane_eyebrow<'a>(label: String) -> Element<'a, Message> {
+    text(label)
+        .size(style::T_CAPTION)
+        .color(style::ACCENT_BRIGHT)
+        .into()
+}
+
+/// The top band of every screen in setup: where you are, what this step is
+/// called, one line on what to do, and an optional side-trip on the right.
+fn step_header<'a>(
+    eyebrow: Element<'a, Message>,
+    title: String,
+    instruction: String,
+    trailing: Vec<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let titles = column![
+        eyebrow,
+        text(title).size(style::T_TITLE).color(style::TEXT),
+        text(instruction).size(style::T_LABEL).color(style::TEXT_MUTED),
+    ]
+    .spacing(PAD_TIGHT);
+
+    let mut bar = row![titles, iced::widget::horizontal_space()]
+        .spacing(PAD)
+        .align_y(Alignment::Center);
+    for control in trailing {
+        bar = bar.push(control);
+    }
+
+    container(bar)
+        .padding([PAD, PAD_DOUBLE])
+        .width(Length::Fill)
+        .style(style::header)
+        .into()
+}
+
+/// The bottom band: the way back on the left, the way on on the right, in a
+/// strip as tall as the primary action so nothing shifts between steps.
+fn step_footer<'a>(
+    back_label: &'a str,
+    back: Message,
+    forward: Element<'a, Message>,
+) -> Element<'a, Message> {
+    row![
+        style::touch_button(back_label, style::T_ACTION)
+            .width(Length::Fixed(BACK_W))
+            .style(style::secondary)
+            .on_press(back),
+        iced::widget::horizontal_space(),
+        forward,
+    ]
+    .spacing(PAD)
+    .height(Length::Fixed(style::TOUCH_H_LG))
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// The one primary-styled button on a step. Passing `None` leaves it visibly
+/// disabled and puts the reason beside it, so a step never stalls silently.
+fn forward_action(label: &str, message: Option<Message>, blocked: &str) -> Element<'static, Message> {
+    let enabled = message.is_some();
+    let mut cta = style::cta_button(label.to_string(), style::T_LEAD)
+        .width(Length::Fixed(CTA_W))
+        .style(style::primary);
+    if let Some(message) = message {
+        cta = cta.on_press(message);
+    }
+
+    let mut bar = row![].spacing(PAD).align_y(Alignment::Center);
+    if !enabled && !blocked.is_empty() {
+        bar = bar.push(
+            text(blocked.to_string())
+                .size(style::T_LABEL)
+                .color(style::TEXT_MUTED),
+        );
+    }
+    bar.push(cta).into()
+}
+
+/// What sits in the footer's action slot on the steps you leave by tapping
+/// the content itself. The slot stays occupied so the footer keeps its shape.
+fn footer_hint(message: &str) -> Element<'static, Message> {
+    text(message.to_string())
+        .size(style::T_LABEL)
+        .color(style::TEXT_MUTED)
+        .into()
+}
+
+/// Header, body, any error, footer - stacked the same way on every step.
+fn step_page<'a>(
+    header: Element<'a, Message>,
+    body: Element<'a, Message>,
+    footer: Element<'a, Message>,
+    error: Option<&str>,
+) -> Element<'a, Message> {
+    let mut content = column![
+        header,
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    ]
+    .spacing(PAD);
+
+    if let Some(message) = error {
+        content = content.push(error_banner(message));
+    }
+
+    container(content.push(footer).padding(PAD))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn error_banner(message: &str) -> Element<'static, Message> {
+    container(
+        text(message.to_string())
+            .size(style::T_LABEL)
+            .color(style::TEXT),
+    )
+    .padding(PAD)
+    .width(Length::Fill)
+    .style(style::panel_danger)
+    .into()
+}
+
+/// A screen with nothing on it yet still says what it is waiting for.
+fn empty_state(headline: &str, detail: &str) -> Element<'static, Message> {
+    container(
+        column![
+            text(headline.to_string())
+                .size(style::T_LEAD)
+                .color(style::TEXT),
+            text(detail.to_string())
+                .size(style::T_BODY)
+                .color(style::TEXT_MUTED),
+        ]
+        .spacing(PAD_HALF)
+        .align_x(Alignment::Center),
+    )
+    .padding(PAD_DOUBLE)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .into()
+}
+
+/// The selected treatment for anything you pick from a set: the accent ring
+/// and glow of [`style::panel_active`], which is the one thing on this screen
+/// meant to be readable from the far side of a table. Unselected options get
+/// the same footprint, so making a choice never shifts the layout.
+fn selection_ring<'a>(
+    selected: bool,
+    choice: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let slot = container(choice.into()).padding(PAD_HALF);
+    if selected {
+        slot.style(style::panel_selected).into()
+    } else {
+        slot.into()
+    }
+}
+
+/// The word under a choice that names its state, in the accent when it is
+/// the one that has been picked.
+fn choice_caption<'a>(selected: bool, chosen: &'a str, idle: &'a str) -> Element<'a, Message> {
+    text(if selected { chosen } else { idle })
+        .size(style::T_CAPTION)
+        .color(if selected { style::ACCENT_BRIGHT } else { style::TEXT_MUTED })
+        .into()
+}
+
+// ---------------------------------------------------------------------------
+// Step 1 - how many players
+// ---------------------------------------------------------------------------
+
+fn pod_size_view(state: &SetupState) -> Element<'_, Message> {
+    // One row, 2 through 8, so the choice reads as a scale you run your eye
+    // along rather than a grid you have to search. It wraps if the window is
+    // ever too narrow to hold the whole scale.
+    let tiles: Vec<Element<Message>> = (MIN_POD..=MAX_POD)
+        .map(|n| {
+            let tile = style::choice_tile(n.to_string(), if n == 2 { "player" } else { "players" })
+                .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)));
+            selection_ring(state.pod_size == n, tile)
+        })
+        .collect();
+
+    step_page(
+        step_header(
+            step_eyebrow(1),
+            "How many players?".to_string(),
+            "Everyone at the table, including you.".to_string(),
+            Vec::new(),
+        ),
+        row(tiles)
+            .spacing(PAD_HALF)
+            .align_y(Alignment::Center)
+            .wrap()
+            .into(),
+        step_footer(
+            "Home",
+            Message::GoHome,
+            footer_hint("Tap a number to continue"),
+        ),
+        state.error.as_deref(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Step 2 - how the table is arranged
+// ---------------------------------------------------------------------------
+
 /// A small numbered-box diagram of a layout, using the same rendering logic
 /// as the real board so it's an accurate preview, just shrunk down.
 fn layout_preview(table: &TableLayout) -> Element<'static, Message> {
     container(layout::render_table(table, |idx| {
-        container(text((idx + 1).to_string()).size(style::T_ACTION))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .style(style::panel)
-            .into()
+        container(
+            text((idx + 1).to_string())
+                .size(style::T_ACTION)
+                .color(style::TEXT),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(style::panel)
+        .into()
     }))
-    .width(Length::Fixed(300.0))
-    .height(Length::Fixed(190.0))
-    .into()
-}
-
-/// A full-bleed step screen: title, subtitle, body, and a back button
-/// pinned at the bottom, so the two setup steps feel like one flow.
-fn step_screen<'a>(
-    title: &'a str,
-    subtitle: String,
-    body: Element<'a, Message>,
-    back: Message,
-) -> Element<'a, Message> {
-    let header = container(
-        column![text(title).size(style::T_TITLE), text(subtitle).size(style::T_LABEL)]
-            .spacing(8)
-            .align_x(iced::Alignment::Center),
-    )
-    .padding(24)
-    .width(Length::Fill)
-    .center_x(Length::Fill)
-    .style(style::header);
-
-    container(
-        column![
-            header,
-            container(body)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-            style::touch_button("Back", style::T_ACTION)
-                .width(Length::Fixed(280.0))
-                .style(style::secondary)
-                .on_press(back),
-        ]
-        .spacing(style::GAP)
-        .align_x(iced::Alignment::Center)
-        .padding(style::GAP),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
+    .width(Length::Fixed(PREVIEW_W))
+    .height(Length::Fixed(PREVIEW_H))
     .into()
 }
 
 fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
     let options = layout::options_for(state.pod_size);
+    let chosen = state.table_layout.as_ref().map(|t| t.name.as_str());
 
     // Two per row keeps the previews large enough to read at a glance.
     let mut rows: Vec<Element<Message>> = Vec::new();
@@ -729,123 +974,118 @@ fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
         let cards: Vec<Element<Message>> = chunk
             .iter()
             .map(|opt| {
-                let label = opt.name.clone();
-                button(
-                    column![layout_preview(opt), text(label).size(style::T_SUBHEAD)]
-                        .spacing(16)
-                        .align_x(iced::Alignment::Center),
+                let selected = chosen == Some(opt.name.as_str());
+                let card = button(
+                    column![
+                        layout_preview(opt),
+                        text(opt.name.clone())
+                            .size(style::T_SUBHEAD)
+                            .color(style::TEXT),
+                        choice_caption(selected, "Selected", "Tap to choose"),
+                    ]
+                    .spacing(PAD_HALF)
+                    .align_x(Alignment::Center),
                 )
-                .padding(24)
+                .padding(PAD)
                 .style(style::secondary)
-                .on_press(Message::Setup(SetupMessage::ChooseLayout(opt.clone())))
-                .into()
+                .on_press(Message::Setup(SetupMessage::ChooseLayout(opt.clone())));
+                selection_ring(selected, card)
             })
             .collect();
-        rows.push(row(cards).spacing(28).into());
+        rows.push(row(cards).spacing(PAD).into());
     }
 
-    step_screen(
-        "How are you sitting?",
-        format!("{} players - pick the arrangement that matches your table", state.pod_size),
+    let body: Element<Message> = if rows.is_empty() {
+        empty_state(
+            "No layouts for this pod size",
+            "Go back a step and pick a different number of players.",
+        )
+    } else {
         scrollable(
             column(rows)
-                .spacing(28)
-                .align_x(iced::Alignment::Center)
+                .spacing(PAD)
+                .align_x(Alignment::Center)
                 .width(Length::Fill),
         )
         .width(Length::Fill)
-        .into(),
-        Message::Setup(SetupMessage::BackToPodSizeChoice),
+        .into()
+    };
+
+    step_page(
+        step_header(
+            step_eyebrow(2),
+            "How are you sitting?".to_string(),
+            format!(
+                "{} players \u{00b7} pick the arrangement that matches your table.",
+                state.pod_size
+            ),
+            Vec::new(),
+        ),
+        body,
+        step_footer(
+            "Back",
+            Message::Setup(SetupMessage::BackToPodSizeChoice),
+            footer_hint("Tap a layout to continue"),
+        ),
+        state.error.as_deref(),
     )
 }
 
-fn pod_size_view<'a>() -> Element<'a, Message> {
-    // One row, 2 through 8, so the choice reads as a scale you run your eye
-    // along rather than a grid you have to search. It wraps if the window is
-    // ever too narrow to hold the whole scale.
-    let tiles: Vec<Element<Message>> = (MIN_POD..=MAX_POD)
-        .map(|n| {
-            style::choice_tile(n.to_string(), if n == 2 { "player" } else { "players" })
-                .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)))
-                .into()
-        })
-        .collect();
-
-    step_screen(
-        "How many players?",
-        "Everyone at the table, including you".to_string(),
-        row(tiles)
-            .spacing(style::GAP)
-            .align_y(iced::Alignment::Center)
-            .wrap()
-            .into(),
-        Message::GoHome,
-    )
-}
+// ---------------------------------------------------------------------------
+// Step 3 - filling the seats
+// ---------------------------------------------------------------------------
 
 fn grid_view<'a>(
     state: &'a SetupState,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
-    let header = container(
-        row![
-            text("Set up your pod").size(style::T_HEADING),
-            iced::widget::horizontal_space(),
-            style::touch_button("Layout", style::T_BODY)
-                .width(Length::Fixed(160.0))
-                .style(style::secondary)
-                .on_press(Message::Setup(SetupMessage::BackToLayoutChoice)),
-            style::touch_button("Player Count", style::T_BODY)
-                .width(Length::Fixed(220.0))
-                .style(style::secondary)
-                .on_press(Message::Setup(SetupMessage::BackToPodSizeChoice)),
-        ]
-        .spacing(12)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .style(style::header);
+    let ready = state
+        .seats
+        .iter()
+        .filter(|s| s.player.is_some() && s.commander.is_some())
+        .count();
+    let total = state.seats.len();
 
-    let board = match &state.table_layout {
-        Some(table) => {
-            layout::render_table(table, |idx| {
-                seat_tile(
-                    idx,
-                    &state.seats[idx],
-                    table.seat_orientation(idx),
-                    image_cache,
-                )
-            })
-        }
-        None => text("Pick a layout first.").size(style::T_LABEL).into(),
+    let board: Element<Message> = match &state.table_layout {
+        Some(table) => layout::render_table(table, |idx| {
+            seat_tile(
+                idx,
+                &state.seats[idx],
+                table.seat_orientation(idx),
+                image_cache,
+            )
+        }),
+        None => empty_state(
+            "No table yet",
+            "Go back a step and pick how the pod is sitting.",
+        ),
     };
 
-    let mut start_button = style::cta_button("Next: Turn Order", style::T_LEAD).width(Length::Fixed(480.0));
-    if state.all_seats_ready() {
-        start_button = start_button
-            .style(style::success)
-            .on_press(Message::Setup(SetupMessage::ReviewTurnOrder));
-    }
-
-    let mut content =
-        column![header, container(board).height(Length::Fill)].spacing(style::GAP);
-
-    if let Some(e) = &state.error {
-        content = content.push(
-            container(text(e.clone()).size(style::T_LABEL))
-                .padding(16)
-                .width(Length::Fill)
-                .style(style::panel_danger),
-        );
-    }
-
-    content = content.push(container(start_button).center_x(Length::Fill));
-
-    container(content.padding(style::GAP))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    step_page(
+        step_header(
+            step_eyebrow(3),
+            "Set up your pod".to_string(),
+            format!("{ready} of {total} seats ready \u{00b7} tap a seat to fill it."),
+            vec![style::touch_button("Player Count", style::T_BODY)
+                .width(Length::Fixed(UTILITY_W))
+                .style(style::secondary)
+                .on_press(Message::Setup(SetupMessage::BackToPodSizeChoice))
+                .into()],
+        ),
+        board,
+        step_footer(
+            "Back",
+            Message::Setup(SetupMessage::BackToLayoutChoice),
+            forward_action(
+                "Next: Turn Order",
+                state
+                    .all_seats_ready()
+                    .then_some(Message::Setup(SetupMessage::ReviewTurnOrder)),
+                "Every seat needs a player and a commander",
+            ),
+        ),
+        state.error.as_deref(),
+    )
 }
 
 fn seat_tile<'a>(
@@ -854,28 +1094,37 @@ fn seat_tile<'a>(
     facing: SeatOrientation,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
-    match (&seat.player, &seat.commander) {
+    let seat_label = format!("SEAT {}", index + 1);
+
+    let content: Element<Message> = match (&seat.player, &seat.commander) {
         (Some(player), Some(commander)) => {
             let art = art::framed_pair(
                 commander,
                 seat.partner.as_ref(),
                 image_cache,
-                18,
+                style::T_BODY,
                 facing.radians(),
             );
 
             let caption = container(
                 container(
                     column![
-                        text(player.name.clone()).size(style::T_SUBHEAD),
-                        text(commander.name.clone()).size(style::T_BODY),
+                        text(seat_label)
+                            .size(style::T_MICRO)
+                            .color(style::TEXT_MUTED),
+                        text(player.name.clone())
+                            .size(style::T_SUBHEAD)
+                            .color(style::TEXT),
+                        text(commander.name.clone())
+                            .size(style::T_BODY)
+                            .color(style::TEXT_MUTED),
                     ]
-                    .spacing(4),
+                    .spacing(PAD_TIGHT),
                 )
-                .padding([12, 20])
+                .padding([PAD_HALF, PAD])
                 .style(style::glass),
             )
-            .padding(14)
+            .padding(PAD_HALF)
             .width(Length::Fill);
 
             let overlay = container(caption)
@@ -883,46 +1132,62 @@ fn seat_tile<'a>(
                 .height(Length::Fill)
                 .align_y(iced::alignment::Vertical::Bottom);
 
-            button(stack![art, overlay])
-                .padding(0)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .on_press(Message::Setup(SetupMessage::EditSeat(index)))
-                .into()
+            stack![art, overlay].into()
         }
-        (Some(player), None) => button(
-            container(
-                column![
-                    text(player.name.clone()).size(style::T_LEAD),
-                    text("Tap to pick a commander").size(style::T_BODY),
-                ]
-                .spacing(10)
-                .align_x(iced::Alignment::Center),
-            )
+        (Some(player), None) => seat_prompt(
+            seat_label,
+            player.name.clone(),
+            "Tap to pick a commander".to_string(),
+        ),
+        _ => seat_prompt(
+            seat_label,
+            "Empty".to_string(),
+            "Tap to choose who sits here".to_string(),
+        ),
+    };
+
+    container(
+        button(content)
+            .padding(0)
             .width(Length::Fill)
             .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(style::secondary)
-        .on_press(Message::Setup(SetupMessage::EditSeat(index)))
-        .into(),
-        _ => button(
-            container(text(format!("+ Add Player {}", index + 1)).size(style::T_HEADING))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(style::secondary)
-        .on_press(Message::Setup(SetupMessage::EditSeat(index)))
-        .into(),
-    }
+            .style(style::ghost)
+            .on_press(Message::Setup(SetupMessage::EditSeat(index))),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(style::panel)
+    .clip(true)
+    .into()
 }
+
+/// What an unfinished seat says for itself: which seat it is, what is in it,
+/// and what tapping it will do.
+fn seat_prompt<'a>(seat_label: String, headline: String, hint: String) -> Element<'a, Message> {
+    container(
+        column![
+            text(seat_label)
+                .size(style::T_CAPTION)
+                .color(style::TEXT_MUTED),
+            text(headline).size(style::T_LEAD).color(style::TEXT),
+            text(hint).size(style::T_BODY).color(style::TEXT_MUTED),
+        ]
+        .spacing(PAD_HALF)
+        .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .into()
+}
+
+// ---------------------------------------------------------------------------
+// Step 3, detour - the seat editor
+//
+// Player, commander, art and framing all live behind one seat, so they share
+// the step chrome: same header slot, same footer, only the middle changes.
+// ---------------------------------------------------------------------------
 
 fn editor_overlay<'a>(
     state: &'a SetupState,
@@ -932,175 +1197,301 @@ fn editor_overlay<'a>(
     let seat_index = state.editing_seat.unwrap();
     let seat = &state.seats[seat_index];
 
-    let body: Element<Message> = if state.framing {
-        framing_editor(
-            seat,
-            state.editing_slot,
-            seat_index,
-            state.table_layout.as_ref(),
-            image_cache,
-        )
-    } else if state.art_target.is_some() {
-        art_gallery(state, image_cache)
-    } else if seat.player.is_none() {
-        player_picker(state, players_cache)
-    } else if seat.commander_in(state.editing_slot).is_none() {
-        commander_picker(state, &seat.commander_history)
-    } else {
-        seat_summary(seat, image_cache)
-    };
+    let (title, instruction, body, footer): (String, String, Element<Message>, Element<Message>) =
+        if state.framing {
+            let name = seat
+                .commander_in(state.editing_slot)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "this seat".to_string());
+            (
+                format!("Frame {name}"),
+                "Drag to move \u{00b7} pinch or scroll to zoom.".to_string(),
+                framing_editor(
+                    seat,
+                    state.editing_slot,
+                    seat_index,
+                    state.table_layout.as_ref(),
+                    image_cache,
+                ),
+                step_footer(
+                    "Back to Grid",
+                    Message::Setup(SetupMessage::BackToGrid),
+                    forward_action(
+                        "Done",
+                        Some(Message::Setup(SetupMessage::DoneFraming)),
+                        "",
+                    ),
+                ),
+            )
+        } else if let Some(target) = &state.art_target {
+            let status = if state.loading_art_options {
+                "Loading every printing from Scryfall\u{2026}".to_string()
+            } else if state.art_options.len() == 1 {
+                "1 printing found \u{00b7} tap it to use its art.".to_string()
+            } else {
+                format!(
+                    "{} printings found \u{00b7} tap one to use its art.",
+                    state.art_options.len()
+                )
+            };
+            (
+                format!("Choose art for {}", target.name),
+                status,
+                art_gallery(state, image_cache),
+                step_footer(
+                    "Back to search",
+                    Message::Setup(SetupMessage::CancelArtPick),
+                    footer_hint("Tap a printing to use its art"),
+                ),
+            )
+        } else if seat.player.is_none() {
+            (
+                "Who's sitting here?".to_string(),
+                "Tap a name, or type a new one below.".to_string(),
+                player_picker(state, players_cache),
+                step_footer(
+                    "Back to Grid",
+                    Message::Setup(SetupMessage::BackToGrid),
+                    footer_hint("Tap a name to seat that player"),
+                ),
+            )
+        } else if seat.commander_in(state.editing_slot).is_none() {
+            let title = if state.editing_slot == PARTNER {
+                "Pick a partner"
+            } else {
+                "Pick a commander"
+            };
+            (
+                title.to_string(),
+                "Tap one this player has run before, or search Scryfall by name.".to_string(),
+                commander_picker(state, &seat.commander_history),
+                step_footer(
+                    "Back to Grid",
+                    Message::Setup(SetupMessage::BackToGrid),
+                    footer_hint("Tap a result to pick it"),
+                ),
+            )
+        } else {
+            (
+                "This seat is ready".to_string(),
+                "Change anything here, or head back to the table.".to_string(),
+                seat_summary(seat, image_cache),
+                step_footer(
+                    "Back to Grid",
+                    Message::Setup(SetupMessage::BackToGrid),
+                    text("Seat ready")
+                        .size(style::T_LABEL)
+                        .color(style::SUCCESS)
+                        .into(),
+                ),
+            )
+        };
 
-    let top = row![
-        style::touch_button("\u{00ab} Back to Grid", style::T_LABEL)
-            .width(Length::Fixed(280.0))
-            .style(style::secondary)
-            .on_press(Message::Setup(SetupMessage::BackToGrid)),
-    ];
-
-    let mut content = column![top, body].spacing(style::GAP).height(Length::Fill);
-
-    if let Some(e) = &state.error {
-        content = content.push(
-            container(text(e.clone()).size(style::T_LABEL))
-                .padding(16)
-                .width(Length::Fill)
-                .style(style::panel_danger),
-        );
-    }
-
-    container(content.padding(style::GAP))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    step_page(
+        step_header(
+            pane_eyebrow(format!("STEP 3 OF {STEP_COUNT} \u{00b7} SEAT {}", seat_index + 1)),
+            title,
+            instruction,
+            Vec::new(),
+        ),
+        body,
+        footer,
+        state.error.as_deref(),
+    )
 }
 
 fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Element<'a, Message> {
     let taken = state.players_taken_by_other_seats();
-    let available: Vec<&Player> = players_cache.iter().filter(|p| !taken.contains(&p.id)).collect();
+    let available: Vec<&Player> = players_cache
+        .iter()
+        .filter(|p| !taken.contains(&p.id))
+        .collect();
 
-    let existing = row(available
-        .into_iter()
-        .map(|p| {
-            style::touch_button(&p.name, style::T_SUBHEAD)
-                .width(Length::Fixed(300.0))
-                .style(style::secondary)
-                .on_press(Message::Setup(SetupMessage::PickExistingPlayer(p.clone())))
-                .into()
-        })
-        .collect::<Vec<Element<Message>>>())
-    .spacing(14)
-    .wrap();
+    let list: Element<Message> = if available.is_empty() {
+        empty_state(
+            "No players to seat",
+            "Everyone on file is already at this table. Type a new name below.",
+        )
+    } else {
+        scrollable(
+            row(available
+                .into_iter()
+                .map(|p| {
+                    style::touch_button(&p.name, style::T_SUBHEAD)
+                        .width(Length::Fixed(CARD_W))
+                        .style(style::secondary)
+                        .on_press(Message::Setup(SetupMessage::PickExistingPlayer(p.clone())))
+                        .into()
+                })
+                .collect::<Vec<Element<Message>>>())
+            .spacing(PAD)
+            .wrap(),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    };
+
+    let has_name = !state.new_player_name.trim().is_empty();
+    let mut add = style::touch_button("Add Player", style::T_ACTION)
+        .width(Length::Fixed(UTILITY_W))
+        .style(style::primary);
+    if has_name {
+        add = add.on_press(Message::Setup(SetupMessage::CreatePlayer));
+    }
 
     column![
-        text("Who's sitting here?").size(style::T_TITLE),
-        scrollable(existing).height(Length::Fill),
+        list,
         row![
             text_input("New player name", &state.new_player_name)
                 .size(style::T_SUBHEAD)
-                .padding(22)
+                .padding(style::FIELD_PAD)
                 .style(style::input)
                 .on_input(|s| Message::Setup(SetupMessage::NewPlayerNameChanged(s)))
                 .on_submit(Message::Setup(SetupMessage::CreatePlayer)),
-            style::touch_button("Add Player", style::T_ACTION)
-                .width(Length::Fixed(240.0))
-                .style(style::primary)
-                .on_press(Message::Setup(SetupMessage::CreatePlayer)),
+            add,
         ]
-        .spacing(14)
-        .align_y(iced::Alignment::Center),
+        .spacing(PAD)
+        .align_y(Alignment::Center),
     ]
-    .spacing(22)
+    .spacing(PAD)
+    .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-fn commander_picker<'a>(
-    state: &'a SetupState,
-    history: &'a [SavedDeck],
-) -> Element<'a, Message> {
-    let history_row: Element<Message> = if history.is_empty() {
-        text("No commanders played yet - search below to add one.")
-            .size(style::T_BODY)
-            .into()
+fn commander_picker<'a>(state: &'a SetupState, history: &'a [SavedDeck]) -> Element<'a, Message> {
+    let history_block: Element<Message> = if history.is_empty() {
+        container(
+            text("No commanders on record for this player yet \u{2014} search below.")
+                .size(style::T_BODY)
+                .color(style::TEXT_MUTED),
+        )
+        .padding(PAD)
+        .width(Length::Fill)
+        .center_x(Length::Fill)
+        .style(style::panel)
+        .into()
     } else {
-        row(history
-            .iter()
-            .map(|deck| {
-                style::touch_button(deck.label(), 20)
-                    .width(Length::Fixed(320.0))
-                    .style(style::secondary)
-                    .on_press(Message::Setup(SetupMessage::PickHistoryCommander(
-                        deck.clone(),
-                    )))
-                    .into()
-            })
-            .collect::<Vec<Element<Message>>>())
-        .spacing(12)
-        .wrap()
+        scrollable(
+            row(history
+                .iter()
+                .map(|deck| {
+                    style::touch_button(deck.label(), style::T_LABEL)
+                        .width(Length::Fixed(CARD_W))
+                        .style(style::secondary)
+                        .on_press(Message::Setup(SetupMessage::PickHistoryCommander(
+                            deck.clone(),
+                        )))
+                        .into()
+                })
+                .collect::<Vec<Element<Message>>>())
+            .spacing(PAD_HALF)
+            .wrap(),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(style::TOUCH_H * 2.0 + PAD_HALF))
         .into()
     };
-
-    let results = column(
-        state
-            .commander_results
-            .iter()
-            .map(|c| {
-                button(
-                    container(text(format!("{}   [{}]", c.name, c.color_identity)).size(style::T_ACTION))
-                        .padding([0, 20])
-                        .center_y(Length::Fill),
-                )
-                .padding(0)
-                .height(Length::Fixed(style::TOUCH_H))
-                .width(Length::Fill)
-                .style(style::secondary)
-                .on_press(Message::Setup(SetupMessage::PickCommanderName(c.clone())))
-                .into()
-            })
-            .collect::<Vec<Element<Message>>>(),
-    )
-    .spacing(10);
 
     let search_label: String = if state.cooldown.active() {
         state.cooldown.label()
     } else if state.searching {
-        "Searching...".into()
+        "Searching\u{2026}".into()
     } else {
         "Search".into()
     };
 
     let mut search_button = style::touch_button(search_label, style::T_ACTION)
-        .width(Length::Fixed(220.0))
+        .width(Length::Fixed(UTILITY_W))
         .style(style::primary);
-    if !state.cooldown.active() {
-        search_button =
-            search_button.on_press(Message::Setup(SetupMessage::SearchCommanders));
+    if !state.cooldown.active() && !state.searching {
+        search_button = search_button.on_press(Message::Setup(SetupMessage::SearchCommanders));
     }
 
-    let heading = if state.editing_slot == PARTNER {
-        "Pick a partner"
+    // Every result is the same height with its name and colours on the same
+    // two rails, so the list reads as one column of targets rather than a
+    // ragged stack.
+    let results: Element<Message> = if state.cooldown.active() {
+        empty_state(
+            "Scryfall asked us to slow down",
+            "Search comes back as soon as the countdown on the button runs out.",
+        )
+    } else if state.searching {
+        empty_state(
+            "Searching Scryfall\u{2026}",
+            "Looking for commanders whose name matches what you typed.",
+        )
+    } else if state.commander_results.is_empty() {
+        empty_state(
+            "No results yet",
+            "Type part of a commander's name and tap Search.",
+        )
     } else {
-        "Pick a commander"
+        scrollable(
+            column(
+                state
+                    .commander_results
+                    .iter()
+                    .map(|c| {
+                        button(
+                            container(
+                                row![
+                                    text(c.name.clone())
+                                        .size(style::T_ACTION)
+                                        .color(style::TEXT),
+                                    iced::widget::horizontal_space(),
+                                    container(
+                                        text(c.color_identity.clone())
+                                            .size(style::T_CAPTION)
+                                            .color(style::TEXT_MUTED),
+                                    )
+                                    .padding([PAD_TIGHT, PAD_HALF])
+                                    .style(style::badge),
+                                ]
+                                .spacing(PAD)
+                                .align_y(Alignment::Center),
+                            )
+                            .padding([0.0, PAD])
+                            .center_y(Length::Fill),
+                        )
+                        .padding(0)
+                        .height(Length::Fixed(style::TOUCH_H))
+                        .width(Length::Fill)
+                        .style(style::secondary)
+                        .on_press(Message::Setup(SetupMessage::PickCommanderName(c.clone())))
+                        .into()
+                    })
+                    .collect::<Vec<Element<Message>>>(),
+            )
+            .spacing(PAD_HALF)
+            .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     };
 
     column![
-        text(heading).size(style::T_TITLE),
-        text("This player's commanders").size(style::T_BODY),
-        scrollable(history_row).height(Length::Fixed(190.0)),
+        text("This player's commanders")
+            .size(style::T_CAPTION)
+            .color(style::TEXT_MUTED),
+        history_block,
         row![
             text_input("Commander name", &state.commander_query)
                 .size(style::T_SUBHEAD)
-                .padding(22)
+                .padding(style::FIELD_PAD)
                 .style(style::input)
                 .on_input(|s| Message::Setup(SetupMessage::CommanderQueryChanged(s)))
                 .on_submit(Message::Setup(SetupMessage::SearchCommanders)),
             search_button,
         ]
-        .spacing(14)
-        .align_y(iced::Alignment::Center),
-        scrollable(results).height(Length::Fill),
+        .spacing(PAD)
+        .align_y(Alignment::Center),
+        results,
     ]
-    .spacing(18)
+    .spacing(PAD)
+    .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
@@ -1109,55 +1500,81 @@ fn art_gallery<'a>(
     state: &'a SetupState,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
-    let target = state.art_target.as_ref().unwrap();
+    if state.art_options.is_empty() {
+        return if state.loading_art_options {
+            empty_state(
+                "Loading printings\u{2026}",
+                "Fetching every version of this card from Scryfall.",
+            )
+        } else {
+            empty_state(
+                "No printings came back",
+                "Head back to the search and pick the commander again.",
+            )
+        };
+    }
 
+    // Every card is the same size - a fixed art box over a fixed caption
+    // band - so the gallery is a grid rather than a ragged row, however long
+    // a set name happens to be.
     let tiles: Vec<Element<Message>> = state
         .art_options
         .iter()
         .map(|card| {
-            let thumb: Element<Message> = match card.small_url.as_deref().and_then(|u| image_cache.get(u)) {
-                Some(handle) => image(handle.clone())
-                    .width(Length::Fixed(300.0))
-                    .height(Length::Fixed(220.0))
-                    .content_fit(ContentFit::Cover)
-                    .into(),
-                None => container(text("...").size(style::T_LABEL))
-                    .width(Length::Fixed(300.0))
-                    .height(Length::Fixed(220.0))
-                    .center_x(Length::Fixed(300.0))
-                    .center_y(Length::Fixed(220.0))
-                    .into(),
+            let thumb: Element<Message> = match card
+                .small_url
+                .as_deref()
+                .and_then(|u| image_cache.get(u))
+            {
+                Some(handle) => container(
+                    image(handle.clone())
+                        .width(Length::Fixed(ART_W))
+                        .height(Length::Fixed(ART_H))
+                        .content_fit(ContentFit::Cover),
+                )
+                .clip(true)
+                .into(),
+                None => container(
+                    text("Loading\u{2026}")
+                        .size(style::T_CAPTION)
+                        .color(style::TEXT_MUTED),
+                )
+                .width(Length::Fixed(ART_W))
+                .height(Length::Fixed(ART_H))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .style(style::panel)
+                .into(),
             };
+
             button(
-                column![thumb, text(card.set_name.clone()).size(style::T_CAPTION)]
-                    .spacing(8)
-                    .align_x(iced::Alignment::Center),
+                column![
+                    thumb,
+                    container(
+                        text(card.set_name.clone())
+                            .size(style::T_CAPTION)
+                            .color(style::TEXT_MUTED),
+                    )
+                    .width(Length::Fixed(ART_W))
+                    .height(Length::Fixed(style::TOUCH_H))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .clip(true),
+                ]
+                .spacing(PAD_HALF)
+                .align_x(Alignment::Center),
             )
-            .padding(10)
+            .padding(PAD_HALF)
             .style(style::secondary)
             .on_press(Message::Setup(SetupMessage::PickArt(card.clone())))
             .into()
         })
         .collect();
 
-    let status = if state.loading_art_options {
-        text("Loading every printing from Scryfall...").size(style::T_BODY)
-    } else {
-        text(format!("{} printings found", state.art_options.len())).size(style::T_BODY)
-    };
-
-    column![
-        text(format!("Choose art for {}", target.name)).size(style::T_TITLE),
-        status,
-        scrollable(row(tiles).spacing(16).wrap()).height(Length::Fill),
-        style::touch_button("Back to search", style::T_LABEL)
-            .width(Length::Fixed(280.0))
-            .style(style::secondary)
-            .on_press(Message::Setup(SetupMessage::CancelArtPick)),
-    ]
-    .spacing(18)
-    .height(Length::Fill)
-    .into()
+    scrollable(row(tiles).spacing(PAD).wrap())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// Zoom and anchor the art so the part that matters ends up visible in the
@@ -1174,7 +1591,10 @@ fn framing_editor<'a>(
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
     let Some(commander) = seat.commander_in(slot) else {
-        return text("Pick a commander first.").size(style::T_ACTION).into();
+        return empty_state(
+            "Nothing to frame yet",
+            "This seat needs a commander before its art can be placed.",
+        );
     };
 
     let handle = commander
@@ -1183,12 +1603,10 @@ fn framing_editor<'a>(
         .cloned();
 
     let Some(handle) = handle else {
-        return container(text("Loading art...").size(style::T_SUBHEAD))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into();
+        return empty_state(
+            "Loading art\u{2026}",
+            "Fetching this printing's image from Scryfall.",
+        );
     };
 
     // Match the real tile's proportions so what's lined up here is what
@@ -1215,21 +1633,14 @@ fn framing_editor<'a>(
     };
 
     column![
-        text(format!("Frame {}", commander.name)).size(style::T_HEADING),
-        text("Drag to move \u{00b7} pinch or scroll to zoom").size(style::T_LABEL),
         container(surface).width(Length::Fill).center_x(Length::Fill),
-        text(layout_note).size(style::T_CAPTION),
-        container(
-            style::cta_button("Done", style::T_SUBHEAD)
-                .width(Length::Fixed(360.0))
-                .style(style::success)
-                .on_press(Message::Setup(SetupMessage::DoneFraming))
-        )
-        .width(Length::Fill)
-        .center_x(Length::Fill),
+        text(layout_note)
+            .size(style::T_CAPTION)
+            .color(style::TEXT_MUTED),
     ]
-    .spacing(16)
-    .align_x(iced::Alignment::Center)
+    .spacing(PAD)
+    .align_x(Alignment::Center)
+    .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
@@ -1241,7 +1652,13 @@ fn seat_summary<'a>(
     let player = seat.player.as_ref().unwrap();
     let commander = seat.commander.as_ref().unwrap();
 
-    let portrait = art::framed_pair(commander, seat.partner.as_ref(), image_cache, 20, 0.0);
+    let portrait = art::framed_pair(
+        commander,
+        seat.partner.as_ref(),
+        image_cache,
+        style::T_LABEL,
+        0.0,
+    );
 
     let heading = match &seat.partner {
         Some(p) => format!("{} is playing {} + {}", player.name, commander.name, p.name),
@@ -1278,16 +1695,18 @@ fn seat_summary<'a>(
             .on_press(Message::Setup(SetupMessage::ChangeArt(PRIMARY))),
         style::touch_button("Frame Art", style::T_LABEL)
             .width(Length::Fill)
-            .style(style::primary)
+            .style(style::secondary)
             .on_press(Message::Setup(SetupMessage::StartFraming(PRIMARY))),
     ]
-    .spacing(14);
+    .spacing(PAD_HALF);
 
     // The partner row only appears once there is one; until then a single
     // button offers to add one, so single-commander decks see no clutter.
     let partner_row: Element<Message> = match &seat.partner {
         Some(partner) => column![
-            text(format!("Partner: {}", partner.name)).size(style::T_ACTION),
+            text(format!("Partner: {}", partner.name))
+                .size(style::T_CAPTION)
+                .color(style::TEXT_MUTED),
             row![
                 style::touch_button("Remove Partner", style::T_LABEL)
                     .width(Length::Fill)
@@ -1299,31 +1718,41 @@ fn seat_summary<'a>(
                     .on_press(Message::Setup(SetupMessage::ChangeArt(PARTNER))),
                 style::touch_button("Frame Partner", style::T_LABEL)
                     .width(Length::Fill)
-                    .style(style::primary)
+                    .style(style::secondary)
                     .on_press(Message::Setup(SetupMessage::StartFraming(PARTNER))),
             ]
-            .spacing(14),
+            .spacing(PAD_HALF),
         ]
-        .spacing(10)
+        .spacing(PAD_HALF)
         .into(),
         None => style::touch_button("Add Partner", style::T_LABEL)
-            .width(Length::Fixed(360.0))
+            .width(Length::Fixed(CTA_W))
             .style(style::secondary)
             .on_press(Message::Setup(SetupMessage::AddPartner))
             .into(),
     };
 
     column![
-        container(portrait).width(Length::Fill).height(Length::FillPortion(4)),
-        text(heading).size(style::T_HEADING),
-        text(format!("Color identity: {identity}")).size(style::T_BODY),
+        container(portrait)
+            .width(Length::Fill)
+            .height(Length::FillPortion(4))
+            .clip(true),
+        text(heading).size(style::T_HEADING).color(style::TEXT),
+        text(format!("Colour identity: {identity}"))
+            .size(style::T_BODY)
+            .color(style::TEXT_MUTED),
         primary_row,
         partner_row,
     ]
-    .spacing(18)
+    .spacing(PAD)
+    .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
+
+// ---------------------------------------------------------------------------
+// Step 4 - who leads, and which way turns pass
+// ---------------------------------------------------------------------------
 
 /// The last setup step: tap who leads, set which way turns pass, then start.
 /// Every seat shows the position it will play in, so the pod can check the
@@ -1334,31 +1763,7 @@ fn turn_order_view<'a>(
 ) -> Element<'a, Message> {
     let order = planned_turn_order(state);
 
-    let header = container(
-        row![
-            column![
-                text("Who goes first?").size(style::T_HEADING),
-                text("Tap a seat, then choose which way turns pass.").size(style::T_BODY),
-            ]
-            .spacing(6),
-            iced::widget::horizontal_space(),
-            style::touch_button("Random", style::T_LABEL)
-                .width(Length::Fixed(180.0))
-                .style(style::secondary)
-                .on_press(Message::Setup(SetupMessage::RandomFirstSeat)),
-            style::touch_button("Back", style::T_LABEL)
-                .width(Length::Fixed(160.0))
-                .style(style::secondary)
-                .on_press(Message::Setup(SetupMessage::BackToGridFromTurnOrder)),
-        ]
-        .spacing(12)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .style(style::header);
-
-    let board = match &state.table_layout {
+    let board: Element<Message> = match &state.table_layout {
         Some(table) => layout::render_table(table, |idx| {
             // Position in the turn order, 1-indexed, once a leader is set.
             let position = order
@@ -1373,29 +1778,35 @@ fn turn_order_view<'a>(
                 image_cache,
             )
         }),
-        None => text("Pick a layout first.").size(style::T_LABEL).into(),
+        None => empty_state(
+            "No table yet",
+            "Go back and pick how the pod is sitting.",
+        ),
     };
 
-    let direction_buttons = row(
-        [TurnDirection::Clockwise, TurnDirection::CounterClockwise]
-            .into_iter()
-            .map(|dir| {
-                let selected = state.turn_direction == dir;
-                style::touch_button(dir.label(), 22)
-                    .width(Length::Fixed(340.0))
-                    .style(if selected {
-                        style::primary
-                    } else {
-                        style::secondary
-                    })
-                    .on_press(Message::Setup(SetupMessage::SetTurnDirection(dir)))
-                    .into()
-            })
-            .collect::<Vec<Element<Message>>>(),
-    )
-    .spacing(16);
+    let direction_buttons = row([TurnDirection::Clockwise, TurnDirection::CounterClockwise]
+        .into_iter()
+        .map(|dir| {
+            let selected = state.turn_direction == dir;
+            let choice = button(
+                column![
+                    text(dir.label()).size(style::T_ACTION).color(style::TEXT),
+                    choice_caption(selected, "Turns pass this way", "Tap to use"),
+                ]
+                .spacing(PAD_TIGHT)
+                .align_x(Alignment::Center),
+            )
+            .padding(PAD_HALF)
+            .width(Length::Fixed(CARD_W))
+            .height(Length::Fixed(style::TOUCH_H))
+            .style(style::secondary)
+            .on_press(Message::Setup(SetupMessage::SetTurnDirection(dir)));
+            selection_ring(selected, choice)
+        })
+        .collect::<Vec<Element<Message>>>())
+    .spacing(PAD);
 
-    let summary: Element<Message> = match &order {
+    let chain: Element<Message> = match &order {
         Some(order) => {
             let names: Vec<String> = order
                 .iter()
@@ -1405,52 +1816,67 @@ fn turn_order_view<'a>(
             // Naming the wrap-around explicitly says which way turns pass
             // without leaning on an arrow glyph the font may not have.
             let leader = names.first().cloned().unwrap_or_default();
-            let chain = names.join("  \u{203a}  ");
-            container(text(format!("{chain}  \u{203a}  back to {leader}")).size(style::T_ACTION))
-                .padding(16)
-                .width(Length::Fill)
-                .center_x(Length::Fill)
-                .style(style::panel)
+            let joined = names.join("  \u{203a}  ");
+            text(format!("{joined}  \u{203a}  back to {leader}"))
+                .size(style::T_ACTION)
+                .color(style::TEXT)
                 .into()
         }
-        None => container(text("Pick who takes the first turn.").size(style::T_ACTION))
-            .padding(16)
-            .width(Length::Fill)
-            .center_x(Length::Fill)
-            .style(style::panel)
+        None => text("Tap a seat above to choose who takes the first turn.")
+            .size(style::T_ACTION)
+            .color(style::TEXT_MUTED)
             .into(),
     };
 
-    let mut start_button = style::cta_button("Start Game", style::T_LEAD).width(Length::Fixed(480.0));
-    if order.is_some() {
-        start_button = start_button
-            .style(style::success)
-            .on_press(Message::Setup(SetupMessage::StartGame));
-    }
+    let summary = container(
+        column![
+            text("TURN ORDER")
+                .size(style::T_MICRO)
+                .color(style::TEXT_MUTED),
+            chain,
+        ]
+        .spacing(PAD_TIGHT)
+        .align_x(Alignment::Center),
+    )
+    .padding(PAD)
+    .width(Length::Fill)
+    .center_x(Length::Fill)
+    .style(style::panel);
 
-    let mut content = column![
-        header,
-        container(board).height(Length::Fill),
+    let body = column![
+        container(board).width(Length::Fill).height(Length::Fill),
         container(direction_buttons).center_x(Length::Fill),
         summary,
     ]
-    .spacing(style::GAP);
+    .spacing(PAD)
+    .width(Length::Fill)
+    .height(Length::Fill);
 
-    if let Some(e) = &state.error {
-        content = content.push(
-            container(text(e.clone()).size(style::T_LABEL))
-                .padding(16)
-                .width(Length::Fill)
-                .style(style::panel_danger),
-        );
-    }
-
-    content = content.push(container(start_button).center_x(Length::Fill));
-
-    container(content.padding(style::GAP))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    step_page(
+        step_header(
+            step_eyebrow(4),
+            "Who goes first?".to_string(),
+            "Tap a seat, then choose which way turns pass.".to_string(),
+            vec![style::touch_button("Random", style::T_BODY)
+                .width(Length::Fixed(UTILITY_W))
+                .style(style::secondary)
+                .on_press(Message::Setup(SetupMessage::RandomFirstSeat))
+                .into()],
+        ),
+        body.into(),
+        step_footer(
+            "Back",
+            Message::Setup(SetupMessage::BackToGridFromTurnOrder),
+            forward_action(
+                "Start Game",
+                order
+                    .is_some()
+                    .then_some(Message::Setup(SetupMessage::StartGame)),
+                "Pick who takes the first turn",
+            ),
+        ),
+        state.error.as_deref(),
+    )
 }
 
 /// A seat on the turn-order screen: its art, the player's name, and the
@@ -1465,13 +1891,15 @@ fn turn_order_tile<'a>(
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
     let Some(player) = &seat.player else {
-        return container(text("Empty seat").size(style::T_LABEL))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .style(style::panel)
-            .into();
+        return container(empty_state(
+            "Empty seat",
+            "Go back a step to put someone here.",
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::panel)
+        .clip(true)
+        .into();
     };
 
     let art: Element<Message> = match &seat.commander {
@@ -1479,7 +1907,7 @@ fn turn_order_tile<'a>(
             commander,
             seat.partner.as_ref(),
             image_cache,
-            18,
+            style::T_BODY,
             facing.radians(),
         ),
         None => iced::widget::horizontal_space().into(),
@@ -1488,35 +1916,39 @@ fn turn_order_tile<'a>(
     // Centered over the art, matching the in-game life counter: the leader
     // gets the heavier chip, everyone else the lighter one.
     let badge: Element<Message> = match position {
-        Some(1) => container(
-            container(text("First Player").size(style::T_TITLE))
-                .padding([14, 34])
-                .style(style::glass_strong),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into(),
-        Some(p) => container(
-            container(text(format!("#{p}")).size(style::T_TITLE))
-                .padding([14, 34])
-                .style(style::glass),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into(),
+        Some(1) => center_chip(
+            text("First Player")
+                .size(style::T_TITLE)
+                .color(style::TEXT)
+                .into(),
+            style::glass_strong,
+        ),
+        Some(p) => center_chip(
+            text(format!("#{p}"))
+                .size(style::T_TITLE)
+                .color(style::TEXT)
+                .into(),
+            style::glass,
+        ),
         None => iced::widget::horizontal_space().into(),
     };
 
     let caption = container(
-        container(text(player.name.clone()).size(style::T_SUBHEAD))
-            .padding([12, 20])
-            .style(style::glass),
+        container(
+            column![
+                text(format!("SEAT {}", index + 1))
+                    .size(style::T_MICRO)
+                    .color(style::TEXT_MUTED),
+                text(player.name.clone())
+                    .size(style::T_SUBHEAD)
+                    .color(style::TEXT),
+            ]
+            .spacing(PAD_TIGHT),
+        )
+        .padding([PAD_HALF, PAD])
+        .style(style::glass),
     )
-    .padding(14)
+    .padding(PAD_HALF)
     .width(Length::Fill);
 
     let overlay = container(caption)
@@ -1540,5 +1972,19 @@ fn turn_order_tile<'a>(
             style::panel
         })
         .clip(true)
+        .into()
+}
+
+/// A frosted chip parked in the middle of a tile, which is where this screen
+/// puts anything that has to be read across the table.
+fn center_chip<'a>(
+    label: Element<'a, Message>,
+    chip: fn(&iced::Theme) -> container::Style,
+) -> Element<'a, Message> {
+    container(container(label).padding([PAD_HALF, PAD_DOUBLE]).style(chip))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
         .into()
 }

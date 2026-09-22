@@ -56,6 +56,13 @@ pub const TEXT: Color = hex(0xEDE9F7);
 pub const TEXT_MUTED: Color = hex(0xA79CC0);
 /// Ink for text sitting on an accent fill.
 pub const TEXT_ON_ACCENT: Color = hex(0xF8F5FF);
+/// A secondary line on an accent fill. [`TEXT_MUTED`] is a surface ink and
+/// vanishes against the accent, so this dims the light ink rather than
+/// reaching for a darker one.
+pub const TEXT_ON_ACCENT_MUTED: Color = Color {
+    a: 0.76,
+    ..TEXT_ON_ACCENT
+};
 
 /// Status colours. Deliberately desaturated next to the accent so a win or a
 /// lethal seat reads as *status*, not as a second brand colour.
@@ -86,6 +93,16 @@ pub const TOUCH_H: f32 = 76.0;
 pub const TOUCH_H_LG: f32 = 104.0;
 /// Page padding and the gap between major blocks.
 pub const GAP: u16 = 18;
+/// Spacing sub-units, for inside a block rather than between blocks.
+/// Everything in the app is one of these three or a multiple of [`GAP`] -
+/// there is no fourth spacing value, and no bare number in a screen file.
+pub const GAP_SM: u16 = GAP / 2;
+pub const GAP_XS: u16 = GAP / 3;
+
+/// Vertical padding that lands a text field exactly on [`TOUCH_H`], given a
+/// [`T_SUBHEAD`] value inside it. Derived rather than eyeballed so every
+/// field in the app is the same height as every button beside it.
+pub const FIELD_PAD: f32 = (TOUCH_H - T_SUBHEAD as f32 * 1.3) / 2.0;
 
 /// The type scale. These are the sizes the app already settled on, pinned
 /// down so screens stop inventing neighbours two pixels apart. A size not on
@@ -93,7 +110,7 @@ pub const GAP: u16 = 18;
 ///
 /// [`T_ACTION`] is the default for button labels; [`T_COUNTER`] is the life
 /// total on a seat tile and belongs to nothing else.
-pub const T_MICRO: u16 = 11;
+pub const T_MICRO: u16 = 13;
 pub const T_CAPTION: u16 = 16;
 pub const T_BODY: u16 = 18;
 pub const T_LABEL: u16 = 20;
@@ -336,6 +353,59 @@ fn tinted(accent: Color, fill: Color, status: button::Status) -> button::Style {
     }
 }
 
+/// A tappable row in a list. Panel-shaped and flat: a history entry or a
+/// player row is something you pick, not a button you press, and a column of
+/// lifted slabs reads as noise.
+pub fn row_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let (fill, line) = match status {
+        button::Status::Hovered => (SURFACE_2, ACCENT.scale_alpha(0.45)),
+        button::Status::Pressed => (SURFACE_0, ACCENT.scale_alpha(0.6)),
+        _ => (SURFACE_1, HAIRLINE),
+    };
+    let base = button::Style {
+        background: Some(fill.into()),
+        text_color: TEXT,
+        border: Border {
+            color: line,
+            ..button_base(R_MD).border
+        },
+        ..button_base(R_MD)
+    };
+    match status {
+        button::Status::Disabled => dim(base),
+        _ => base,
+    }
+}
+
+/// A destructive action at rest. Red enough to be recognised, light enough
+/// that it doesn't shout from a row of harmless controls - it only fills in
+/// when the finger is already on it. The solid [`danger`] fill is for the
+/// moment of consequence: the confirm step, not the way into it.
+pub fn danger_ghost(_theme: &Theme, status: button::Status) -> button::Style {
+    let (fill, line, ink) = match status {
+        button::Status::Hovered => (DANGER.scale_alpha(0.16), DANGER, DANGER),
+        button::Status::Pressed => (DANGER.scale_alpha(0.3), DANGER, TEXT),
+        _ => (
+            Color::TRANSPARENT,
+            DANGER.scale_alpha(0.35),
+            DANGER.scale_alpha(0.85),
+        ),
+    };
+    let base = button::Style {
+        background: Some(Background::Color(fill)),
+        text_color: ink,
+        border: Border {
+            color: line,
+            ..button_base(R_MD).border
+        },
+        ..button_base(R_MD)
+    };
+    match status {
+        button::Status::Disabled => dim(base),
+        _ => base,
+    }
+}
+
 /// No fill at all - for "Cancel", "Back" and other ways out, which should be
 /// findable without being the loudest thing on the screen.
 pub fn ghost(_theme: &Theme, status: button::Status) -> button::Style {
@@ -411,6 +481,32 @@ pub fn panel_active(theme: &Theme) -> container::Style {
     }
 }
 
+/// The chosen one of several options. [`panel_active`] rings a panel without
+/// changing what's inside it, which is right for "this seat is on turn" but
+/// too quiet for "this is the layout you picked" - a choice should read as a
+/// lit surface, not just a bordered one.
+pub fn panel_selected(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(ACCENT_DEEP.into()),
+        ..panel_active(theme)
+    }
+}
+
+/// A small inline label - a count, a colour identity, a status word. Sits on
+/// a surface rather than on art, which is what separates it from [`glass`].
+pub fn badge(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(SURFACE_2.into()),
+        text_color: Some(TEXT_MUTED),
+        border: Border {
+            color: HAIRLINE,
+            width: 1.0,
+            radius: Radius::from(R_PILL),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// A panel that flags something needs attention (e.g. a seat at lethal damage).
 pub fn panel_danger(theme: &Theme) -> container::Style {
     container::Style {
@@ -433,6 +529,43 @@ pub fn header(_theme: &Theme) -> container::Style {
         text_color: Some(TEXT),
         border: Border { color: HAIRLINE, width: 1.0, radius: Radius::from(R_LG) },
         shadow: shadow(18.0, 6.0, 0.3),
+        ..container::Style::default()
+    }
+}
+
+/// A row in a table you read rather than tap. Flatter than [`panel`]: ten
+/// bordered, shadowed slabs down a page read as ten objects instead of one
+/// list.
+pub fn table_row(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(SURFACE_1.into()),
+        text_color: Some(TEXT),
+        border: Border {
+            color: HAIRLINE,
+            width: 1.0,
+            radius: Radius::from(R_SM),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The track and the fill of a comparison bar. Two figures are far easier to
+/// compare as lengths than as numbers, so these exist to be used together.
+pub fn meter_track(_theme: &Theme) -> container::Style {
+    meter(SURFACE_2)
+}
+
+pub fn meter_fill(_theme: &Theme) -> container::Style {
+    meter(ACCENT)
+}
+
+fn meter(fill: Color) -> container::Style {
+    container::Style {
+        background: Some(fill.into()),
+        border: Border {
+            radius: Radius::from(R_PILL),
+            ..Border::default()
+        },
         ..container::Style::default()
     }
 }
