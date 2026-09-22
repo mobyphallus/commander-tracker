@@ -815,18 +815,36 @@ fn split_counter<'a>(
         .on_release(Message::Game(GameMessage::CounterPressEnd(target, sign)))
     };
 
-    // A player sitting opposite reaches for the screen's right-hand side
-    // when they mean their own left, so the halves swap for them. A head of
-    // the table keeps them: their left and right run up and down the
-    // screen, which a left/right split can't express anyway.
-    let zones = if facing.flips_horizontal() {
-        row![zone(1, "+"), zone(-1, "\u{2212}")]
-    } else {
-        row![zone(-1, "\u{2212}"), zone(1, "+")]
-    }
-    .spacing(0)
-    .width(Length::Fill)
-    .height(Length::Fill);
+    // Minus always sits at the player's own left hand, which is not the
+    // screen's. Someone sitting opposite reaches for the screen's right when
+    // they mean their left, so their halves swap; at the heads of the table
+    // their left and right run up and down the screen, so the tile splits
+    // top/bottom instead of left/right.
+    let minus = "\u{2212}";
+    let zones: Element<Message> = match facing {
+        SeatOrientation::Upright => row![zone(-1, minus), zone(1, "+")]
+            .spacing(0)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        SeatOrientation::UpsideDown => row![zone(1, "+"), zone(-1, minus)]
+            .spacing(0)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        // Head seats read down the screen, so their left is the top.
+        SeatOrientation::LeftHead => column![zone(-1, minus), zone(1, "+")]
+            .spacing(0)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        // ...and the far head reads up it, so their left is the bottom.
+        SeatOrientation::RightHead => column![zone(1, "+"), zone(-1, minus)]
+            .spacing(0)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+    };
 
     let number = rotated::strong_chip(
         vec![Line::new(value.to_string(), style::T_COUNTER as f32)],
