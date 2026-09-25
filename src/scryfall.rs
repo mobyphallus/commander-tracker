@@ -30,7 +30,9 @@ pub enum ScryfallError {
     /// We were rate limited. Scryfall locks the application out for a window
     /// after this, so callers must stop sending until it expires rather than
     /// retrying - continuing to overload the API risks a real ban.
-    RateLimited { retry_after: u64 },
+    RateLimited {
+        retry_after: u64,
+    },
     Other(String),
 }
 
@@ -194,7 +196,10 @@ async fn run_search(
         return Ok(Vec::new());
     }
     if !resp.status().is_success() {
-        return Err(ScryfallError::Other(format!("search failed: {}", resp.status())));
+        return Err(ScryfallError::Other(format!(
+            "search failed: {}",
+            resp.status()
+        )));
     }
 
     let body: SearchResponse = resp.json().await.map_err(ScryfallError::other)?;

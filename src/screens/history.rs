@@ -196,12 +196,7 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
         n => format!("{n} games recorded"),
     };
 
-    let header = page_header(
-        "Game History".to_string(),
-        count,
-        "Back",
-        Message::GoHome,
-    );
+    let header = page_header("Game History".to_string(), count, "Back", Message::GoHome);
 
     let body: Element<Message> = if state.games.is_empty() {
         empty_state(
@@ -240,7 +235,11 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
 fn game_row(g: &GameSummary) -> Element<'_, Message> {
     let (winner, winner_sub, winner_ink) = match (&g.winner_name, &g.winner_commander) {
         (Some(name), Some(commander)) => (name.clone(), commander.clone(), style::ACCENT_BRIGHT),
-        (Some(name), None) => (name.clone(), "Commander not recorded".to_string(), style::ACCENT_BRIGHT),
+        (Some(name), None) => (
+            name.clone(),
+            "Commander not recorded".to_string(),
+            style::ACCENT_BRIGHT,
+        ),
         _ => (
             "No winner".to_string(),
             "Game left unfinished".to_string(),
@@ -267,7 +266,10 @@ fn game_row(g: &GameSummary) -> Element<'_, Message> {
                 Alignment::Start,
             ),
             stacked(
-                g.win_reason.map(|r| r.label()).unwrap_or("Unrecorded").to_string(),
+                g.win_reason
+                    .map(|r| r.label())
+                    .unwrap_or("Unrecorded")
+                    .to_string(),
                 style::T_BODY,
                 style::TEXT,
                 "win condition".to_string(),
@@ -336,7 +338,11 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
                 Alignment::Start,
             ),
             stacked(
-                detail.win_reason.map(|r| r.label()).unwrap_or("Unrecorded").to_string(),
+                detail
+                    .win_reason
+                    .map(|r| r.label())
+                    .unwrap_or("Unrecorded")
+                    .to_string(),
                 style::T_BODY,
                 style::TEXT,
                 "win condition".to_string(),
@@ -414,7 +420,11 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
 fn seat_row(s: &GameDetailSeat) -> Element<'_, Message> {
     let (out_main, out_sub) = match &s.out {
         Some(out) => (
-            format!("{} on turn {}", sentence_case(out.cause.past_tense()), out.turn),
+            format!(
+                "{} on turn {}",
+                sentence_case(out.cause.past_tense()),
+                out.turn
+            ),
             match &out.killer_name {
                 Some(killer) => format!("credited to {killer}"),
                 None => "nobody credited".to_string(),
@@ -441,7 +451,11 @@ fn seat_row(s: &GameDetailSeat) -> Element<'_, Message> {
         stacked(
             s.player_name.clone(),
             style::T_SUBHEAD,
-            if s.won { style::ACCENT_BRIGHT } else { style::TEXT },
+            if s.won {
+                style::ACCENT_BRIGHT
+            } else {
+                style::TEXT
+            },
             s.commander_name.clone(),
             Length::Fill,
             Alignment::Start,
@@ -469,6 +483,10 @@ fn seat_row(s: &GameDetailSeat) -> Element<'_, Message> {
     )
     .padding([style::GAP, style::GAP + style::GAP_SM])
     .width(Length::Fill)
-    .style(if s.won { style::panel_active } else { style::panel })
+    .style(if s.won {
+        style::panel_active
+    } else {
+        style::panel
+    })
     .into()
 }

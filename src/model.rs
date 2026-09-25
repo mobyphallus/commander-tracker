@@ -41,8 +41,6 @@ impl ArtFraming {
     }
 }
 
-
-
 pub const MIN_ART_ZOOM: f32 = 1.0;
 pub const MAX_ART_ZOOM: f32 = 3.0;
 
@@ -172,7 +170,6 @@ impl Seat {
             .get(&(seat_index, slot))
             .unwrap_or(&0)
     }
-
 }
 
 pub const STARTING_LIFE: i32 = 40;
@@ -318,11 +315,7 @@ pub enum HateKind {
 }
 
 impl HateKind {
-    pub const ALL: [HateKind; 3] = [
-        Self::CommanderKill,
-        Self::BoardWipe,
-        Self::Counterspell,
-    ];
+    pub const ALL: [HateKind; 3] = [Self::CommanderKill, Self::BoardWipe, Self::Counterspell];
 
     pub fn label(&self) -> &'static str {
         match self {

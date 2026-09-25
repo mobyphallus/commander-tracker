@@ -1,17 +1,57 @@
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
-use iced::{ContentFit, Element, Length, Task};
+use iced::widget::{button, column, container, image, mouse_area, row, text, text_input};
+use iced::{Element, Length, Task};
 use rusqlite::Connection;
 
 use crate::app::Message;
+use crate::cards;
 use crate::db;
+use crate::keyboard::{self, Keyboard};
 use crate::model::{Commander, Player, SavedDeck};
+use crate::screens::breakdown;
 use crate::scryfall::{self, Cooldown, ScryfallCard, ScryfallError};
 use crate::style;
 
+/// Every text field on this screen. The on-screen keyboard types into one
+/// at a time and needs to know which, since it edits the `String` behind
+/// the field rather than the widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    NewPlayer,
+    Rename,
+    Search,
+    /// The Moxfield deck link on a deck's own page.
+    MoxfieldLink,
+}
+
+impl Field {
+    /// The iced widget id, so tapping a field can focus the real
+    /// `text_input` as well as raising the keyboard.
+    fn id(self) -> text_input::Id {
+        text_input::Id::new(match self {
+            Field::NewPlayer => "players.new",
+            Field::Rename => "players.rename",
+            Field::Search => "players.search",
+            Field::MoxfieldLink => "players.link",
+        })
+    }
+}
+
+/// What the commander search is currently shopping for. A search that knows
+/// this can add a partner straight from Scryfall, instead of making someone
+/// save both halves separately and pair them afterwards.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SearchFor {
+    /// A new deck for this player.
+    Deck,
+    /// The second half of a partner pair, for a deck they already have.
+    Partner(Commander),
+}
+
 pub struct PlayersState {
     pub players: Vec<Player>,
+    pub profile: Option<i64>,
     pub new_player_name: String,
     pub editing: Option<(i64, String)>,
     /// Seat of a pending delete, so it takes two taps to remove someone.
@@ -23,6 +63,8 @@ pub struct PlayersState {
     /// limit. Lives on the screen rather than on `managing` so it survives
     /// closing and reopening a player's commander list.
     pub cooldown: Cooldown,
+    /// The app's own keyboard, and the field it's typing into.
+    pub kb: Keyboard<Field>,
     pub error: Option<String>,
 }
 
@@ -37,19 +79,55 @@ pub struct ManagedPlayer {
     pub art_for: Option<Commander>,
     pub art_options: Vec<ScryfallCard>,
     pub loading_art: bool,
-    /// The commander whose partner is being chosen, if any.
-    pub pairing: Option<Commander>,
+    /// Set while the search is open, saying what a picked card becomes.
+    pub search_for: Option<SearchFor>,
+    /// The deck whose actions are showing, by its primary commander's id.
+    /// A deck you're about to change art on or remove is picked first, so
+    /// the tiles themselves stay nothing but the cards.
+    pub selected: Option<i64>,
+    /// What's known about each deck's Moxfield link, keyed by the deck's
+    /// primary commander. Loaded with the player so the tiles can show a
+    /// bracket without a query per deck.
+    pub links: HashMap<i64, db::DeckLink>,
+    /// Set while one deck's own page is open, on top of the deck list.
+    pub deck_page: Option<DeckPage>,
+}
+
+/// One deck's page: its Moxfield link, and the breakdown if it has one.
+///
+/// The analysis is held here rather than read from the database on every
+/// frame because it's a big structure and `view` runs constantly. It's
+/// loaded once when the page opens.
+pub struct DeckPage {
+    pub commander_id: i64,
+    pub deck_label: String,
+    /// What's in the link box. Starts as whatever was saved, so a link can
+    /// be corrected rather than retyped.
+    pub link_input: String,
+    pub analysis: Option<crate::salt::Analysis>,
+    /// True while Moxfield and the scorers are being talked to.
+    pub busy: bool,
+}
+
+impl ManagedPlayer {
+    fn deck(&self, commander_id: i64) -> Option<&SavedDeck> {
+        self.commanders
+            .iter()
+            .find(|d| d.commander.id == commander_id)
+    }
 }
 
 impl PlayersState {
     pub fn load(conn: &Connection) -> Self {
         Self {
             players: db::list_players(conn).unwrap_or_default(),
+            profile: None,
             new_player_name: String::new(),
             editing: None,
             confirming_delete: None,
             managing: None,
             cooldown: Cooldown::default(),
+            kb: Keyboard::default(),
             error: None,
         }
     }
@@ -61,6 +139,8 @@ impl PlayersState {
 
 #[derive(Debug, Clone)]
 pub enum PlayersMessage {
+    OpenProfile(i64),
+    CloseProfile,
     NewNameChanged(String),
     CreatePlayer,
     StartEdit(i64, String),
@@ -72,6 +152,10 @@ pub enum PlayersMessage {
     CancelDelete,
     ManageCommanders(Player),
     CloseManage,
+    /// A deck tile was tapped: show its actions, or put them away again.
+    SelectDeck(i64),
+    OpenSearch(SearchFor),
+    CloseSearch,
     QueryChanged(String),
     Search,
     SearchResults(Result<Vec<ScryfallCard>, ScryfallError>),
@@ -81,11 +165,27 @@ pub enum PlayersMessage {
     ArtOptionsLoaded(Result<Vec<ScryfallCard>, ScryfallError>),
     PickArt(ScryfallCard),
     CancelArt,
-    StartPairing(Commander),
     PickPartner(Commander),
     Unpair(Commander),
-    CancelPairing,
+    /// A text field was tapped, so the keyboard comes up on it.
+    Focus(Field),
+    Key(keyboard::Key),
     CooldownTick,
+
+    /// Open one deck's own page, where its Moxfield link and breakdown live.
+    OpenDeckPage(i64),
+    CloseDeckPage,
+    LinkChanged(String),
+    /// Save what's in the link box and analyse it. No argument: it always
+    /// acts on the deck page that's open, which is also what lets the
+    /// keyboard's submit key stand in for it.
+    SaveLink,
+    /// Forget a deck's link and everything worked out from it.
+    RemoveLink,
+    /// An analysis finished, for the deck with this commander id. Carries the
+    /// id rather than assuming the same page is still open - someone can walk
+    /// away from a slow analysis and it must not land on another deck.
+    Analysed(i64, Result<crate::salt::Analysis, String>),
 }
 
 pub fn update(
@@ -95,6 +195,17 @@ pub fn update(
 ) -> Task<Message> {
     state.error = None;
     match message {
+        PlayersMessage::OpenProfile(id) => {
+            state.profile = Some(id);
+            state.kb.close();
+        }
+        PlayersMessage::CloseProfile => {
+            state.profile = None;
+            state.editing = None;
+            state.confirming_delete = None;
+            state.kb.close();
+        }
+
         PlayersMessage::NewNameChanged(s) => state.new_player_name = s,
         PlayersMessage::CreatePlayer => {
             let name = state.new_player_name.trim().to_string();
@@ -104,14 +215,17 @@ pub fn update(
             match db::create_player(conn, &name) {
                 Ok(_) => {
                     state.new_player_name.clear();
+                    state.kb.close();
                     state.refresh(conn);
                 }
                 Err(e) => state.error = Some(format!("Couldn't add player: {e}")),
             }
         }
         PlayersMessage::StartEdit(id, name) => {
+            state.kb.open(Field::Rename, &name);
             state.editing = Some((id, name));
             state.confirming_delete = None;
+            return text_input::focus(Field::Rename.id());
         }
         PlayersMessage::NameChanged(s) => {
             if let Some((_, name)) = &mut state.editing {
@@ -125,16 +239,23 @@ pub fn update(
                     state.error = Some("Name can't be empty.".into());
                 } else {
                     match db::rename_player(conn, id, &trimmed) {
-                        Ok(()) => state.refresh(conn),
+                        Ok(()) => {
+                            state.kb.close();
+                            state.refresh(conn);
+                        }
                         Err(e) => state.error = Some(format!("Couldn't rename: {e}")),
                     }
                 }
             }
         }
-        PlayersMessage::Cancel => state.editing = None,
+        PlayersMessage::Cancel => {
+            state.editing = None;
+            state.kb.close();
+        }
         PlayersMessage::AskDelete(id) => {
             state.confirming_delete = Some(id);
             state.editing = None;
+            state.kb.close();
         }
         PlayersMessage::CancelDelete => state.confirming_delete = None,
         PlayersMessage::ConfirmDelete(id) => {
@@ -154,6 +275,10 @@ pub fn update(
         }
         PlayersMessage::ManageCommanders(player) => {
             let commanders = db::player_commander_history(conn, player.id).unwrap_or_default();
+            let art = deck_art_tasks(&commanders);
+            state.editing = None;
+            state.kb.close();
+            let links = db::deck_links(conn, player.id).unwrap_or_default();
             state.managing = Some(ManagedPlayer {
                 player,
                 commanders,
@@ -163,10 +288,46 @@ pub fn update(
                 art_for: None,
                 art_options: Vec::new(),
                 loading_art: false,
-                pairing: None,
+                search_for: None,
+                selected: None,
+                links,
+                deck_page: None,
             });
+            return art;
         }
-        PlayersMessage::CloseManage => state.managing = None,
+        PlayersMessage::CloseManage => {
+            state.managing = None;
+            state.kb.close();
+        }
+        PlayersMessage::SelectDeck(commander_id) => {
+            if let Some(m) = &mut state.managing {
+                // Tapping the open deck again closes it, so there's always a
+                // way back to just looking at the cards.
+                m.selected = if m.selected == Some(commander_id) {
+                    None
+                } else {
+                    Some(commander_id)
+                };
+            }
+        }
+        PlayersMessage::OpenSearch(what) => {
+            if let Some(m) = &mut state.managing {
+                m.search_for = Some(what);
+                m.query.clear();
+                m.results.clear();
+                m.selected = None;
+            }
+            state.kb.open(Field::Search, "");
+            return text_input::focus(Field::Search.id());
+        }
+        PlayersMessage::CloseSearch => {
+            if let Some(m) = &mut state.managing {
+                m.search_for = None;
+                m.query.clear();
+                m.results.clear();
+            }
+            state.kb.close();
+        }
         PlayersMessage::QueryChanged(s) => {
             if let Some(m) = &mut state.managing {
                 m.query = s;
@@ -193,10 +354,14 @@ pub fn update(
             }
             match res {
                 Ok(list) => {
+                    // The card is the thing being picked, so the pictures
+                    // are fetched with the names rather than on demand.
+                    let art = card_art_tasks(&list);
                     if let Some(m) = &mut state.managing {
                         m.results = list;
                     }
                     state.error = None;
+                    return art;
                 }
                 Err(e) => {
                     state.cooldown.absorb(&e);
@@ -208,6 +373,143 @@ pub fn update(
             state.cooldown.tick();
             if !state.cooldown.active() {
                 state.error = None;
+            }
+        }
+
+        PlayersMessage::OpenDeckPage(commander_id) => {
+            let Some(m) = &mut state.managing else {
+                return Task::none();
+            };
+            let Some(deck) = m.deck(commander_id) else {
+                return Task::none();
+            };
+            let deck_label = deck.label();
+            let link_input = m
+                .links
+                .get(&commander_id)
+                .map(|l| l.url.clone())
+                .unwrap_or_default();
+            // Read once here rather than on every frame: the breakdown is a
+            // big structure and `view` runs constantly.
+            let analysis = db::deck_breakdown(conn, m.player.id, commander_id);
+            state.kb.close();
+            m.deck_page = Some(DeckPage {
+                commander_id,
+                deck_label,
+                link_input,
+                analysis,
+                busy: false,
+            });
+        }
+        PlayersMessage::CloseDeckPage => {
+            if let Some(m) = &mut state.managing {
+                m.deck_page = None;
+            }
+            state.kb.close();
+        }
+        PlayersMessage::LinkChanged(value) => {
+            if let Some(page) = state.managing.as_mut().and_then(|m| m.deck_page.as_mut()) {
+                page.link_input = value;
+            }
+        }
+        PlayersMessage::SaveLink => {
+            let Some(m) = &mut state.managing else {
+                return Task::none();
+            };
+            let player_id = m.player.id;
+            let Some(page) = &mut m.deck_page else {
+                return Task::none();
+            };
+
+            let input = page.link_input.trim().to_string();
+            // Checked here rather than after a round trip, so a typo comes
+            // back instantly instead of as a failed request.
+            let Some(public_id) = crate::moxfield::parse_ref(&input) else {
+                state.error = Some(crate::moxfield::Error::NotALink.to_string());
+                return Task::none();
+            };
+
+            let commander_id = page.commander_id;
+            let url = format!("https://moxfield.com/decks/{public_id}");
+            if let Err(e) = db::set_deck_link(conn, player_id, commander_id, &public_id, &url) {
+                state.error = Some(format!("Couldn't save that link: {e}"));
+                return Task::none();
+            }
+
+            // A re-check of the same list keeps the old breakdown on screen
+            // while it runs, so a failed check doesn't blank out numbers we
+            // still have. A different list invalidates them.
+            if m.links
+                .get(&commander_id)
+                .is_some_and(|l| l.public_id != public_id)
+            {
+                page.analysis = None;
+            }
+            page.link_input = url.clone();
+            page.busy = true;
+            m.links = db::deck_links(conn, player_id).unwrap_or_default();
+            state.kb.close();
+            return Task::perform(crate::salt::from_link(url), move |result| {
+                Message::Players(PlayersMessage::Analysed(commander_id, result))
+            });
+        }
+        PlayersMessage::RemoveLink => {
+            let Some(m) = &mut state.managing else {
+                return Task::none();
+            };
+            let player_id = m.player.id;
+            let Some(page) = &mut m.deck_page else {
+                return Task::none();
+            };
+            if let Err(e) = db::remove_deck_link(conn, player_id, page.commander_id) {
+                state.error = Some(format!("Couldn't remove that link: {e}"));
+                return Task::none();
+            }
+            page.link_input.clear();
+            page.analysis = None;
+            page.busy = false;
+            m.links = db::deck_links(conn, player_id).unwrap_or_default();
+        }
+        PlayersMessage::Analysed(commander_id, result) => {
+            let Some(m) = &mut state.managing else {
+                return Task::none();
+            };
+            let player_id = m.player.id;
+
+            match result {
+                Ok(analysis) => {
+                    if let Err(e) = db::save_deck_analysis(
+                        conn,
+                        player_id,
+                        commander_id,
+                        &analysis.public_id,
+                        &analysis,
+                    ) {
+                        state.error = Some(format!("Couldn't save the analysis: {e}"));
+                    }
+                    m.links = db::deck_links(conn, player_id).unwrap_or_default();
+                    // Only fill in the page if it's still this deck's: a slow
+                    // analysis must not land on a deck someone has since
+                    // opened instead.
+                    if let Some(page) = m
+                        .deck_page
+                        .as_mut()
+                        .filter(|p| p.commander_id == commander_id)
+                    {
+                        page.analysis = Some(analysis);
+                        page.busy = false;
+                    }
+                }
+                Err(message) => {
+                    state.error = Some(message);
+                    if let Some(page) = m
+                        .deck_page
+                        .as_mut()
+                        .filter(|p| p.commander_id == commander_id)
+                    {
+                        page.busy = false;
+                    }
+                }
             }
         }
         PlayersMessage::AddCommander(card) => {
@@ -223,21 +525,56 @@ pub fn update(
                 &card.color_identity,
             ) {
                 Ok(commander) => {
+                    // A partner needs a row of its own before it can be
+                    // paired - the pairing is an update to both halves.
                     let _ = db::record_player_commander_use(conn, m.player.id, commander.id);
+                    if let Some(SearchFor::Partner(primary)) = &m.search_for {
+                        if primary.id != commander.id {
+                            let _ = db::set_player_partner(
+                                conn,
+                                m.player.id,
+                                primary.id,
+                                Some(commander.id),
+                            );
+                        }
+                    }
+                    m.selected = match &m.search_for {
+                        Some(SearchFor::Partner(primary)) => Some(primary.id),
+                        _ => Some(commander.id),
+                    };
                     m.commanders =
                         db::player_commander_history(conn, m.player.id).unwrap_or_default();
+                    m.search_for = None;
                     m.results.clear();
                     m.query.clear();
+                    let art = deck_art_tasks(&m.commanders);
+                    state.kb.close();
+                    return art;
                 }
                 Err(e) => state.error = Some(format!("Couldn't add commander: {e}")),
             }
         }
         PlayersMessage::RemoveCommander(commander_id) => {
             if let Some(m) = &mut state.managing {
-                match db::remove_player_commander(conn, m.player.id, commander_id) {
+                // A partner pair is one deck, so removing it takes both
+                // halves with it. Leaving the partner behind would leave it
+                // pointing at a commander this player no longer has, and
+                // the pair would come back as a deck under the other name.
+                let partner_id = m
+                    .deck(commander_id)
+                    .and_then(|d| d.partner.as_ref())
+                    .map(|p| p.id);
+                let _ = db::set_player_partner(conn, m.player.id, commander_id, None);
+                let removed = db::remove_player_commander(conn, m.player.id, commander_id)
+                    .and_then(|()| match partner_id {
+                        Some(id) => db::remove_player_commander(conn, m.player.id, id),
+                        None => Ok(()),
+                    });
+                match removed {
                     Ok(()) => {
+                        m.selected = None;
                         m.commanders =
-                            db::player_commander_history(conn, m.player.id).unwrap_or_default()
+                            db::player_commander_history(conn, m.player.id).unwrap_or_default();
                     }
                     Err(e) => state.error = Some(format!("Couldn't remove: {e}")),
                 }
@@ -318,22 +655,21 @@ pub fn update(
                 m.art_options.clear();
             }
         }
-        PlayersMessage::StartPairing(commander) => {
-            if let Some(m) = &mut state.managing {
-                m.pairing = Some(commander);
-            }
-        }
         PlayersMessage::PickPartner(partner) => {
             let Some(m) = &mut state.managing else {
                 return Task::none();
             };
-            let Some(primary) = m.pairing.take() else {
+            let Some(SearchFor::Partner(primary)) = m.search_for.take() else {
                 return Task::none();
             };
             if primary.id != partner.id {
                 let _ = db::set_player_partner(conn, m.player.id, primary.id, Some(partner.id));
             }
+            m.selected = Some(primary.id);
             m.commanders = db::player_commander_history(conn, m.player.id).unwrap_or_default();
+            m.query.clear();
+            m.results.clear();
+            state.kb.close();
         }
         PlayersMessage::Unpair(commander) => {
             if let Some(m) = &mut state.managing {
@@ -341,13 +677,127 @@ pub fn update(
                 m.commanders = db::player_commander_history(conn, m.player.id).unwrap_or_default();
             }
         }
-        PlayersMessage::CancelPairing => {
-            if let Some(m) = &mut state.managing {
-                m.pairing = None;
-            }
+        PlayersMessage::Focus(field) => {
+            let value = current_text(state, field).to_string();
+            state.kb.open(field, &value);
+            return text_input::focus(field.id());
+        }
+        PlayersMessage::Key(key) => {
+            let Some(field) = state.kb.field() else {
+                return Task::none();
+            };
+            // The keyboard edits the string behind the field, so the value
+            // has to be lifted out, typed into, and put back.
+            let mut value = current_text(state, field).to_string();
+            let outcome = state.kb.press(key, &mut value);
+            set_text(state, field, value);
+            return match outcome {
+                keyboard::Outcome::Submit => update(state, conn, field.action()),
+                _ => Task::none(),
+            };
         }
     }
     Task::none()
+}
+
+/// The text currently in `field`, wherever on the screen it lives.
+fn current_text(state: &PlayersState, field: Field) -> &str {
+    match field {
+        Field::NewPlayer => &state.new_player_name,
+        Field::Rename => state
+            .editing
+            .as_ref()
+            .map(|(_, n)| n.as_str())
+            .unwrap_or(""),
+        Field::Search => state
+            .managing
+            .as_ref()
+            .map(|m| m.query.as_str())
+            .unwrap_or(""),
+        Field::MoxfieldLink => state
+            .managing
+            .as_ref()
+            .and_then(|m| m.deck_page.as_ref())
+            .map(|p| p.link_input.as_str())
+            .unwrap_or(""),
+    }
+}
+
+fn set_text(state: &mut PlayersState, field: Field, value: String) {
+    match field {
+        Field::NewPlayer => state.new_player_name = value,
+        Field::Rename => {
+            if let Some((_, name)) = &mut state.editing {
+                *name = value;
+            }
+        }
+        Field::Search => {
+            if let Some(m) = &mut state.managing {
+                m.query = value;
+            }
+        }
+        Field::MoxfieldLink => {
+            if let Some(page) = state.managing.as_mut().and_then(|m| m.deck_page.as_mut()) {
+                page.link_input = value;
+            }
+        }
+    }
+}
+
+impl Field {
+    /// What this field's Enter key does - the one action the keyboard's
+    /// own submit key stands in for.
+    fn action(self) -> PlayersMessage {
+        match self {
+            Field::NewPlayer => PlayersMessage::CreatePlayer,
+            Field::Rename => PlayersMessage::Save,
+            Field::Search => PlayersMessage::Search,
+            Field::MoxfieldLink => PlayersMessage::SaveLink,
+        }
+    }
+
+    /// The label on that submit key.
+    fn action_label(self) -> &'static str {
+        match self {
+            Field::NewPlayer => "Add",
+            Field::Rename => "Save",
+            Field::Search => "Search",
+            Field::MoxfieldLink => "Check",
+        }
+    }
+}
+
+/// Fetches the portraits for a player's saved decks, so their list of decks
+/// is a list of pictures the moment it opens.
+fn deck_art_tasks(decks: &[SavedDeck]) -> Task<Message> {
+    let urls: Vec<String> = decks
+        .iter()
+        .flat_map(|d| [Some(&d.commander), d.partner.as_ref()])
+        .flatten()
+        .filter_map(|c| c.portrait_url().map(str::to_string))
+        .collect();
+    fetch_all(urls)
+}
+
+/// Thumbnails for search results. Capped: Scryfall answers a loose name
+/// with up to 175 cards, and nobody scrolls past the first screenful of a
+/// search they're about to refine anyway.
+fn card_art_tasks(cards: &[ScryfallCard]) -> Task<Message> {
+    let urls: Vec<String> = cards
+        .iter()
+        .take(cards::PREFETCH)
+        .filter_map(|c| c.small_url.clone().or_else(|| c.image_url.clone()))
+        .collect();
+    fetch_all(urls)
+}
+
+fn fetch_all(urls: Vec<String>) -> Task<Message> {
+    Task::batch(urls.into_iter().map(|url| {
+        let key = url.clone();
+        Task::perform(scryfall::fetch_image(url), move |res| {
+            Message::ArtLoaded(key.clone(), res)
+        })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -373,12 +823,11 @@ const W_BACK: f32 = 200.0;
 const W_WIDE: f32 = 240.0;
 const W_ACTION: f32 = 180.0;
 const W_NARROW: f32 = 150.0;
-/// The colour-identity column - short strings like "WUB", but wide enough
-/// for all five.
-const W_IDENTITY: f32 = 120.0;
-/// One art thumbnail.
-const ART_W: f32 = 300.0;
-const ART_H: f32 = 220.0;
+/// One printing in the art gallery. Card-shaped, because a printing is a
+/// whole card and a box that isn't its shape would make the picture
+/// overflow - see the note in [`crate::cards`].
+const ART_W: f32 = 200.0;
+const ART_H: f32 = ART_W * 204.0 / 146.0;
 
 // ---------------------------------------------------------------------------
 // Shared pieces
@@ -490,13 +939,66 @@ pub fn view<'a>(
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
     if let Some(managed) = &state.managing {
-        if let Some(commander) = &managed.pairing {
-            return pairing_view(managed, commander, image_cache);
-        }
         if managed.art_for.is_some() {
             return art_view(managed, image_cache);
         }
-        return manage_view(state, managed);
+        if managed.search_for.is_some() {
+            return search_view(state, managed, image_cache);
+        }
+        // A deck's own page sits on top of the deck list, the same way the
+        // art picker does.
+        if let Some(page) = &managed.deck_page {
+            return deck_page_view(state, managed, page);
+        }
+        return manage_view(state, managed, image_cache);
+    }
+
+    if let Some(player) = state
+        .profile
+        .and_then(|id| state.players.iter().find(|p| p.id == id))
+    {
+        let mut content = column![
+            screen_header(
+                player.name.clone(),
+                style::T_TITLE,
+                Message::Players(PlayersMessage::CloseProfile)
+            ),
+            text("Player profile")
+                .size(style::T_LABEL)
+                .color(style::TEXT_MUTED),
+            if state.editing.is_some() || state.confirming_delete.is_some() {
+                player_row(state, player)
+            } else {
+                cards::grid(vec![
+                    profile_action(
+                        "Commanders",
+                        "Browse and manage decks",
+                        PlayersMessage::ManageCommanders(player.clone()),
+                    ),
+                    profile_action(
+                        "Rename",
+                        "Change this player's name",
+                        PlayersMessage::StartEdit(player.id, player.name.clone()),
+                    ),
+                    profile_action(
+                        "Delete",
+                        "Remove an unused profile",
+                        PlayersMessage::AskDelete(player.id),
+                    ),
+                ])
+            },
+        ]
+        .spacing(style::GAP);
+        if let Some(error) = &state.error {
+            content = content.push(error_banner(error));
+        }
+        return with_keyboard(
+            state,
+            container(content.padding(style::GAP))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+        );
     }
 
     let roster: Element<Message> = if state.players.is_empty() {
@@ -505,31 +1007,24 @@ pub fn view<'a>(
             "Add everyone who sits at this table - they'll keep their commanders and their record.",
         )
     } else {
-        scrollable(
-            column(
-                state
-                    .players
-                    .iter()
-                    .map(|p| player_row(state, p))
-                    .collect::<Vec<Element<Message>>>(),
-            )
-            .spacing(style::GAP_SM),
-        )
-        .height(Length::Fill)
-        .into()
+        cards::grid(state.players.iter().map(player_tile).collect())
     };
 
+    let mut add_button = style::touch_button("Add Player", style::T_ACTION)
+        .width(Length::Fixed(W_WIDE))
+        .style(style::primary);
+    if !state.new_player_name.trim().is_empty() {
+        add_button = add_button.on_press(Message::Players(PlayersMessage::CreatePlayer));
+    }
+
     let add_row = field_pod(
-        text_input("New player name", &state.new_player_name)
-            .size(style::T_SUBHEAD)
-            .padding(FIELD_PAD)
-            .style(style::input)
-            .on_input(|s| Message::Players(PlayersMessage::NewNameChanged(s)))
-            .on_submit(Message::Players(PlayersMessage::CreatePlayer)),
-        style::touch_button("Add Player", style::T_ACTION)
-            .width(Length::Fixed(W_WIDE))
-            .style(style::primary)
-            .on_press(Message::Players(PlayersMessage::CreatePlayer)),
+        keyed_field(
+            Field::NewPlayer,
+            "New player name",
+            &state.new_player_name,
+            |s| Message::Players(PlayersMessage::NewNameChanged(s)),
+        ),
+        add_button,
     );
 
     let mut content = column![
@@ -543,10 +1038,74 @@ pub fn view<'a>(
         content = content.push(error_banner(e));
     }
 
-    container(content.padding(style::GAP))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    with_keyboard(
+        state,
+        container(content.padding(style::GAP))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+    )
+}
+
+fn profile_action(
+    title: &'static str,
+    caption: &'static str,
+    action: PlayersMessage,
+) -> Element<'static, Message> {
+    button(
+        container(
+            column![
+                text(title).size(style::T_HEADING),
+                text(caption).size(style::T_BODY).color(style::TEXT_MUTED),
+            ]
+            .spacing(style::GAP_SM)
+            .align_x(iced::Alignment::Center),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill),
+    )
+    .padding(style::GAP)
+    .width(Length::Fixed(cards::TILE))
+    .height(Length::Fixed(cards::TILE))
+    .style(style::row_button)
+    .on_press(Message::Players(action))
+    .into()
+}
+
+fn player_tile(player: &Player) -> Element<'_, Message> {
+    let initials: String = player
+        .name
+        .split_whitespace()
+        .take(2)
+        .filter_map(|word| word.chars().next())
+        .flat_map(char::to_uppercase)
+        .collect();
+    button(
+        container(
+            column![
+                container(
+                    text(initials)
+                        .size(style::T_COUNTER)
+                        .color(style::ACCENT_BRIGHT)
+                )
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .style(style::art_inset),
+                text(&player.name).size(style::T_SUBHEAD),
+                text("View profile")
+                    .size(style::T_CAPTION)
+                    .color(style::TEXT_MUTED),
+            ]
+            .spacing(style::GAP_SM),
+        )
+        .padding(style::GAP),
+    )
+    .padding(style::GAP_SM)
+    .width(Length::Fixed(cards::TILE))
+    .height(Length::Fixed(cards::TILE))
+    .style(style::row_button)
+    .on_press(Message::Players(PlayersMessage::OpenProfile(player.id)))
+    .into()
 }
 
 fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message> {
@@ -556,12 +1115,9 @@ fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message
         if *id == p.id {
             return list_row(
                 row![
-                    text_input("Player name", name)
-                        .size(style::T_SUBHEAD)
-                        .padding(FIELD_PAD)
-                        .style(style::input)
-                        .on_input(|s| Message::Players(PlayersMessage::NameChanged(s)))
-                        .on_submit(Message::Players(PlayersMessage::Save)),
+                    keyed_field(Field::Rename, "Player name", name, |s| Message::Players(
+                        PlayersMessage::NameChanged(s)
+                    )),
                     row![
                         style::touch_button("Save", style::T_LABEL)
                             .width(Length::Fixed(W_ACTION))
@@ -627,7 +1183,9 @@ fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message
                 style::touch_button("Commanders", style::T_LABEL)
                     .width(Length::Fixed(W_WIDE))
                     .style(style::secondary)
-                    .on_press(Message::Players(PlayersMessage::ManageCommanders(p.clone()))),
+                    .on_press(Message::Players(PlayersMessage::ManageCommanders(
+                        p.clone()
+                    ))),
                 style::touch_button("Rename", style::T_LABEL)
                     .width(Length::Fixed(W_ACTION))
                     .style(style::secondary)
@@ -649,156 +1207,58 @@ fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message
 }
 
 // ---------------------------------------------------------------------------
-// One player's commanders
+// One player's decks
+//
+// A deck is a picture of its commander, at a size you can recognise from
+// across a table. Everything that can be done to one lives on a bar under
+// the grid rather than on the tile itself, so ten decks read as ten cards
+// instead of thirty buttons - and the grid gets the whole screen, which is
+// what someone opening their deck list came to see.
 // ---------------------------------------------------------------------------
 
-fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Element<'a, Message> {
-    let owned: Element<Message> = if managed.commanders.is_empty() {
-        empty_state(
-            "No commanders saved yet",
-            "Search below and tap a card to add it to this player's decks.",
+fn manage_view<'a>(
+    state: &'a PlayersState,
+    managed: &'a ManagedPlayer,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let grid: Element<Message> = if managed.commanders.is_empty() {
+        empty_fill(
+            "No decks yet",
+            "Add one and it's here every time this player sits down.",
         )
     } else {
-        column(
+        cards::grid(
             managed
                 .commanders
                 .iter()
                 .map(|deck| {
-                    let c = &deck.commander;
-                    // A paired deck offers to unpair; a lone commander
-                    // offers to pick a partner from this same list.
-                    let pair_button = match &deck.partner {
-                        Some(_) => style::touch_button("Unpair", style::T_LABEL)
-                            .width(Length::Fixed(W_ACTION))
-                            .style(style::ghost)
-                            .on_press(Message::Players(PlayersMessage::Unpair(c.clone()))),
-                        None => style::touch_button("Set Partner", style::T_LABEL)
-                            .width(Length::Fixed(W_ACTION))
-                            .style(style::secondary)
-                            .on_press(Message::Players(PlayersMessage::StartPairing(c.clone()))),
-                    };
-                    list_row(
-                        row![
-                            text(deck.label())
-                                .size(style::T_SUBHEAD)
-                                .color(style::TEXT)
-                                .width(Length::Fill),
-                            text(c.color_identity.clone())
-                                .size(style::T_LABEL)
-                                .color(style::TEXT_MUTED)
-                                .width(Length::Fixed(W_IDENTITY)),
-                            row![
-                                style::touch_button("Art", style::T_LABEL)
-                                    .width(Length::Fixed(W_NARROW))
-                                    .style(style::secondary)
-                                    .on_press(Message::Players(PlayersMessage::ChangeArt(
-                                        c.clone()
-                                    ))),
-                                pair_button,
-                                style::touch_button("Remove", style::T_LABEL)
-                                    .width(Length::Fixed(W_NARROW))
-                                    .style(style::danger_ghost)
-                                    .on_press(Message::Players(PlayersMessage::RemoveCommander(
-                                        c.id
-                                    ))),
-                            ]
-                            .spacing(style::GAP_SM),
-                        ]
-                        .spacing(style::GAP)
-                        .align_y(iced::Alignment::Center),
-                        style::panel,
+                    cards::deck_tile(
+                        deck,
+                        managed.selected == Some(deck.commander.id),
+                        image_cache,
+                        deck_meta(managed, deck),
+                        Message::Players(PlayersMessage::SelectDeck(deck.commander.id)),
                     )
                 })
-                .collect::<Vec<Element<Message>>>(),
+                .collect(),
         )
-        .spacing(style::GAP_SM)
-        .into()
     };
 
-    let results: Element<Message> = if managed.results.is_empty() {
-        empty_state(
-            "Nothing found yet",
-            "Type part of a commander's name and search - results land here.",
-        )
-    } else {
-        column(
-            managed
-                .results
-                .iter()
-                .map(|c| {
-                    button(
-                        container(
-                            row![
-                                text(c.name.clone())
-                                    .size(style::T_ACTION)
-                                    .color(style::TEXT)
-                                    .width(Length::Fill),
-                                text(c.color_identity.clone())
-                                    .size(style::T_LABEL)
-                                    .color(style::TEXT_MUTED)
-                                    .width(Length::Fixed(W_IDENTITY)),
-                            ]
-                            .spacing(style::GAP)
-                            .align_y(iced::Alignment::Center),
-                        )
-                        .padding([0, style::GAP])
-                        .center_y(Length::Fill),
-                    )
-                    .padding(0)
-                    .height(Length::Fixed(style::TOUCH_H))
-                    .width(Length::Fill)
-                    .style(style::row_button)
-                    .on_press(Message::Players(PlayersMessage::AddCommander(c.clone())))
-                    .into()
-                })
-                .collect::<Vec<Element<Message>>>(),
-        )
-        .spacing(style::GAP_SM)
-        .into()
+    let caption = match managed.commanders.len() {
+        0 => "Nothing saved yet".to_string(),
+        1 => "1 deck".to_string(),
+        n => format!("{n} decks"),
     };
-
-    let search_label: String = if state.cooldown.active() {
-        state.cooldown.label()
-    } else if managed.searching {
-        "Searching...".into()
-    } else {
-        "Search".into()
-    };
-
-    let mut search_button = style::touch_button(search_label, style::T_ACTION)
-        .width(Length::Fixed(W_WIDE))
-        .style(style::primary);
-    if !state.cooldown.active() {
-        search_button = search_button.on_press(Message::Players(PlayersMessage::Search));
-    }
 
     let mut content = column![
         screen_header(
-            format!("{}'s Commanders", managed.player.name),
+            format!("{}'s Decks", managed.player.name),
             style::T_HEADING,
             Message::Players(PlayersMessage::CloseManage),
         ),
-        column![
-            section_label("Saved decks"),
-            scrollable(owned).height(Length::Fill),
-        ]
-        .spacing(style::GAP_SM)
-        .height(Length::FillPortion(2)),
-        column![
-            section_label("Add a commander"),
-            field_pod(
-                text_input("Search Scryfall by name", &managed.query)
-                    .size(style::T_SUBHEAD)
-                    .padding(FIELD_PAD)
-                    .style(style::input)
-                    .on_input(|s| Message::Players(PlayersMessage::QueryChanged(s)))
-                    .on_submit(Message::Players(PlayersMessage::Search)),
-                search_button,
-            ),
-            scrollable(results).height(Length::Fill),
-        ]
-        .spacing(style::GAP_SM)
-        .height(Length::FillPortion(3)),
+        section_label(caption),
+        grid,
+        deck_bar(managed),
     ]
     .spacing(style::GAP);
 
@@ -810,6 +1270,203 @@ fn manage_view<'a>(state: &'a PlayersState, managed: &'a ManagedPlayer) -> Eleme
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// What can be done to the deck that's currently picked, plus the one way
+/// to add another. Always on screen, so the grid above it never changes
+/// height when a deck is tapped.
+fn deck_bar<'a>(managed: &'a ManagedPlayer) -> Element<'a, Message> {
+    let add = style::touch_button("+ Add a Deck", style::T_ACTION)
+        .width(Length::Fixed(W_WIDE))
+        .style(style::primary)
+        .on_press(Message::Players(PlayersMessage::OpenSearch(
+            SearchFor::Deck,
+        )));
+
+    let body = match managed.selected.and_then(|id| managed.deck(id)) {
+        Some(deck) => {
+            let paired = deck.partner.is_some();
+            let mut arts = row![art_button(&deck.commander, paired)].spacing(style::GAP_SM);
+            if let Some(partner) = &deck.partner {
+                arts = arts.push(art_button(partner, true));
+            }
+
+            let pairing = match &deck.partner {
+                Some(_) => style::touch_button("Unpair", style::T_LABEL)
+                    .width(Length::Fixed(W_NARROW))
+                    .style(style::ghost)
+                    .on_press(Message::Players(PlayersMessage::Unpair(
+                        deck.commander.clone(),
+                    ))),
+                None => style::touch_button("Set Partner", style::T_LABEL)
+                    .width(Length::Fixed(W_ACTION))
+                    .style(style::secondary)
+                    .on_press(Message::Players(PlayersMessage::OpenSearch(
+                        SearchFor::Partner(deck.commander.clone()),
+                    ))),
+            };
+
+            row![
+                text(deck.label())
+                    .size(style::T_SUBHEAD)
+                    .color(style::TEXT)
+                    .width(Length::Fill),
+                salt_button(managed, deck.commander.id),
+                arts,
+                pairing,
+                style::touch_button("Remove", style::T_LABEL)
+                    .width(Length::Fixed(W_NARROW))
+                    .style(style::danger_ghost)
+                    .on_press(Message::Players(PlayersMessage::RemoveCommander(
+                        deck.commander.id
+                    ))),
+                add,
+            ]
+        }
+        None => row![
+            text("Tap a deck for its salt score, art, partner or to remove it")
+                .size(style::T_BODY)
+                .color(style::TEXT_MUTED)
+                .width(Length::Fill),
+            add,
+        ],
+    };
+
+    container(body.spacing(style::GAP).align_y(iced::Alignment::Center))
+        .padding(ROW_PAD)
+        .width(Length::Fill)
+        .style(style::panel)
+        .into()
+}
+
+/// "Art" when a deck has one commander; the commander's own name when it
+/// has two, because then there are two arts to choose between.
+fn art_button<'a>(commander: &'a Commander, paired: bool) -> Element<'a, Message> {
+    let (label, width) = if paired {
+        (cards::first_word(&commander.name), W_ACTION)
+    } else {
+        ("Art".to_string(), W_NARROW)
+    };
+    style::touch_button(label, style::T_LABEL)
+        .width(Length::Fixed(width))
+        .style(style::secondary)
+        .on_press(Message::Players(PlayersMessage::ChangeArt(
+            commander.clone(),
+        )))
+        .into()
+}
+
+/// The way into a deck's own page, labelled with what's already known about
+/// it: the bracket and salt score if we have them, an invitation if not.
+/// Reading the numbers off the button means the common case - checking
+/// whether a deck is table-legal - doesn't need the page opened at all.
+fn salt_button<'a>(managed: &'a ManagedPlayer, commander_id: i64) -> Element<'a, Message> {
+    let (label, width, paint): (
+        String,
+        f32,
+        fn(&iced::Theme, button::Status) -> button::Style,
+    ) = match managed.links.get(&commander_id) {
+        Some(link) => match (link.bracket, link.salt_total) {
+            (Some(bracket), Some(salt)) => (
+                format!("B{bracket}  -  {salt:.0} salt"),
+                W_WIDE,
+                style::primary,
+            ),
+            // Linked, but the analysis hasn't landed - it was saved
+            // offline, or it failed.
+            _ => ("Check deck".to_string(), W_ACTION, style::secondary),
+        },
+        None => ("Moxfield".to_string(), W_NARROW, style::ghost),
+    };
+
+    style::touch_button(label, style::T_LABEL)
+        .width(Length::Fixed(width))
+        .style(paint)
+        .on_press(Message::Players(PlayersMessage::OpenDeckPage(commander_id)))
+        .into()
+}
+
+/// One deck's page: the Moxfield link at the top, and whatever has been
+/// worked out from it underneath.
+fn deck_page_view<'a>(
+    state: &'a PlayersState,
+    managed: &'a ManagedPlayer,
+    page: &'a DeckPage,
+) -> Element<'a, Message> {
+    let linked = managed.links.contains_key(&page.commander_id);
+
+    let action_label = if page.busy {
+        "Checking..."
+    } else if linked {
+        "Re-check"
+    } else {
+        "Check"
+    };
+    let mut action = style::touch_button(action_label, style::T_ACTION)
+        .width(Length::Fixed(W_ACTION))
+        .style(style::primary);
+    // Unpressable while a check is running, so a double tap can't start two
+    // analyses of the same deck.
+    if !page.busy {
+        // Re-checking an unchanged link shouldn't need the link re-parsed,
+        // but going through `SaveLink` means an edited link is picked up too.
+        action = action.on_press(Message::Players(PlayersMessage::SaveLink));
+    }
+
+    let mut controls = row![field_pod(
+        keyed_field(
+            Field::MoxfieldLink,
+            "https://moxfield.com/decks/...",
+            &page.link_input,
+            |s| Message::Players(PlayersMessage::LinkChanged(s)),
+        ),
+        action,
+    )]
+    .spacing(style::GAP)
+    .align_y(iced::Alignment::Center);
+
+    if linked {
+        controls = controls.push(
+            style::touch_button("Unlink", style::T_LABEL)
+                .width(Length::Fixed(W_NARROW))
+                .style(style::danger_ghost)
+                .on_press(Message::Players(PlayersMessage::RemoveLink)),
+        );
+    }
+
+    let body: Element<Message> = match &page.analysis {
+        Some(analysis) => breakdown::body(analysis),
+        None if page.busy => empty_fill(
+            "Reading the list...",
+            "Fetching the deck, then scoring every card. The first deck takes longest - after that most cards are already known.",
+        ),
+        None => empty_fill(
+            "Paste this deck's Moxfield link",
+            "You'll get its bracket, the cards that set it, and how salty the list is - all of it saved, so it's here without wifi next time.",
+        ),
+    };
+
+    let mut content = column![
+        screen_header(
+            page.deck_label.clone(),
+            style::T_HEADING,
+            Message::Players(PlayersMessage::CloseDeckPage),
+        ),
+        controls,
+    ]
+    .spacing(style::GAP);
+
+    if let Some(e) = &state.error {
+        content = content.push(error_banner(e));
+    }
+
+    with_keyboard(
+        state,
+        container(content.push(body).padding(style::GAP))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+    )
 }
 
 /// Pick a different printing's art for one of this player's commanders.
@@ -825,11 +1482,7 @@ fn art_view<'a>(
         .map(|card| {
             let thumb: Element<Message> =
                 match card.small_url.as_deref().and_then(|u| image_cache.get(u)) {
-                    Some(handle) => image(handle.clone())
-                        .width(Length::Fixed(ART_W))
-                        .height(Length::Fixed(ART_H))
-                        .content_fit(ContentFit::Cover)
-                        .into(),
+                    Some(handle) => cards::card_picture(handle, ART_W),
                     None => container(
                         text("Loading")
                             .size(style::T_CAPTION)
@@ -858,7 +1511,10 @@ fn art_view<'a>(
 
     let body: Element<Message> = if tiles.is_empty() {
         let (headline, note) = if managed.loading_art {
-            ("Looking up printings", "Fetching every version from Scryfall.")
+            (
+                "Looking up printings",
+                "Fetching every version from Scryfall.",
+            )
         } else {
             (
                 "No printings found",
@@ -867,9 +1523,7 @@ fn art_view<'a>(
         };
         empty_fill(headline, note)
     } else {
-        scrollable(row(tiles).spacing(style::GAP).wrap())
-            .height(Length::Fill)
-            .into()
+        cards::grid(tiles)
     };
 
     let status = if managed.loading_art {
@@ -896,54 +1550,200 @@ fn art_view<'a>(
     .into()
 }
 
-/// Pick which of this player's other commanders pairs with `primary` as a
-/// saved partner deck. Only their own saved commanders are offered - a
-/// partner has to be something they already play.
-fn pairing_view<'a>(
+/// Searching Scryfall for a card, whether it's about to become a deck of
+/// its own or the second half of one.
+///
+/// The cards are the list. A commander is a picture first and a name
+/// second, and half the reason to search at all is to check you've landed
+/// on the right one of the four cards sharing a name.
+fn search_view<'a>(
+    state: &'a PlayersState,
     managed: &'a ManagedPlayer,
-    primary: &'a Commander,
-    _image_cache: &'a HashMap<String, image::Handle>,
+    image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
-    let candidates: Vec<Element<Message>> = managed
-        .commanders
-        .iter()
-        .filter(|d| d.commander.id != primary.id && d.partner.is_none())
-        .map(|d| {
-            style::touch_button(d.commander.name.clone(), style::T_ACTION)
-                .width(Length::Fill)
-                .style(style::row_button)
-                .on_press(Message::Players(PlayersMessage::PickPartner(
-                    d.commander.clone(),
-                )))
-                .into()
-        })
-        .collect();
-
-    let body: Element<Message> = if candidates.is_empty() {
-        empty_fill(
-            "Nothing to pair with",
-            "This player needs a second unpaired commander saved before the two can share a seat.",
-        )
-    } else {
-        scrollable(column(candidates).spacing(style::GAP_SM))
-            .height(Length::Fill)
-            .into()
+    let looking_for = managed.search_for.as_ref();
+    let title = match looking_for {
+        Some(SearchFor::Partner(primary)) => format!("A partner for {}", primary.name),
+        _ => format!("A deck for {}", managed.player.name),
     };
 
-    container(
-        column![
-            screen_header(
-                format!("Pair with {}", primary.name),
-                style::T_HEADING,
-                Message::Players(PlayersMessage::CancelPairing),
+    let results: Element<Message> = if managed.searching {
+        empty_fill(
+            "Searching Scryfall",
+            "Looking for commanders whose name matches what you typed.",
+        )
+    } else if state.cooldown.active() {
+        empty_fill(
+            "Scryfall asked us to slow down",
+            "Search comes back as soon as the countdown on the button runs out.",
+        )
+    } else if managed.results.is_empty() {
+        empty_fill(
+            "No cards yet",
+            "Type part of a commander's name and tap Search.",
+        )
+    } else {
+        cards::grid(
+            managed
+                .results
+                .iter()
+                .map(|card| {
+                    cards::card_tile(
+                        card,
+                        image_cache,
+                        Message::Players(PlayersMessage::AddCommander(card.clone())),
+                    )
+                })
+                .collect(),
+        )
+    };
+
+    let search_label: String = if state.cooldown.active() {
+        state.cooldown.label()
+    } else if managed.searching {
+        "Searching...".into()
+    } else {
+        "Search".into()
+    };
+    let mut search_button = style::touch_button(search_label, style::T_ACTION)
+        .width(Length::Fixed(W_WIDE))
+        .style(style::primary);
+    if !state.cooldown.active() && !managed.searching && !managed.query.trim().is_empty() {
+        search_button = search_button.on_press(Message::Players(PlayersMessage::Search));
+    }
+
+    let mut content = column![
+        screen_header(
+            title,
+            style::T_HEADING,
+            Message::Players(PlayersMessage::CloseSearch),
+        ),
+        field_pod(
+            keyed_field(
+                Field::Search,
+                "Search Scryfall by name",
+                &managed.query,
+                |s| Message::Players(PlayersMessage::QueryChanged(s)),
             ),
-            section_label("Picking either half of a saved pair brings the other with it"),
-            body,
-        ]
-        .spacing(style::GAP)
-        .padding(style::GAP),
+            search_button,
+        ),
+    ]
+    .spacing(style::GAP);
+
+    // A partner they already own is one tap. This is the old pairing list,
+    // kept beside the search rather than instead of it - before, it was the
+    // only way in, which meant both halves had to be saved separately
+    // before they could ever be a deck.
+    if let Some(SearchFor::Partner(primary)) = looking_for {
+        let owned: Vec<Element<Message>> = managed
+            .commanders
+            .iter()
+            .filter(|d| d.commander.id != primary.id && d.partner.is_none())
+            .map(|d| quick_partner(&d.commander, image_cache))
+            .collect();
+        if !owned.is_empty() {
+            content = content.push(section_label("Or one they already play"));
+            content = content.push(row(owned).spacing(style::GAP_SM).wrap());
+        }
+    }
+
+    content = content.push(results);
+
+    if let Some(e) = &state.error {
+        content = content.push(error_banner(e));
+    }
+
+    with_keyboard(
+        state,
+        container(content.padding(style::GAP))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
+}
+
+/// What a deck's Moxfield link says about it, for the tile to show. A deck
+/// with no link, or one linked but not yet analysed, has nothing to say.
+fn deck_meta(managed: &ManagedPlayer, deck: &SavedDeck) -> cards::DeckMeta {
+    managed
+        .links
+        .get(&deck.commander.id)
+        .map(|link| cards::DeckMeta {
+            bracket: link.bracket,
+            salt: link.salt_total,
+        })
+        .unwrap_or_default()
+}
+
+/// A commander this player already has, offered as a partner without a
+/// trip through Scryfall.
+fn quick_partner<'a>(
+    commander: &'a Commander,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    button(
+        row![
+            cards::thumbnail(commander, image_cache),
+            text(&commander.name)
+                .size(style::T_LABEL)
+                .color(style::TEXT),
+        ]
+        .spacing(style::GAP_SM)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(style::GAP_XS)
+    .style(style::row_button)
+    .on_press(Message::Players(PlayersMessage::PickPartner(
+        commander.clone(),
+    )))
+    .into()
+}
+
+// ---------------------------------------------------------------------------
+// Text entry
+//
+// There is no hardware keyboard on the table and iced 0.13 can't ask the
+// compositor for one, so every field here raises the app's own.
+// ---------------------------------------------------------------------------
+
+/// A text field that brings the keyboard up when it's tapped.
+///
+/// `text_input` captures the press that focuses it but lets the release go
+/// past, so the release is what the keyboard listens for. The field keeps
+/// its own caret and a real keyboard still works alongside.
+fn keyed_field<'a>(
+    field: Field,
+    placeholder: &'a str,
+    value: &'a str,
+    on_input: fn(String) -> Message,
+) -> Element<'a, Message> {
+    mouse_area(
+        text_input(placeholder, value)
+            .id(field.id())
+            .size(style::T_SUBHEAD)
+            .padding(FIELD_PAD)
+            .style(style::input)
+            .on_input(on_input)
+            .on_submit(Message::Players(field.action())),
+    )
+    .on_release(Message::Players(PlayersMessage::Focus(field)))
+    .into()
+}
+
+/// Puts the keyboard under a screen while one of its fields is being typed
+/// into. It takes its space from the content rather than floating over it:
+/// what you're typing into is the thing you most need to keep seeing.
+fn with_keyboard<'a>(state: &PlayersState, body: Element<'a, Message>) -> Element<'a, Message> {
+    let Some(field) = state.kb.field() else {
+        return body;
+    };
+    column![
+        container(body).height(Length::Fill),
+        keyboard::view(
+            &state.kb,
+            |key| Message::Players(PlayersMessage::Key(key)),
+            Some(field.action_label()),
+        ),
+    ]
     .into()
 }

@@ -1,4 +1,4 @@
-//! On-disk cache for what we pull from Scryfall.
+//! On-disk cache for what we pull from other people's servers.
 //!
 //! Scryfall asks that applications cache downloaded data for at least 24
 //! hours instead of re-fetching it. Art bytes are keyed by their URL, and
@@ -6,6 +6,11 @@
 //! go stale - we keep those indefinitely, which is also what makes the app
 //! work at a table with no wifi. Printing lists are gameplay data that only
 //! changes on a reprint, so they expire after `PRINTS_TTL`.
+//!
+//! EDHREC salt scores are cached per card because a salt analysis needs one
+//! lookup per distinct card in a deck, and a pod plays the same cards over
+//! and over. The first deck anyone links pays for the whole pool; the
+//! second is mostly free. See `CARD_SALT_TTL`.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -14,6 +19,11 @@ use crate::db;
 use crate::scryfall::ScryfallCard;
 
 const PRINTS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The survey behind EDHREC's salt scores runs annually, so a hit stays
+/// good for a long time. The TTL is here for the other direction: a card
+/// EDHREC has no data for yet shouldn't stay missing forever once it does.
+const CARD_SALT_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 fn subdir(name: &str) -> PathBuf {
     let dir = db::data_dir().join(name);
@@ -57,7 +67,34 @@ pub fn prints(oracle_id: &str) -> Option<Vec<ScryfallCard>> {
 
 pub fn store_prints(oracle_id: &str, cards: &[ScryfallCard]) {
     if let Ok(json) = serde_json::to_vec(cards) {
-        let _ = std::fs::write(subdir("prints").join(format!("{}.json", key(oracle_id))), json);
+        let _ = std::fs::write(
+            subdir("prints").join(format!("{}.json", key(oracle_id))),
+            json,
+        );
+    }
+}
+
+/// One card's EDHREC salt score.
+///
+/// The two levels of `Option` are both load-bearing: the outer one is
+/// whether the cache knows about this card at all, and the inner one is
+/// whether EDHREC had a score for it. Caching the "no data" answer is the
+/// point - brand new cards are missing from EDHREC for months, and without
+/// this every analysis would re-ask for every one of them.
+pub fn card_salt(slug: &str) -> Option<Option<f64>> {
+    let path = subdir("salt").join(format!("{}.json", key(slug)));
+    let age = SystemTime::now()
+        .duration_since(std::fs::metadata(&path).ok()?.modified().ok()?)
+        .ok()?;
+    if age > CARD_SALT_TTL {
+        return None;
+    }
+    serde_json::from_slice(&std::fs::read(&path).ok()?).ok()
+}
+
+pub fn store_card_salt(slug: &str, salt: Option<f64>) {
+    if let Ok(json) = serde_json::to_vec(&salt) {
+        let _ = std::fs::write(subdir("salt").join(format!("{}.json", key(slug))), json);
     }
 }
 

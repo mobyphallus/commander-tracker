@@ -196,20 +196,12 @@ fn max_share(align: EdgeAlign) -> f32 {
 /// edge lies along? Upright reads along +x and the left-head seat reads down
 /// +y; the other two read back against their axis.
 fn reads_forward(facing: SeatOrientation) -> bool {
-    matches!(
-        facing,
-        SeatOrientation::Upright | SeatOrientation::LeftHead
-    )
+    matches!(facing, SeatOrientation::Upright | SeatOrientation::LeftHead)
 }
 
 /// The chip's centre *along* its edge. A chip too big to sit off to one side
 /// collapses back to the middle rather than hanging off the end of the tile.
-fn along_edge(
-    bounds: Size,
-    footprint: Size,
-    facing: SeatOrientation,
-    align: EdgeAlign,
-) -> f32 {
+fn along_edge(bounds: Size, footprint: Size, facing: SeatOrientation, align: EdgeAlign) -> f32 {
     let (span, extent) = if facing.is_sideways() {
         (bounds.height, footprint.height)
     } else {
@@ -475,7 +467,10 @@ impl<Msg: Clone> canvas::Program<Msg> for Menu<Msg> {
         };
         let (width, offsets) = self.layout(bounds.size());
         for ((_, message), &local_y) in self.items.iter().zip(offsets.iter()) {
-            if self.row_rect(bounds.size(), width, local_y).contains(position) {
+            if self
+                .row_rect(bounds.size(), width, local_y)
+                .contains(position)
+            {
                 return (canvas::event::Status::Captured, Some(message.clone()));
             }
         }
@@ -497,10 +492,7 @@ impl<Msg: Clone> canvas::Program<Msg> for Menu<Msg> {
         let paint = style::glass_strong_paint();
 
         frame.with_save(|frame| {
-            frame.translate(iced::Vector::new(
-                bounds.width / 2.0,
-                bounds.height / 2.0,
-            ));
+            frame.translate(iced::Vector::new(bounds.width / 2.0, bounds.height / 2.0));
             frame.rotate(iced::Radians(self.facing.radians()));
 
             for ((label, _), &local_y) in self.items.iter().zip(offsets.iter()) {
@@ -612,10 +604,34 @@ mod tests {
     /// orientations end up in the same place.
     #[test]
     fn each_orientation_hugs_its_own_edge() {
-        let up = chip_center(TILE, CHIP, SeatOrientation::Upright, true, EdgeAlign::Center);
-        let down = chip_center(TILE, CHIP, SeatOrientation::UpsideDown, true, EdgeAlign::Center);
-        let left = chip_center(TILE, CHIP, SeatOrientation::LeftHead, true, EdgeAlign::Center);
-        let right = chip_center(TILE, CHIP, SeatOrientation::RightHead, true, EdgeAlign::Center);
+        let up = chip_center(
+            TILE,
+            CHIP,
+            SeatOrientation::Upright,
+            true,
+            EdgeAlign::Center,
+        );
+        let down = chip_center(
+            TILE,
+            CHIP,
+            SeatOrientation::UpsideDown,
+            true,
+            EdgeAlign::Center,
+        );
+        let left = chip_center(
+            TILE,
+            CHIP,
+            SeatOrientation::LeftHead,
+            true,
+            EdgeAlign::Center,
+        );
+        let right = chip_center(
+            TILE,
+            CHIP,
+            SeatOrientation::RightHead,
+            true,
+            EdgeAlign::Center,
+        );
 
         assert!(up.y > TILE.height / 2.0, "upright should sit low");
         assert!(down.y < TILE.height / 2.0, "upside down should sit high");
@@ -640,10 +656,7 @@ mod tests {
     }
 
     fn overlaps(a: Rectangle, b: Rectangle) -> bool {
-        a.x < b.x + b.width
-            && b.x < a.x + a.width
-            && a.y < b.y + b.height
-            && b.y < a.y + a.height
+        a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
     }
 
     /// The regression this whole alignment exists for: the hate button used
@@ -674,7 +687,10 @@ mod tests {
                 EdgeAlign::End,
             )
             .hit_rect(TILE);
-            assert!(!overlaps(start, middle), "{facing:?}: start overlaps centre");
+            assert!(
+                !overlaps(start, middle),
+                "{facing:?}: start overlaps centre"
+            );
             assert!(!overlaps(middle, end), "{facing:?}: centre overlaps end");
             assert!(!overlaps(start, end), "{facing:?}: start overlaps end");
         }
@@ -685,27 +701,55 @@ mod tests {
     /// they swap sides on screen for the seats facing the other way.
     #[test]
     fn start_and_end_follow_the_player_not_the_screen() {
-        let upright_start = chip_center(TILE, CHIP, SeatOrientation::Upright, true, EdgeAlign::Start);
+        let upright_start =
+            chip_center(TILE, CHIP, SeatOrientation::Upright, true, EdgeAlign::Start);
         let upright_end = chip_center(TILE, CHIP, SeatOrientation::Upright, true, EdgeAlign::End);
-        assert!(upright_start.x < upright_end.x, "upright reads left to right");
+        assert!(
+            upright_start.x < upright_end.x,
+            "upright reads left to right"
+        );
 
-        let flipped_start =
-            chip_center(TILE, CHIP, SeatOrientation::UpsideDown, true, EdgeAlign::Start);
-        let flipped_end =
-            chip_center(TILE, CHIP, SeatOrientation::UpsideDown, true, EdgeAlign::End);
+        let flipped_start = chip_center(
+            TILE,
+            CHIP,
+            SeatOrientation::UpsideDown,
+            true,
+            EdgeAlign::Start,
+        );
+        let flipped_end = chip_center(
+            TILE,
+            CHIP,
+            SeatOrientation::UpsideDown,
+            true,
+            EdgeAlign::End,
+        );
         assert!(
             flipped_start.x > flipped_end.x,
             "upside down reads right to left on screen"
         );
 
-        let left_start = chip_center(TILE, CHIP, SeatOrientation::LeftHead, true, EdgeAlign::Start);
+        let left_start = chip_center(
+            TILE,
+            CHIP,
+            SeatOrientation::LeftHead,
+            true,
+            EdgeAlign::Start,
+        );
         let left_end = chip_center(TILE, CHIP, SeatOrientation::LeftHead, true, EdgeAlign::End);
         assert!(left_start.y < left_end.y, "left-head reads down the screen");
 
-        let right_start =
-            chip_center(TILE, CHIP, SeatOrientation::RightHead, true, EdgeAlign::Start);
+        let right_start = chip_center(
+            TILE,
+            CHIP,
+            SeatOrientation::RightHead,
+            true,
+            EdgeAlign::Start,
+        );
         let right_end = chip_center(TILE, CHIP, SeatOrientation::RightHead, true, EdgeAlign::End);
-        assert!(right_start.y > right_end.y, "right-head reads up the screen");
+        assert!(
+            right_start.y > right_end.y,
+            "right-head reads up the screen"
+        );
     }
 
     /// A chip too wide to sit off to one side collapses to the middle
@@ -715,7 +759,11 @@ mod tests {
         let huge = Size::new(TILE.width * 2.0, 90.0);
         for align in [EdgeAlign::Start, EdgeAlign::Center, EdgeAlign::End] {
             let center = chip_center(TILE, huge, SeatOrientation::Upright, true, align);
-            assert_eq!(center.x, TILE.width / 2.0, "{align:?} should collapse to centre");
+            assert_eq!(
+                center.x,
+                TILE.width / 2.0,
+                "{align:?} should collapse to centre"
+            );
         }
     }
 

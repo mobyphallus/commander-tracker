@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::model::{
-    ArtFraming, Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailOut,
-    GameDetailSeat, GameSummary, GrudgeStat, HateKind, HatedCommanderStat, HaterStat, MatchupStat,
-    OutCause, Player, PlayerStat, SavedDeck, WinReason, WinReasonStat,
+    ArtFraming, Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailOut, GameDetailSeat,
+    GameSummary, GrudgeStat, HateKind, HatedCommanderStat, HaterStat, MatchupStat, OutCause,
+    Player, PlayerStat, SavedDeck, WinReason, WinReasonStat,
 };
 
 pub fn data_dir() -> PathBuf {
@@ -102,7 +102,36 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     migrate_add_hate_kind(conn)?;
     migrate_add_art_framing(conn)?;
     migrate_add_partners(conn)?;
-    migrate_add_art_framing_table(conn)
+    migrate_add_art_framing_table(conn)?;
+    migrate_add_deck_analysis(conn)
+}
+
+/// A saved deck can be pointed at its Moxfield list, and once it is we keep
+/// what was worked out about it: the bracket, the salt total, and the whole
+/// breakdown as JSON.
+///
+/// Storing the breakdown whole rather than normalised into tables is
+/// deliberate. It's a read-only artefact of one moment - nothing queries
+/// inside it, the shape belongs to `crate::salt`, and keeping it as one blob
+/// means the screen still opens at a table with no wifi. It's keyed the same
+/// way `player_commanders` is, because a Moxfield link belongs to one
+/// player's deck rather than to the commander in general: two people can
+/// both play Atraxa and they are not the same deck.
+fn migrate_add_deck_analysis(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS deck_analysis (
+            player_id     INTEGER NOT NULL REFERENCES players(id),
+            commander_id  INTEGER NOT NULL REFERENCES commanders(id),
+            public_id     TEXT NOT NULL,
+            url           TEXT NOT NULL,
+            deck_name     TEXT NOT NULL DEFAULT '',
+            bracket       INTEGER,
+            salt_total    REAL,
+            breakdown     TEXT,
+            analysed_at   TEXT,
+            PRIMARY KEY (player_id, commander_id)
+        );",
+    )
 }
 
 /// Framing moved off the commander row and onto a per-tile table: the same
@@ -139,7 +168,9 @@ fn migrate_add_art_framing_table(conn: &Connection) -> rusqlite::Result<()> {
 /// attributed to the primary.
 fn migrate_add_partners(conn: &Connection) -> rusqlite::Result<()> {
     let has_partner: bool = conn
-        .prepare("SELECT 1 FROM pragma_table_info('game_players') WHERE name = 'partner_commander_id'")?
+        .prepare(
+            "SELECT 1 FROM pragma_table_info('game_players') WHERE name = 'partner_commander_id'",
+        )?
         .exists([])?;
     if !has_partner {
         conn.execute_batch(
@@ -168,9 +199,7 @@ fn migrate_add_ending_turn(conn: &Connection) -> rusqlite::Result<()> {
         .prepare("SELECT 1 FROM pragma_table_info('games') WHERE name = 'ending_turn'")?
         .exists([])?;
     if !has_column {
-        conn.execute_batch(
-            "ALTER TABLE games ADD COLUMN ending_turn INTEGER NOT NULL DEFAULT 1;",
-        )?;
+        conn.execute_batch("ALTER TABLE games ADD COLUMN ending_turn INTEGER NOT NULL DEFAULT 1;")?;
     }
     Ok(())
 }
@@ -275,8 +304,7 @@ fn commander_from_row(row: &rusqlite::Row) -> rusqlite::Result<Commander> {
     })
 }
 
-const COMMANDER_COLUMNS: &str =
-    "id, oracle_id, name, image_url, art_crop_url, color_identity";
+const COMMANDER_COLUMNS: &str = "id, oracle_id, name, image_url, art_crop_url, color_identity";
 
 /// The framing this commander's art was last given in this exact tile.
 /// Missing rows mean "never framed here", which renders as a plain cover.
@@ -329,11 +357,7 @@ pub fn save_framing(
 
 /// The partner saved alongside `commander_id` in this player's list, if
 /// they've paired the two as a deck.
-pub fn saved_partner(
-    conn: &Connection,
-    player_id: i64,
-    commander_id: i64,
-) -> Option<Commander> {
+pub fn saved_partner(conn: &Connection, player_id: i64, commander_id: i64) -> Option<Commander> {
     let partner_id: i64 = conn
         .query_row(
             "SELECT partner_commander_id FROM player_commanders
@@ -767,8 +791,8 @@ pub fn list_games(conn: &Connection) -> rusqlite::Result<Vec<GameSummary>> {
 }
 
 pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDetail> {
-    let (started_at, ended_at, win_reason, ending_turn): (String, String, Option<String>, i64) = conn
-        .query_row(
+    let (started_at, ended_at, win_reason, ending_turn): (String, String, Option<String>, i64) =
+        conn.query_row(
             "SELECT started_at, ended_at, win_reason, ending_turn FROM games WHERE id = ?1",
             params![game_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -905,4 +929,349 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
         seats,
         kills,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Moxfield links and salt analyses
+// ---------------------------------------------------------------------------
+
+/// The headline numbers for a linked deck, without paying to deserialise the
+/// whole breakdown. This is what the deck tiles and the deck bar read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeckLink {
+    pub public_id: String,
+    pub url: String,
+    pub deck_name: String,
+    /// `None` until an analysis has landed, which is also how a link that
+    /// was saved while offline is told apart from one that failed.
+    pub bracket: Option<u8>,
+    pub salt_total: Option<f64>,
+}
+
+fn deck_link_from_row(row: &rusqlite::Row) -> rusqlite::Result<(i64, DeckLink)> {
+    Ok((
+        row.get("commander_id")?,
+        DeckLink {
+            public_id: row.get("public_id")?,
+            url: row.get("url")?,
+            deck_name: row.get("deck_name")?,
+            bracket: row.get::<_, Option<i64>>("bracket")?.map(|b| b as u8),
+            salt_total: row.get("salt_total")?,
+        },
+    ))
+}
+
+/// Points one of a player's decks at a Moxfield list.
+///
+/// Any previous analysis is dropped on the way through: if the link changed,
+/// last week's numbers describe a different deck, and showing them next to a
+/// new link would be worse than showing nothing.
+pub fn set_deck_link(
+    conn: &Connection,
+    player_id: i64,
+    commander_id: i64,
+    public_id: &str,
+    url: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO deck_analysis (player_id, commander_id, public_id, url)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(player_id, commander_id) DO UPDATE SET
+            public_id   = excluded.public_id,
+            url         = excluded.url,
+            deck_name   = CASE WHEN deck_analysis.public_id = excluded.public_id
+                               THEN deck_analysis.deck_name ELSE '' END,
+            bracket     = CASE WHEN deck_analysis.public_id = excluded.public_id
+                               THEN deck_analysis.bracket ELSE NULL END,
+            salt_total  = CASE WHEN deck_analysis.public_id = excluded.public_id
+                               THEN deck_analysis.salt_total ELSE NULL END,
+            breakdown   = CASE WHEN deck_analysis.public_id = excluded.public_id
+                               THEN deck_analysis.breakdown ELSE NULL END,
+            analysed_at = CASE WHEN deck_analysis.public_id = excluded.public_id
+                               THEN deck_analysis.analysed_at ELSE NULL END",
+        params![player_id, commander_id, public_id, url],
+    )?;
+    Ok(())
+}
+
+pub fn remove_deck_link(
+    conn: &Connection,
+    player_id: i64,
+    commander_id: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM deck_analysis WHERE player_id = ?1 AND commander_id = ?2",
+        params![player_id, commander_id],
+    )?;
+    Ok(())
+}
+
+/// Stores a finished analysis against a deck. The link row is created if it
+/// somehow isn't there, so a saved analysis can't be orphaned by one.
+pub fn save_deck_analysis(
+    conn: &Connection,
+    player_id: i64,
+    commander_id: i64,
+    public_id: &str,
+    analysis: &crate::salt::Analysis,
+) -> rusqlite::Result<()> {
+    let breakdown = serde_json::to_string(analysis).unwrap_or_default();
+    conn.execute(
+        "INSERT INTO deck_analysis
+            (player_id, commander_id, public_id, url, deck_name, bracket, salt_total,
+             breakdown, analysed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(player_id, commander_id) DO UPDATE SET
+            public_id   = excluded.public_id,
+            url         = excluded.url,
+            deck_name   = excluded.deck_name,
+            bracket     = excluded.bracket,
+            salt_total  = excluded.salt_total,
+            breakdown   = excluded.breakdown,
+            analysed_at = excluded.analysed_at",
+        params![
+            player_id,
+            commander_id,
+            public_id,
+            analysis.url,
+            analysis.deck_name,
+            analysis.bracket as i64,
+            analysis.salt_total,
+            breakdown,
+            analysis.analysed_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Every linked deck for one player, keyed by the deck's primary commander.
+pub fn deck_links(
+    conn: &Connection,
+    player_id: i64,
+) -> rusqlite::Result<std::collections::HashMap<i64, DeckLink>> {
+    let mut stmt = conn.prepare(
+        "SELECT commander_id, public_id, url, deck_name, bracket, salt_total
+         FROM deck_analysis WHERE player_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![player_id], deck_link_from_row)?;
+    rows.collect()
+}
+
+/// The full stored breakdown for one deck.
+///
+/// A row whose `breakdown` no longer parses is treated as absent rather than
+/// as an error: the only way that happens is `salt::Analysis` changing shape
+/// under an old row, and the honest response is to offer a re-analysis, not
+/// to fail opening the screen.
+pub fn deck_breakdown(
+    conn: &Connection,
+    player_id: i64,
+    commander_id: i64,
+) -> Option<crate::salt::Analysis> {
+    let json: String = conn
+        .query_row(
+            "SELECT breakdown FROM deck_analysis
+             WHERE player_id = ?1 AND commander_id = ?2 AND breakdown IS NOT NULL",
+            params![player_id, commander_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    serde_json::from_str(&json).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::salt::Analysis;
+
+    /// A schema-complete throwaway database, so these tests exercise the real
+    /// migrations rather than a hand-built subset of them.
+    fn memory_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        init(&conn).unwrap();
+        conn
+    }
+
+    /// Creates a player with one saved commander, returning both ids.
+    fn player_with_deck(conn: &Connection, name: &str) -> (i64, i64) {
+        let player = create_player(conn, name).unwrap();
+        let commander = upsert_commander(
+            conn,
+            &format!("oracle-{name}"),
+            "Kibo, Uktabi Prince",
+            None,
+            None,
+            "GR",
+        )
+        .unwrap();
+        record_player_commander_use(conn, player.id, commander.id).unwrap();
+        (player.id, commander.id)
+    }
+
+    fn analysis(public_id: &str, bracket: u8, salt: f64) -> Analysis {
+        Analysis {
+            deck_name: "Test Deck".into(),
+            public_id: public_id.into(),
+            url: format!("https://moxfield.com/decks/{public_id}"),
+            card_count: 100,
+            bracket,
+            criteria: Vec::new(),
+            owner_bracket: Some(2),
+            auto_bracket: Some(3),
+            salt_total: salt,
+            categories: Vec::new(),
+            combos: Vec::new(),
+            unscored: Vec::new(),
+            analysed_at: "2026-09-24T12:00:00+00:00".into(),
+        }
+    }
+
+    #[test]
+    fn a_link_and_its_analysis_round_trip() {
+        let conn = memory_db();
+        let (player, commander) = player_with_deck(&conn, "Dante");
+
+        assert!(deck_links(&conn, player).unwrap().is_empty());
+        assert!(deck_breakdown(&conn, player, commander).is_none());
+
+        set_deck_link(
+            &conn,
+            player,
+            commander,
+            "abc12345",
+            "https://moxfield.com/decks/abc12345",
+        )
+        .unwrap();
+
+        // A link on its own is a real state: saved, not yet scored.
+        let links = deck_links(&conn, player).unwrap();
+        let link = &links[&commander];
+        assert_eq!(link.public_id, "abc12345");
+        assert_eq!(link.bracket, None, "nothing has been worked out yet");
+        assert!(deck_breakdown(&conn, player, commander).is_none());
+
+        save_deck_analysis(
+            &conn,
+            player,
+            commander,
+            "abc12345",
+            &analysis("abc12345", 4, 198.2),
+        )
+        .unwrap();
+
+        let links = deck_links(&conn, player).unwrap();
+        let link = &links[&commander];
+        assert_eq!(link.bracket, Some(4));
+        assert_eq!(link.salt_total, Some(198.2));
+        assert_eq!(link.deck_name, "Test Deck");
+
+        // The whole breakdown comes back, not just the headline numbers.
+        let stored = deck_breakdown(&conn, player, commander).unwrap();
+        assert_eq!(stored.bracket, 4);
+        assert_eq!(stored.public_id, "abc12345");
+        assert_eq!(stored.card_count, 100);
+    }
+
+    #[test]
+    fn relinking_a_different_deck_drops_the_old_numbers() {
+        let conn = memory_db();
+        let (player, commander) = player_with_deck(&conn, "Dante");
+
+        set_deck_link(&conn, player, commander, "abc12345", "u1").unwrap();
+        save_deck_analysis(
+            &conn,
+            player,
+            commander,
+            "abc12345",
+            &analysis("abc12345", 4, 198.2),
+        )
+        .unwrap();
+
+        // Re-saving the SAME link must keep the analysis - that's what makes
+        // an idle re-check cheap and keeps numbers on screen meanwhile.
+        set_deck_link(&conn, player, commander, "abc12345", "u1").unwrap();
+        assert_eq!(
+            deck_links(&conn, player).unwrap()[&commander].bracket,
+            Some(4)
+        );
+        assert!(deck_breakdown(&conn, player, commander).is_some());
+
+        // Pointing at a DIFFERENT deck must not leave last deck's bracket
+        // sitting under the new link.
+        set_deck_link(&conn, player, commander, "zzz99999", "u2").unwrap();
+        let link = &deck_links(&conn, player).unwrap()[&commander];
+        assert_eq!(link.public_id, "zzz99999");
+        assert_eq!(link.bracket, None, "stale bracket must be cleared");
+        assert_eq!(link.salt_total, None);
+        assert!(
+            deck_breakdown(&conn, player, commander).is_none(),
+            "stale breakdown must be cleared"
+        );
+    }
+
+    #[test]
+    fn links_are_per_player_not_per_commander() {
+        let conn = memory_db();
+        // Two people playing the same commander are two different decks, and
+        // must not share one link.
+        let player_a = create_player(&conn, "Dante").unwrap();
+        let player_b = create_player(&conn, "Sam").unwrap();
+        let commander =
+            upsert_commander(&conn, "oracle-shared", "Atraxa", None, None, "WBGU").unwrap();
+        record_player_commander_use(&conn, player_a.id, commander.id).unwrap();
+        record_player_commander_use(&conn, player_b.id, commander.id).unwrap();
+
+        set_deck_link(&conn, player_a.id, commander.id, "aaaaaaaa", "ua").unwrap();
+        set_deck_link(&conn, player_b.id, commander.id, "bbbbbbbb", "ub").unwrap();
+
+        assert_eq!(
+            deck_links(&conn, player_a.id).unwrap()[&commander.id].public_id,
+            "aaaaaaaa"
+        );
+        assert_eq!(
+            deck_links(&conn, player_b.id).unwrap()[&commander.id].public_id,
+            "bbbbbbbb"
+        );
+    }
+
+    #[test]
+    fn unlinking_forgets_everything() {
+        let conn = memory_db();
+        let (player, commander) = player_with_deck(&conn, "Dante");
+
+        set_deck_link(&conn, player, commander, "abc12345", "u1").unwrap();
+        save_deck_analysis(
+            &conn,
+            player,
+            commander,
+            "abc12345",
+            &analysis("abc12345", 3, 40.0),
+        )
+        .unwrap();
+
+        remove_deck_link(&conn, player, commander).unwrap();
+        assert!(deck_links(&conn, player).unwrap().is_empty());
+        assert!(deck_breakdown(&conn, player, commander).is_none());
+    }
+
+    #[test]
+    fn a_breakdown_that_no_longer_parses_reads_as_absent() {
+        let conn = memory_db();
+        let (player, commander) = player_with_deck(&conn, "Dante");
+        set_deck_link(&conn, player, commander, "abc12345", "u1").unwrap();
+        // Simulates an analysis written by an older version of the struct.
+        conn.execute(
+            "UPDATE deck_analysis SET breakdown = '{\"nonsense\":true}'
+             WHERE player_id = ?1 AND commander_id = ?2",
+            params![player, commander],
+        )
+        .unwrap();
+
+        // Absent, rather than an error that stops the page opening: the
+        // screen can then offer a re-check.
+        assert!(deck_breakdown(&conn, player, commander).is_none());
+    }
 }

@@ -70,7 +70,10 @@ pub const SUCCESS: Color = hex(0x35C48A);
 pub const DANGER: Color = hex(0xE5484D);
 
 /// Hairline that separates without drawing a line you actually notice.
-pub const HAIRLINE: Color = Color { a: 0.55, ..SURFACE_3 };
+pub const HAIRLINE: Color = Color {
+    a: 0.55,
+    ..SURFACE_3
+};
 
 // ---------------------------------------------------------------------------
 // Shape, spacing and type
@@ -126,7 +129,10 @@ pub const T_COUNTER: u16 = 76;
 /// tint the surface underneath instead of dirtying it.
 fn shadow(blur: f32, y: f32, alpha: f32) -> Shadow {
     Shadow {
-        color: Color { a: alpha, ..hex(0x05030A) },
+        color: Color {
+            a: alpha,
+            ..hex(0x05030A)
+        },
         offset: Vector::new(0.0, y),
         blur_radius: blur,
     }
@@ -242,6 +248,19 @@ pub fn choice_tile<'a, Msg: 'a>(
     .style(secondary)
 }
 
+/// A name you pick out of a short list - a player taking a seat.
+///
+/// Deliberately much bigger than a row or a button. At setup the screen
+/// holds five names and nothing else, and a control sized for a dense list
+/// leaves most of the table empty while making the one thing on it hard to
+/// hit from a chair.
+pub const NAME_TILE_W: f32 = 340.0;
+pub const NAME_TILE_H: f32 = 150.0;
+
+pub fn name_tile<'a, Msg: 'a>(label: impl text::IntoFragment<'a>) -> Button<'a, Msg> {
+    sized_button(label, T_TITLE, NAME_TILE_H).width(Length::Fixed(NAME_TILE_W))
+}
+
 /// A taller button for the main action on a screen.
 pub fn cta_button<'a, Msg: 'a>(label: impl text::IntoFragment<'a>, size: u16) -> Button<'a, Msg> {
     sized_button(label, size, TOUCH_H_LG)
@@ -278,7 +297,10 @@ fn dim(style: button::Style) -> button::Style {
     button::Style {
         background: style.background.map(|b| b.scale_alpha(0.4)),
         text_color: style.text_color.scale_alpha(0.4),
-        border: Border { color: style.border.color.scale_alpha(0.4), ..style.border },
+        border: Border {
+            color: style.border.color.scale_alpha(0.4),
+            ..style.border
+        },
         shadow: shadow(0.0, 0.0, 0.0),
     }
 }
@@ -315,7 +337,10 @@ pub fn secondary(_theme: &Theme, status: button::Status) -> button::Style {
     let base = button::Style {
         background: Some(fill.into()),
         text_color: TEXT,
-        border: Border { color: line, ..button_base(R_MD).border },
+        border: Border {
+            color: line,
+            ..button_base(R_MD).border
+        },
         ..button_base(R_MD)
     };
     match status {
@@ -344,7 +369,10 @@ fn tinted(accent: Color, fill: Color, status: button::Status) -> button::Style {
     let base = button::Style {
         background: Some(bg.into()),
         text_color: ink,
-        border: Border { color: line, ..button_base(R_MD).border },
+        border: Border {
+            color: line,
+            ..button_base(R_MD).border
+        },
         ..button_base(R_MD)
     };
     match status {
@@ -406,6 +434,86 @@ pub fn danger_ghost(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A picture tile picked out of a grid, with its actions now showing
+/// elsewhere. Lit at the edge rather than filled: the card art is the
+/// content, and an accent wash over it would repaint the card's own
+/// colours.
+pub fn tile_selected(_theme: &Theme, status: button::Status) -> button::Style {
+    let line = match status {
+        button::Status::Pressed => ACCENT,
+        _ => ACCENT_BRIGHT,
+    };
+    button::Style {
+        background: Some(SURFACE_2.into()),
+        text_color: TEXT,
+        border: Border {
+            color: line,
+            width: 2.0,
+            radius: Radius::from(R_MD),
+        },
+        shadow: shadow(18.0, 6.0, 0.4),
+    }
+}
+
+/// One letter on the app's own keyboard. Flatter and tighter-cornered than
+/// a [`secondary`] button on purpose: thirty slabs, each with its own
+/// hairline and 16px corner, read as thirty separate objects instead of one
+/// keyboard. The accent only appears under the finger, which on a block
+/// this dense is the only feedback that lands.
+pub fn key(_theme: &Theme, status: button::Status) -> button::Style {
+    let (fill, ink) = match status {
+        button::Status::Hovered => (SURFACE_3, TEXT),
+        button::Status::Pressed => (ACCENT, TEXT_ON_ACCENT),
+        _ => (SURFACE_2, TEXT),
+    };
+    button::Style {
+        background: Some(fill.into()),
+        text_color: ink,
+        border: Border {
+            color: HAIRLINE,
+            ..button_base(R_SM).border
+        },
+        ..button_base(R_SM)
+    }
+}
+
+/// A key that changes what the other keys do, or acts on the whole field:
+/// shift, delete, the symbol layer. Sunk a step below the letters so the
+/// alphabet stays the foreground - but only a step. SURFACE_1 on a
+/// near-black page is very nearly the page, so the hairline is what keeps
+/// these reading as keys rather than as words floating under the keyboard.
+pub fn key_modifier(_theme: &Theme, status: button::Status) -> button::Style {
+    let (fill, ink) = match status {
+        button::Status::Hovered => (SURFACE_2, TEXT),
+        button::Status::Pressed => (ACCENT, TEXT_ON_ACCENT),
+        _ => (SURFACE_1, TEXT_MUTED),
+    };
+    button::Style {
+        background: Some(fill.into()),
+        text_color: ink,
+        border: Border {
+            color: HAIRLINE,
+            ..button_base(R_SM).border
+        },
+        ..button_base(R_SM)
+    }
+}
+
+/// A modifier that's currently doing something - shift held down, the
+/// symbol layer showing. Lit so its state is readable at a glance rather
+/// than inferred from the letters.
+pub fn key_modifier_on(_theme: &Theme, status: button::Status) -> button::Style {
+    let fill = match status {
+        button::Status::Pressed => ACCENT_DEEP,
+        _ => ACCENT,
+    };
+    button::Style {
+        background: Some(fill.into()),
+        text_color: TEXT_ON_ACCENT,
+        ..button_base(R_SM)
+    }
+}
+
 /// No fill at all - for "Cancel", "Back" and other ways out, which should be
 /// findable without being the loudest thing on the screen.
 pub fn ghost(_theme: &Theme, status: button::Status) -> button::Style {
@@ -417,7 +525,10 @@ pub fn ghost(_theme: &Theme, status: button::Status) -> button::Style {
     let base = button::Style {
         background: Some(Background::Color(fill)),
         text_color: ink,
-        border: Border { color: line, ..button_base(R_MD).border },
+        border: Border {
+            color: line,
+            ..button_base(R_MD).border
+        },
         ..button_base(R_MD)
     };
     match status {
@@ -436,7 +547,11 @@ pub fn glass_button(_theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: Some(Color { a: bg, ..SCRIM }.into()),
         text_color: TEXT,
-        border: Border { color: line, width: 1.0, radius: Radius::from(R_LG) },
+        border: Border {
+            color: line,
+            width: 1.0,
+            radius: Radius::from(R_LG),
+        },
         shadow: shadow(0.0, 0.0, 0.0),
     }
 }
@@ -460,7 +575,11 @@ pub fn panel(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(SURFACE_1.into()),
         text_color: Some(TEXT),
-        border: Border { color: HAIRLINE, width: 1.0, radius: Radius::from(R_MD) },
+        border: Border {
+            color: HAIRLINE,
+            width: 1.0,
+            radius: Radius::from(R_MD),
+        },
         shadow: shadow(14.0, 4.0, 0.35),
         ..container::Style::default()
     }
@@ -471,7 +590,11 @@ pub fn panel(_theme: &Theme) -> container::Style {
 /// survive being seen on a screen at arm's length across a table.
 pub fn panel_active(theme: &Theme) -> container::Style {
     container::Style {
-        border: Border { color: ACCENT, width: 3.0, radius: Radius::from(R_MD) },
+        border: Border {
+            color: ACCENT,
+            width: 3.0,
+            radius: Radius::from(R_MD),
+        },
         shadow: Shadow {
             color: Color { a: 0.5, ..ACCENT },
             offset: Vector::new(0.0, 0.0),
@@ -494,6 +617,50 @@ pub fn panel_selected(theme: &Theme) -> container::Style {
 
 /// A small inline label - a count, a colour identity, a status word. Sits on
 /// a surface rather than on art, which is what separates it from [`glass`].
+// ---------------------------------------------------------------------------
+// Mana
+// ---------------------------------------------------------------------------
+
+/// The five colours as Magic itself prints them: a pale disc with the
+/// symbol in dark ink.
+///
+/// Deliberately the card-face colours rather than anything from the palette
+/// above - this is the one place the house style gives way. A player reads a
+/// mana symbol by its colour before they read its letter, and tinting these
+/// violet to match the app would cost exactly the recognition they exist
+/// for. Anything that isn't WUBRG is colourless.
+pub fn mana_color(symbol: char) -> Color {
+    match symbol {
+        'W' => hex(0xFFFBD5),
+        'U' => hex(0xAAE0FA),
+        'B' => hex(0xCBC2BF),
+        'R' => hex(0xF9AA8F),
+        'G' => hex(0x9BD3AE),
+        _ => hex(0xCAC5C0),
+    }
+}
+
+/// Ink for the letter inside a pip. Near-black rather than the app's text
+/// colour, which would vanish on these pale discs.
+pub const MANA_INK: Color = hex(0x1B1410);
+
+/// One mana pip: a filled disc with a dark rim, so it holds its edge over
+/// card art as well as over a panel.
+pub fn mana_pip(symbol: char) -> impl Fn(&Theme) -> container::Style {
+    let fill = mana_color(symbol);
+    move |_theme: &Theme| container::Style {
+        background: Some(fill.into()),
+        text_color: Some(MANA_INK),
+        border: Border {
+            color: Color { a: 0.45, ..SCRIM },
+            width: 1.0,
+            radius: Radius::from(R_PILL),
+        },
+        shadow: shadow(6.0, 1.0, 0.45),
+        ..container::Style::default()
+    }
+}
+
 pub fn badge(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(SURFACE_2.into()),
@@ -510,7 +677,11 @@ pub fn badge(_theme: &Theme) -> container::Style {
 /// A panel that flags something needs attention (e.g. a seat at lethal damage).
 pub fn panel_danger(theme: &Theme) -> container::Style {
     container::Style {
-        border: Border { color: DANGER, width: 3.0, radius: Radius::from(R_MD) },
+        border: Border {
+            color: DANGER,
+            width: 3.0,
+            radius: Radius::from(R_MD),
+        },
         shadow: Shadow {
             color: Color { a: 0.45, ..DANGER },
             offset: Vector::new(0.0, 0.0),
@@ -527,7 +698,11 @@ pub fn header(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(wash(ACCENT_DEEP, SURFACE_1)),
         text_color: Some(TEXT),
-        border: Border { color: HAIRLINE, width: 1.0, radius: Radius::from(R_LG) },
+        border: Border {
+            color: HAIRLINE,
+            width: 1.0,
+            radius: Radius::from(R_LG),
+        },
         shadow: shadow(18.0, 6.0, 0.3),
         ..container::Style::default()
     }
@@ -585,7 +760,10 @@ fn frosted(alpha: f32, radius: f32, border_alpha: f32) -> container::Style {
         background: Some(Color { a: alpha, ..SCRIM }.into()),
         text_color: Some(TEXT),
         border: Border {
-            color: Color { a: border_alpha, ..TEXT },
+            color: Color {
+                a: border_alpha,
+                ..TEXT
+            },
             width: 1.0,
             radius: Radius::from(radius),
         },
@@ -627,7 +805,10 @@ pub fn glass_strong_paint() -> ChipPaint {
 pub fn accent_chip_paint() -> ChipPaint {
     ChipPaint {
         background: Color { a: 0.88, ..ACCENT },
-        border: Color { a: 0.95, ..ACCENT_BRIGHT },
+        border: Color {
+            a: 0.95,
+            ..ACCENT_BRIGHT
+        },
         radius: R_LG,
     }
 }
@@ -691,7 +872,11 @@ pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
     };
     text_input::Style {
         background: SURFACE_1.into(),
-        border: Border { color: line, width: 1.0, radius: Radius::from(R_SM) },
+        border: Border {
+            color: line,
+            width: 1.0,
+            radius: Radius::from(R_SM),
+        },
         icon: TEXT_MUTED,
         placeholder: TEXT_MUTED,
         value: TEXT,

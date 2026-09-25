@@ -128,7 +128,10 @@ mod tests {
     #[test]
     fn default_framing_covers_the_tile() {
         let r = placement(TILE, ART, ArtFraming::default());
-        assert!(r.x <= 0.01 && r.y <= 0.01, "art starts inside the tile: {r:?}");
+        assert!(
+            r.x <= 0.01 && r.y <= 0.01,
+            "art starts inside the tile: {r:?}"
+        );
         assert!(r.x + r.width >= TILE.width - 0.01);
         assert!(r.y + r.height >= TILE.height - 0.01);
     }

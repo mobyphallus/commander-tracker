@@ -132,7 +132,8 @@ fn count<'a>(value: String) -> Element<'a, Message> {
 
 /// The name a row belongs to, with an optional second line of detail.
 fn name_cell<'a>(label: String, sub: Option<String>) -> Element<'a, Message> {
-    let mut cell = column![text(label).size(style::T_SUBHEAD).color(style::TEXT)].spacing(style::GAP_XS);
+    let mut cell =
+        column![text(label).size(style::T_SUBHEAD).color(style::TEXT)].spacing(style::GAP_XS);
     if let Some(sub) = sub {
         cell = cell.push(text(sub).size(style::T_CAPTION).color(style::TEXT_MUTED));
     }
@@ -164,7 +165,10 @@ fn bar<'a>(frac: f64) -> Element<'a, Message> {
 
 /// One line of a table: the name takes the slack, the fixed-width cells
 /// after it line up down the screen.
-fn stat_row<'a>(name: Element<'a, Message>, cells: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+fn stat_row<'a>(
+    name: Element<'a, Message>,
+    cells: Vec<Element<'a, Message>>,
+) -> Element<'a, Message> {
     let mut line = row![name].spacing(style::GAP).align_y(Alignment::Center);
     for cell in cells {
         line = line.push(cell);
@@ -223,7 +227,9 @@ fn callout<'a>(value: String, caption: &'a str) -> Element<'a, Message> {
     container(
         column![
             text(value).size(style::T_DISPLAY).color(style::TEXT),
-            text(caption).size(style::T_CAPTION).color(style::TEXT_MUTED),
+            text(caption)
+                .size(style::T_CAPTION)
+                .color(style::TEXT_MUTED),
         ]
         .spacing(style::GAP_XS),
     )
@@ -263,7 +269,11 @@ pub fn view(state: &StatsState) -> Element<'_, Message> {
                 let selected = state.tab == *t;
                 style::touch_button(t.label(), style::T_ACTION)
                     .width(Length::Fill)
-                    .style(if selected { style::primary } else { style::ghost })
+                    .style(if selected {
+                        style::primary
+                    } else {
+                        style::ghost
+                    })
                     .on_press(Message::Stats(StatsMessage::SwitchTab(*t)))
                     .into()
             })
@@ -394,10 +404,7 @@ fn matchups_tab(state: &StatsState) -> Element<'_, Message> {
                 0.0
             };
             stat_row(
-                name_cell(
-                    m.commander_a.clone(),
-                    Some(format!("vs {}", m.commander_b)),
-                ),
+                name_cell(m.commander_a.clone(), Some(format!("vs {}", m.commander_b))),
                 vec![
                     bar(share),
                     count(m.games.to_string()),
@@ -431,7 +438,13 @@ fn hate_tab(state: &StatsState) -> Element<'_, Message> {
 
     // Bars here compare against the busiest row rather than against a
     // percentage: the question is who throws the most hate, not what share.
-    let hater_max = state.haters.iter().map(|h| h.total).max().unwrap_or(0).max(1) as f64;
+    let hater_max = state
+        .haters
+        .iter()
+        .map(|h| h.total)
+        .max()
+        .unwrap_or(0)
+        .max(1) as f64;
     let haters: Vec<Element<Message>> = state
         .haters
         .iter()
@@ -453,7 +466,13 @@ fn hate_tab(state: &StatsState) -> Element<'_, Message> {
         })
         .collect();
 
-    let hated_max = state.hated.iter().map(|c| c.total).max().unwrap_or(0).max(1) as f64;
+    let hated_max = state
+        .hated
+        .iter()
+        .map(|c| c.total)
+        .max()
+        .unwrap_or(0)
+        .max(1) as f64;
     let hated: Vec<Element<Message>> = state
         .hated
         .iter()
@@ -475,7 +494,13 @@ fn hate_tab(state: &StatsState) -> Element<'_, Message> {
         })
         .collect();
 
-    let grudge_max = state.grudges.iter().map(|g| g.total).max().unwrap_or(0).max(1) as f64;
+    let grudge_max = state
+        .grudges
+        .iter()
+        .map(|g| g.total)
+        .max()
+        .unwrap_or(0)
+        .max(1) as f64;
     let grudges: Vec<Element<Message>> = state
         .grudges
         .iter()

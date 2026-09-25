@@ -37,8 +37,7 @@ pub fn window_icon() -> Option<iced::window::Icon> {
             }
 
             for (i, colour) in PIPS.iter().enumerate() {
-                let angle =
-                    -std::f32::consts::FRAC_PI_2 + (i as f32) * std::f32::consts::TAU / 5.0;
+                let angle = -std::f32::consts::FRAC_PI_2 + (i as f32) * std::f32::consts::TAU / 5.0;
                 let px = center + ring_radius * angle.cos();
                 let py = center + ring_radius * angle.sin();
                 let d = ((fx - px).powi(2) + (fy - py).powi(2)).sqrt();

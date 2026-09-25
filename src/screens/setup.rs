@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, row, scrollable, stack, text, text_input};
-use iced::{Alignment, ContentFit, Element, Length, Task};
+use iced::widget::{
+    button, column, container, image, mouse_area, row, scrollable, stack, text, text_input,
+};
+use iced::{Alignment, Element, Length, Task};
 use rusqlite::Connection;
 
 use crate::app::Message;
-use crate::db;
-use crate::layout::{self, SeatOrientation, TableLayout, TurnDirection};
 use crate::art;
+use crate::cards;
+use crate::db;
+use crate::keyboard::{self, Keyboard};
+use crate::layout::{self, SeatOrientation, TableLayout, TurnDirection};
 use crate::model::{
     ArtFraming, Commander, Player, SavedDeck, Seat, PARTNER, PRIMARY, STARTING_LIFE,
 };
@@ -17,6 +21,39 @@ use crate::style;
 
 pub const MIN_POD: usize = 2;
 pub const MAX_POD: usize = 8;
+
+/// The two text fields in setup. The app's own keyboard types into one at a
+/// time and has to be told which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    NewPlayer,
+    CommanderQuery,
+}
+
+impl Field {
+    fn id(self) -> text_input::Id {
+        text_input::Id::new(match self {
+            Field::NewPlayer => "setup.player",
+            Field::CommanderQuery => "setup.commander",
+        })
+    }
+
+    /// What this field's Enter key does, which is also what the keyboard's
+    /// submit key stands in for.
+    fn action(self) -> SetupMessage {
+        match self {
+            Field::NewPlayer => SetupMessage::CreatePlayer,
+            Field::CommanderQuery => SetupMessage::SearchCommanders,
+        }
+    }
+
+    fn action_label(self) -> &'static str {
+        match self {
+            Field::NewPlayer => "Add",
+            Field::CommanderQuery => "Search",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupStage {
@@ -47,6 +84,10 @@ pub struct SeatSetup {
     /// Commanders this specific player has piloted before - personal to
     /// them, never shared with the rest of the pod.
     pub commander_history: Vec<SavedDeck>,
+    /// What their linked Moxfield decks were scored at, by commander id.
+    /// Shown on the deck tiles so a pod can pick decks that match without
+    /// leaving the table.
+    pub deck_links: HashMap<i64, db::DeckLink>,
 }
 
 impl SeatSetup {
@@ -54,6 +95,38 @@ impl SeatSetup {
         match slot {
             PARTNER => self.partner.as_ref(),
             _ => self.commander.as_ref(),
+        }
+    }
+
+    /// What this seat's linked Moxfield deck was scored at, for the tile to
+    /// show. A deck with no link has nothing to say.
+    fn deck_meta(&self, deck: &SavedDeck) -> cards::DeckMeta {
+        self.deck_links
+            .get(&deck.commander.id)
+            .map(|link| cards::DeckMeta {
+                bracket: link.bracket,
+                salt: link.salt_total,
+            })
+            .unwrap_or_default()
+    }
+
+    fn selected_meta(&self) -> cards::DeckMeta {
+        // Scores describe the saved list, including its partner configuration.
+        let Some(commander) = &self.commander else {
+            return cards::DeckMeta::default();
+        };
+        let saved = self.commander_history.iter().find(|deck| {
+            deck.commander.id == commander.id
+                && deck.partner.as_ref().map(|p| p.id) == self.partner.as_ref().map(|p| p.id)
+        });
+        saved.map(|deck| self.deck_meta(deck)).unwrap_or_default()
+    }
+
+    fn commander_label(&self) -> String {
+        match (&self.commander, &self.partner) {
+            (Some(c), Some(p)) => format!("{} + {}", c.name, p.name),
+            (Some(c), None) => c.name.clone(),
+            _ => "Choose a commander".into(),
         }
     }
 
@@ -90,7 +163,10 @@ pub struct SetupState {
     /// the game can't start on an arbitrary default.
     pub first_seat: Option<usize>,
     pub turn_direction: TurnDirection,
+    /// The app's own keyboard, and which field it's typing into.
+    pub kb: Keyboard<Field>,
     pub error: Option<String>,
+    pub score_summary: Option<(String, Option<crate::salt::Analysis>)>,
 }
 
 impl SetupState {
@@ -113,7 +189,9 @@ impl SetupState {
             editing_slot: PRIMARY,
             first_seat: None,
             turn_direction: TurnDirection::Clockwise,
+            kb: Keyboard::default(),
             error: None,
+            score_summary: None,
         }
     }
 
@@ -142,11 +220,29 @@ impl SetupState {
         self.art_target = None;
         self.art_options.clear();
         self.framing = false;
+        self.kb.close();
+    }
+
+    /// The text in `field`, for the keyboard to type into.
+    fn field_text(&self, field: Field) -> &str {
+        match field {
+            Field::NewPlayer => &self.new_player_name,
+            Field::CommanderQuery => &self.commander_query,
+        }
+    }
+
+    fn set_field_text(&mut self, field: Field, value: String) {
+        match field {
+            Field::NewPlayer => self.new_player_name = value,
+            Field::CommanderQuery => self.commander_query = value,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum SetupMessage {
+    OpenScore(i64, i64, String),
+    CloseScore,
     ChoosePodSize(usize),
     BackToPodSizeChoice,
     ChooseLayout(TableLayout),
@@ -180,6 +276,11 @@ pub enum SetupMessage {
     ChooseFirstSeat(usize),
     RandomFirstSeat,
     SetTurnDirection(TurnDirection),
+    /// Drop a set of search results and go back to this player's own decks.
+    ShowSavedDecks,
+    /// A text field was tapped, so the keyboard comes up on it.
+    Focus(Field),
+    Key(keyboard::Key),
     StartGame,
 }
 
@@ -249,6 +350,15 @@ pub fn update(
 ) -> (Task<Message>, Option<Action>) {
     state.error = None;
     match message {
+        SetupMessage::OpenScore(player, commander, label) => {
+            state.score_summary = Some((label, db::deck_breakdown(conn, player, commander)));
+            state.kb.close();
+            (Task::none(), None)
+        }
+        SetupMessage::CloseScore => {
+            state.score_summary = None;
+            (Task::none(), None)
+        }
         SetupMessage::ChoosePodSize(n) => {
             state.pod_size = n;
             state.seats = vec![SeatSetup::default(); n];
@@ -315,7 +425,9 @@ pub fn update(
                 Ok(player) => {
                     state.seats[seat].player = Some(player);
                     state.seats[seat].commander_history = Vec::new();
+                    state.seats[seat].deck_links = HashMap::new();
                     state.new_player_name.clear();
+                    state.kb.close();
                 }
                 Err(e) => state.error = Some(format!("Couldn't create player: {e}")),
             }
@@ -330,14 +442,33 @@ pub fn update(
                 return (Task::none(), None);
             }
             let history = db::player_commander_history(conn, player.id).unwrap_or_default();
+            let links = db::deck_links(conn, player.id).unwrap_or_default();
+            // Their saved decks are about to be shown as pictures, so fetch
+            // them while they're reading the seat's name.
+            let art = Task::batch(
+                history
+                    .iter()
+                    .flat_map(|d| [Some(&d.commander), d.partner.as_ref()])
+                    .flatten()
+                    .filter_map(|c| c.portrait_url().map(str::to_string))
+                    .map(|url| {
+                        let key = url.clone();
+                        Task::perform(scryfall::fetch_image(url), move |res| {
+                            Message::ArtLoaded(key.clone(), res)
+                        })
+                    }),
+            );
             state.seats[seat].player = Some(player);
             state.seats[seat].commander_history = history;
-            (Task::none(), None)
+            state.seats[seat].deck_links = links;
+            state.kb.close();
+            (art, None)
         }
         SetupMessage::ClearSeatPlayer => {
             if let Some(seat) = state.editing_seat {
                 state.seats[seat].player = None;
                 state.seats[seat].commander_history.clear();
+                state.seats[seat].deck_links.clear();
             }
             (Task::none(), None)
         }
@@ -362,8 +493,22 @@ pub fn update(
             state.searching = false;
             match res {
                 Ok(list) => {
+                    // The card is what's being picked, so the pictures come
+                    // down with the names rather than on demand.
+                    let thumbs = Task::batch(
+                        list.iter()
+                            .take(cards::PREFETCH)
+                            .filter_map(|c| c.small_url.clone().or_else(|| c.image_url.clone()))
+                            .map(|url| {
+                                let key = url.clone();
+                                Task::perform(scryfall::fetch_image(url), move |res| {
+                                    Message::ArtLoaded(key.clone(), res)
+                                })
+                            }),
+                    );
                     state.commander_results = list;
                     state.error = None;
+                    return (thumbs, None);
                 }
                 Err(e) => {
                     state.cooldown.absorb(&e);
@@ -371,6 +516,29 @@ pub fn update(
                 }
             }
             (Task::none(), None)
+        }
+        SetupMessage::ShowSavedDecks => {
+            state.commander_results.clear();
+            state.commander_query.clear();
+            state.kb.close();
+            (Task::none(), None)
+        }
+        SetupMessage::Focus(field) => {
+            let value = state.field_text(field).to_string();
+            state.kb.open(field, &value);
+            (text_input::focus(field.id()), None)
+        }
+        SetupMessage::Key(key) => {
+            let Some(field) = state.kb.field() else {
+                return (Task::none(), None);
+            };
+            let mut value = state.field_text(field).to_string();
+            let outcome = state.kb.press(key, &mut value);
+            state.set_field_text(field, value);
+            match outcome {
+                keyboard::Outcome::Submit => update(state, conn, field.action()),
+                _ => (Task::none(), None),
+            }
         }
         SetupMessage::PickCommanderName(card) => {
             state.commander_results.clear();
@@ -635,7 +803,10 @@ pub fn update(
                         .with_partner(s.partner.clone())
                     })
                     .collect();
-                (Task::none(), Some(Action::StartGame(seats, layout, turn_order)))
+                (
+                    Task::none(),
+                    Some(Action::StartGame(seats, layout, turn_order)),
+                )
             } else {
                 state.error = Some("Every seat needs a player and a commander.".into());
                 (Task::none(), None)
@@ -649,6 +820,30 @@ pub fn view<'a>(
     players_cache: &'a [Player],
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
+    if let Some((label, analysis)) = &state.score_summary {
+        let body = match analysis {
+            Some(analysis) => crate::screens::breakdown::body(analysis),
+            None => empty_state(
+                "No saved summary",
+                "Link and analyze this deck in Players to see its breakdown.",
+            ),
+        };
+        return step_page(
+            step_header(
+                pane_eyebrow("DECK SUMMARY".into()),
+                label.clone(),
+                "Bracket and salt breakdown".into(),
+                vec![],
+            ),
+            body,
+            step_footer(
+                "Back",
+                Message::Setup(SetupMessage::CloseScore),
+                footer_hint("Return to your pod"),
+            ),
+            None,
+        );
+    }
     match state.stage {
         SetupStage::ChoosePodSize => pod_size_view(state),
         SetupStage::ChooseLayout => layout_choice_view(state),
@@ -694,8 +889,11 @@ const BACK_W: f32 = 260.0;
 const CTA_W: f32 = 460.0;
 const UTILITY_W: f32 = 220.0;
 const CARD_W: f32 = 320.0;
-const ART_W: f32 = 300.0;
-const ART_H: f32 = 220.0;
+/// One printing in the art gallery. Card-shaped, because a printing is a
+/// whole card and a box that isn't its shape would make the picture
+/// overflow - see the note in [`crate::cards`].
+const ART_W: f32 = 200.0;
+const ART_H: f32 = ART_W * 204.0 / 146.0;
 /// The table diagram on the layout step, at roughly the screen's own shape
 /// so the preview is a scale model rather than a squashed one.
 const PREVIEW_W: f32 = 300.0;
@@ -708,7 +906,11 @@ fn step_eyebrow<'a>(step: usize) -> Element<'a, Message> {
         .map(|n| {
             text("\u{2022}")
                 .size(style::T_HEADING)
-                .color(if n <= step { style::ACCENT_BRIGHT } else { style::SURFACE_3 })
+                .color(if n <= step {
+                    style::ACCENT_BRIGHT
+                } else {
+                    style::SURFACE_3
+                })
                 .into()
         })
         .collect::<Vec<Element<Message>>>())
@@ -746,7 +948,9 @@ fn step_header<'a>(
     let titles = column![
         eyebrow,
         text(title).size(style::T_TITLE).color(style::TEXT),
-        text(instruction).size(style::T_LABEL).color(style::TEXT_MUTED),
+        text(instruction)
+            .size(style::T_LABEL)
+            .color(style::TEXT_MUTED),
     ]
     .spacing(PAD_TIGHT);
 
@@ -787,7 +991,11 @@ fn step_footer<'a>(
 
 /// The one primary-styled button on a step. Passing `None` leaves it visibly
 /// disabled and puts the reason beside it, so a step never stalls silently.
-fn forward_action(label: &str, message: Option<Message>, blocked: &str) -> Element<'static, Message> {
+fn forward_action(
+    label: &str,
+    message: Option<Message>,
+    blocked: &str,
+) -> Element<'static, Message> {
     let enabled = message.is_some();
     let mut cta = style::cta_button(label.to_string(), style::T_LEAD)
         .width(Length::Fixed(CTA_W))
@@ -841,6 +1049,55 @@ fn step_page<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+// ---------------------------------------------------------------------------
+// Text entry
+//
+// There is no hardware keyboard on the table and iced 0.13 can't ask the
+// compositor for one, so a field here raises the app's own.
+// ---------------------------------------------------------------------------
+
+/// A text field that brings the keyboard up when it's tapped.
+///
+/// `text_input` captures the press that focuses it but lets the release go
+/// past, so the release is what the keyboard listens for. The field keeps
+/// its own caret, and a real keyboard still works alongside.
+fn keyed_field<'a>(
+    field: Field,
+    placeholder: &'a str,
+    value: &'a str,
+    on_input: fn(String) -> Message,
+) -> Element<'a, Message> {
+    mouse_area(
+        text_input(placeholder, value)
+            .id(field.id())
+            .size(style::T_SUBHEAD)
+            .padding(style::FIELD_PAD)
+            .style(style::input)
+            .on_input(on_input)
+            .on_submit(Message::Setup(field.action())),
+    )
+    .on_release(Message::Setup(SetupMessage::Focus(field)))
+    .into()
+}
+
+/// Puts the keyboard under a pane while one of its fields is being typed
+/// into. It takes its space from the pane rather than floating over it:
+/// what you're typing into is the thing you most need to keep seeing.
+fn with_keyboard<'a>(state: &SetupState, body: Element<'a, Message>) -> Element<'a, Message> {
+    let Some(field) = state.kb.field() else {
+        return body;
+    };
+    column![
+        container(body).height(Length::Fill),
+        keyboard::view(
+            &state.kb,
+            |key| Message::Setup(SetupMessage::Key(key)),
+            Some(field.action_label()),
+        ),
+    ]
+    .into()
 }
 
 fn error_banner(message: &str) -> Element<'static, Message> {
@@ -898,7 +1155,11 @@ fn selection_ring<'a>(
 fn choice_caption<'a>(selected: bool, chosen: &'a str, idle: &'a str) -> Element<'a, Message> {
     text(if selected { chosen } else { idle })
         .size(style::T_CAPTION)
-        .color(if selected { style::ACCENT_BRIGHT } else { style::TEXT_MUTED })
+        .color(if selected {
+            style::ACCENT_BRIGHT
+        } else {
+            style::TEXT_MUTED
+        })
         .into()
 }
 
@@ -1115,7 +1376,7 @@ fn seat_tile<'a>(
                         text(player.name.clone())
                             .size(style::T_SUBHEAD)
                             .color(style::TEXT),
-                        text(commander.name.clone())
+                        text(seat.commander_label())
                             .size(style::T_BODY)
                             .color(style::TEXT_MUTED),
                     ]
@@ -1146,14 +1407,15 @@ fn seat_tile<'a>(
         ),
     };
 
-    container(
+    container(stack![
         button(content)
             .padding(0)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(style::ghost)
             .on_press(Message::Setup(SetupMessage::EditSeat(index))),
-    )
+        score_overlay(seat),
+    ])
     .width(Length::Fill)
     .height(Length::Fill)
     .style(style::panel)
@@ -1216,11 +1478,7 @@ fn editor_overlay<'a>(
                 step_footer(
                     "Back to Grid",
                     Message::Setup(SetupMessage::BackToGrid),
-                    forward_action(
-                        "Done",
-                        Some(Message::Setup(SetupMessage::DoneFraming)),
-                        "",
-                    ),
+                    forward_action("Done", Some(Message::Setup(SetupMessage::DoneFraming)), ""),
                 ),
             )
         } else if let Some(target) = &state.art_target {
@@ -1264,7 +1522,7 @@ fn editor_overlay<'a>(
             (
                 title.to_string(),
                 "Tap one this player has run before, or search Scryfall by name.".to_string(),
-                commander_picker(state, &seat.commander_history),
+                commander_picker(state, seat, image_cache),
                 step_footer(
                     "Back to Grid",
                     Message::Setup(SetupMessage::BackToGrid),
@@ -1287,16 +1545,22 @@ fn editor_overlay<'a>(
             )
         };
 
-    step_page(
-        step_header(
-            pane_eyebrow(format!("STEP 3 OF {STEP_COUNT} \u{00b7} SEAT {}", seat_index + 1)),
-            title,
-            instruction,
-            Vec::new(),
+    with_keyboard(
+        state,
+        step_page(
+            step_header(
+                pane_eyebrow(format!(
+                    "STEP 3 OF {STEP_COUNT} \u{00b7} SEAT {}",
+                    seat_index + 1
+                )),
+                title,
+                instruction,
+                Vec::new(),
+            ),
+            body,
+            footer,
+            state.error.as_deref(),
         ),
-        body,
-        footer,
-        state.error.as_deref(),
     )
 }
 
@@ -1313,23 +1577,17 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
             "Everyone on file is already at this table. Type a new name below.",
         )
     } else {
-        scrollable(
-            row(available
+        cards::grid(
+            available
                 .into_iter()
                 .map(|p| {
-                    style::touch_button(&p.name, style::T_SUBHEAD)
-                        .width(Length::Fixed(CARD_W))
+                    style::name_tile(&p.name)
                         .style(style::secondary)
                         .on_press(Message::Setup(SetupMessage::PickExistingPlayer(p.clone())))
                         .into()
                 })
-                .collect::<Vec<Element<Message>>>())
-            .spacing(PAD)
-            .wrap(),
+                .collect(),
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
     };
 
     let has_name = !state.new_player_name.trim().is_empty();
@@ -1343,12 +1601,12 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
     column![
         list,
         row![
-            text_input("New player name", &state.new_player_name)
-                .size(style::T_SUBHEAD)
-                .padding(style::FIELD_PAD)
-                .style(style::input)
-                .on_input(|s| Message::Setup(SetupMessage::NewPlayerNameChanged(s)))
-                .on_submit(Message::Setup(SetupMessage::CreatePlayer)),
+            keyed_field(
+                Field::NewPlayer,
+                "New player name",
+                &state.new_player_name,
+                |s| Message::Setup(SetupMessage::NewPlayerNameChanged(s)),
+            ),
             add,
         ]
         .spacing(PAD)
@@ -1360,37 +1618,90 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
     .into()
 }
 
-fn commander_picker<'a>(state: &'a SetupState, history: &'a [SavedDeck]) -> Element<'a, Message> {
-    let history_block: Element<Message> = if history.is_empty() {
-        container(
-            text("No commanders on record for this player yet \u{2014} search below.")
-                .size(style::T_BODY)
-                .color(style::TEXT_MUTED),
+/// Picking this seat's commander: the decks this player already runs, then
+/// Scryfall for anything else.
+///
+/// Both are grids of cards, because a commander is a picture first. The old
+/// list of names put their whole deck list in a two-row strip you had to
+/// scroll inside another scroll, which meant reading ten labels to find the
+/// deck they play every week.
+fn commander_picker<'a>(
+    state: &'a SetupState,
+    seat: &'a SeatSetup,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let history = &seat.commander_history;
+    // Search results take the whole pane while they're up, rather than
+    // splitting it with the saved decks and leaving both cramped.
+    let showing_results = state.searching || !state.commander_results.is_empty();
+
+    let body: Element<Message> = if state.searching {
+        empty_state(
+            "Searching Scryfall\u{2026}",
+            "Looking for commanders whose name matches what you typed.",
         )
-        .padding(PAD)
-        .width(Length::Fill)
-        .center_x(Length::Fill)
-        .style(style::panel)
-        .into()
+    } else if !state.commander_results.is_empty() {
+        cards::grid(
+            state
+                .commander_results
+                .iter()
+                .map(|card| {
+                    cards::card_tile(
+                        card,
+                        image_cache,
+                        Message::Setup(SetupMessage::PickCommanderName(card.clone())),
+                    )
+                })
+                .collect(),
+        )
+    } else if state.cooldown.active() {
+        empty_state(
+            "Scryfall asked us to slow down",
+            "Search comes back as soon as the countdown on the button runs out.",
+        )
+    } else if history.is_empty() {
+        empty_state(
+            "Nothing on record for this player yet",
+            "Search for their commander by name and it'll be waiting here next time.",
+        )
     } else {
-        scrollable(
-            row(history
+        cards::grid(
+            history
                 .iter()
                 .map(|deck| {
-                    style::touch_button(deck.label(), style::T_LABEL)
-                        .width(Length::Fixed(CARD_W))
-                        .style(style::secondary)
-                        .on_press(Message::Setup(SetupMessage::PickHistoryCommander(
-                            deck.clone(),
-                        )))
-                        .into()
+                    cards::deck_tile(
+                        deck,
+                        false,
+                        image_cache,
+                        seat.deck_meta(deck),
+                        Message::Setup(SetupMessage::PickHistoryCommander(deck.clone())),
+                    )
                 })
-                .collect::<Vec<Element<Message>>>())
-            .spacing(PAD_HALF)
-            .wrap(),
+                .collect(),
         )
-        .width(Length::Fill)
-        .height(Length::Fixed(style::TOUCH_H * 2.0 + PAD_HALF))
+    };
+
+    let caption: Element<Message> = if showing_results {
+        row![
+            text("Results from Scryfall")
+                .size(style::T_CAPTION)
+                .color(style::TEXT_MUTED)
+                .width(Length::Fill),
+            style::touch_button("Their Decks", style::T_LABEL)
+                .width(Length::Fixed(UTILITY_W))
+                .style(style::ghost)
+                .on_press(Message::Setup(SetupMessage::ShowSavedDecks)),
+        ]
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        text(match history.len() {
+            0 => "No saved decks".to_string(),
+            1 => "1 deck this player runs".to_string(),
+            n => format!("{n} decks this player runs"),
+        })
+        .size(style::T_CAPTION)
+        .color(style::TEXT_MUTED)
         .into()
     };
 
@@ -1405,90 +1716,24 @@ fn commander_picker<'a>(state: &'a SetupState, history: &'a [SavedDeck]) -> Elem
     let mut search_button = style::touch_button(search_label, style::T_ACTION)
         .width(Length::Fixed(UTILITY_W))
         .style(style::primary);
-    if !state.cooldown.active() && !state.searching {
+    if !state.cooldown.active() && !state.searching && !state.commander_query.trim().is_empty() {
         search_button = search_button.on_press(Message::Setup(SetupMessage::SearchCommanders));
     }
 
-    // Every result is the same height with its name and colours on the same
-    // two rails, so the list reads as one column of targets rather than a
-    // ragged stack.
-    let results: Element<Message> = if state.cooldown.active() {
-        empty_state(
-            "Scryfall asked us to slow down",
-            "Search comes back as soon as the countdown on the button runs out.",
-        )
-    } else if state.searching {
-        empty_state(
-            "Searching Scryfall\u{2026}",
-            "Looking for commanders whose name matches what you typed.",
-        )
-    } else if state.commander_results.is_empty() {
-        empty_state(
-            "No results yet",
-            "Type part of a commander's name and tap Search.",
-        )
-    } else {
-        scrollable(
-            column(
-                state
-                    .commander_results
-                    .iter()
-                    .map(|c| {
-                        button(
-                            container(
-                                row![
-                                    text(c.name.clone())
-                                        .size(style::T_ACTION)
-                                        .color(style::TEXT),
-                                    iced::widget::horizontal_space(),
-                                    container(
-                                        text(c.color_identity.clone())
-                                            .size(style::T_CAPTION)
-                                            .color(style::TEXT_MUTED),
-                                    )
-                                    .padding([PAD_TIGHT, PAD_HALF])
-                                    .style(style::badge),
-                                ]
-                                .spacing(PAD)
-                                .align_y(Alignment::Center),
-                            )
-                            .padding([0.0, PAD])
-                            .center_y(Length::Fill),
-                        )
-                        .padding(0)
-                        .height(Length::Fixed(style::TOUCH_H))
-                        .width(Length::Fill)
-                        .style(style::secondary)
-                        .on_press(Message::Setup(SetupMessage::PickCommanderName(c.clone())))
-                        .into()
-                    })
-                    .collect::<Vec<Element<Message>>>(),
-            )
-            .spacing(PAD_HALF)
-            .width(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    };
-
     column![
-        text("This player's commanders")
-            .size(style::T_CAPTION)
-            .color(style::TEXT_MUTED),
-        history_block,
         row![
-            text_input("Commander name", &state.commander_query)
-                .size(style::T_SUBHEAD)
-                .padding(style::FIELD_PAD)
-                .style(style::input)
-                .on_input(|s| Message::Setup(SetupMessage::CommanderQueryChanged(s)))
-                .on_submit(Message::Setup(SetupMessage::SearchCommanders)),
+            keyed_field(
+                Field::CommanderQuery,
+                "Commander name",
+                &state.commander_query,
+                |s| Message::Setup(SetupMessage::CommanderQueryChanged(s)),
+            ),
             search_button,
         ]
         .spacing(PAD)
         .align_y(Alignment::Center),
-        results,
+        caption,
+        body,
     ]
     .spacing(PAD)
     .width(Length::Fill)
@@ -1521,31 +1766,21 @@ fn art_gallery<'a>(
         .art_options
         .iter()
         .map(|card| {
-            let thumb: Element<Message> = match card
-                .small_url
-                .as_deref()
-                .and_then(|u| image_cache.get(u))
-            {
-                Some(handle) => container(
-                    image(handle.clone())
-                        .width(Length::Fixed(ART_W))
-                        .height(Length::Fixed(ART_H))
-                        .content_fit(ContentFit::Cover),
-                )
-                .clip(true)
-                .into(),
-                None => container(
-                    text("Loading\u{2026}")
-                        .size(style::T_CAPTION)
-                        .color(style::TEXT_MUTED),
-                )
-                .width(Length::Fixed(ART_W))
-                .height(Length::Fixed(ART_H))
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .style(style::panel)
-                .into(),
-            };
+            let thumb: Element<Message> =
+                match card.small_url.as_deref().and_then(|u| image_cache.get(u)) {
+                    Some(handle) => cards::card_picture(handle, ART_W),
+                    None => container(
+                        text("Loading\u{2026}")
+                            .size(style::T_CAPTION)
+                            .color(style::TEXT_MUTED),
+                    )
+                    .width(Length::Fixed(ART_W))
+                    .height(Length::Fixed(ART_H))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .style(style::panel)
+                    .into(),
+                };
 
             button(
                 column![
@@ -1571,10 +1806,7 @@ fn art_gallery<'a>(
         })
         .collect();
 
-    scrollable(row(tiles).spacing(PAD).wrap())
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    cards::grid(tiles)
 }
 
 /// Zoom and anchor the art so the part that matters ends up visible in the
@@ -1615,9 +1847,11 @@ fn framing_editor<'a>(
     let preview_h: f32 = 520.0;
     let preview_w = (preview_h * aspect).clamp(320.0, 1100.0);
 
-    let surface = container(panned_image::editable(handle, commander.framing, |framing| {
-        Message::Setup(SetupMessage::FramingChanged(framing))
-    }))
+    let surface = container(panned_image::editable(
+        handle,
+        commander.framing,
+        |framing| Message::Setup(SetupMessage::FramingChanged(framing)),
+    ))
     .width(Length::Fixed(preview_w))
     .height(Length::Fixed(preview_h))
     .clip(true)
@@ -1633,7 +1867,9 @@ fn framing_editor<'a>(
     };
 
     column![
-        container(surface).width(Length::Fill).center_x(Length::Fill),
+        container(surface)
+            .width(Length::Fill)
+            .center_x(Length::Fill),
         text(layout_note)
             .size(style::T_CAPTION)
             .color(style::TEXT_MUTED),
@@ -1733,7 +1969,7 @@ fn seat_summary<'a>(
     };
 
     column![
-        container(portrait)
+        container(stack![portrait, score_overlay(seat)])
             .width(Length::Fill)
             .height(Length::FillPortion(4))
             .clip(true),
@@ -1778,10 +2014,7 @@ fn turn_order_view<'a>(
                 image_cache,
             )
         }),
-        None => empty_state(
-            "No table yet",
-            "Go back and pick how the pod is sitting.",
-        ),
+        None => empty_state("No table yet", "Go back and pick how the pod is sitting."),
     };
 
     let direction_buttons = row([TurnDirection::Clockwise, TurnDirection::CounterClockwise]
@@ -1879,6 +2112,29 @@ fn turn_order_view<'a>(
     )
 }
 
+/// Reuse the saved-deck badges without taking space away from the art.
+fn score_overlay(seat: &SeatSetup) -> Element<'_, Message> {
+    let (Some(player), Some(commander)) = (&seat.player, &seat.commander) else {
+        return iced::widget::horizontal_space()
+            .width(Length::Shrink)
+            .into();
+    };
+    container(cards::score_button(
+        seat.selected_meta(),
+        Message::Setup(SetupMessage::OpenScore(
+            player.id,
+            commander.id,
+            seat.commander_label(),
+        )),
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::End)
+    .align_y(Alignment::Start)
+    .padding(PAD_HALF)
+    .into()
+}
+
 /// A seat on the turn-order screen: its art, the player's name, and the
 /// position it plays in. The position sits in the middle of the tile in the
 /// same frosted chip the life counter uses in-game, so "First Player" lands
@@ -1963,7 +2219,7 @@ fn turn_order_tile<'a>(
         .style(style::ghost)
         .on_press(Message::Setup(SetupMessage::ChooseFirstSeat(index)));
 
-    container(tile)
+    container(stack![tile, score_overlay(seat)])
         .width(Length::Fill)
         .height(Length::Fill)
         .style(if position == Some(1) {
@@ -1987,4 +2243,64 @@ fn center_chip<'a>(
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .into()
+}
+
+#[cfg(test)]
+mod comparison_tests {
+    use super::*;
+
+    fn commander(id: i64) -> Commander {
+        Commander {
+            id,
+            oracle_id: id.to_string(),
+            name: format!("Commander {id}"),
+            image_url: None,
+            art_crop_url: None,
+            color_identity: String::new(),
+            framing: ArtFraming::default(),
+        }
+    }
+
+    #[test]
+    fn scores_follow_the_saved_pair_and_clear_when_partner_changes() {
+        let deck = SavedDeck {
+            commander: commander(1),
+            partner: Some(commander(2)),
+        };
+        let mut seat = SeatSetup {
+            commander: Some(deck.commander.clone()),
+            partner: deck.partner.clone(),
+            commander_history: vec![deck],
+            ..SeatSetup::default()
+        };
+        seat.deck_links.insert(
+            1,
+            db::DeckLink {
+                public_id: "deck".into(),
+                url: String::new(),
+                deck_name: "Deck".into(),
+                bracket: Some(3),
+                salt_total: Some(123.4),
+            },
+        );
+        assert_eq!(
+            seat.selected_meta(),
+            cards::DeckMeta {
+                bracket: Some(3),
+                salt: Some(123.4)
+            }
+        );
+        seat.partner = Some(commander(3));
+        assert_eq!(seat.selected_meta(), cards::DeckMeta::default());
+        seat.partner = None;
+        assert_eq!(seat.selected_meta(), cards::DeckMeta::default());
+    }
+
+    #[test]
+    fn missing_scores_are_not_presented_as_zero() {
+        assert_eq!(
+            SeatSetup::default().selected_meta(),
+            cards::DeckMeta::default()
+        );
+    }
 }

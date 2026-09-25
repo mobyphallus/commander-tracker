@@ -221,19 +221,26 @@ where
             Event::Touch(touch_event) => {
                 match touch_event {
                     touch::Event::FingerPressed { id, position } => {
+                        if !bounds.contains(position) {
+                            return event::Status::Ignored;
+                        }
                         state.touches.push((id, position));
                         state.pinch = None;
                         state.drag_from = (state.touches.len() == 1).then_some(position);
                     }
                     touch::Event::FingerLifted { id, .. } | touch::Event::FingerLost { id, .. } => {
+                        if !state.touches.iter().any(|(f, _)| *f == id) {
+                            return event::Status::Ignored;
+                        }
                         state.touches.retain(|(f, _)| *f != id);
                         state.pinch = None;
-                        state.drag_from = None;
+                        state.drag_from = state.touches.first().map(|(_, p)| *p);
                     }
                     touch::Event::FingerMoved { id, position } => {
-                        if let Some(slot) = state.touches.iter_mut().find(|(f, _)| *f == id) {
-                            slot.1 = position;
-                        }
+                        let Some(slot) = state.touches.iter_mut().find(|(f, _)| *f == id) else {
+                            return event::Status::Ignored;
+                        };
+                        slot.1 = position;
 
                         // Two fingers pinch to zoom, measured against the
                         // separation when the second finger landed, so the

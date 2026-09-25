@@ -168,7 +168,12 @@ impl TableLayout {
             .iter()
             .filter_map(|col| col.first().copied())
             .collect();
-        ring.extend(self.columns.iter().rev().filter_map(|col| col.get(1).copied()));
+        ring.extend(
+            self.columns
+                .iter()
+                .rev()
+                .filter_map(|col| col.get(1).copied()),
+        );
         ring
     }
 
@@ -232,10 +237,7 @@ pub fn options_for(pod_size: usize) -> Vec<TableLayout> {
         ],
         6 => vec![
             TableLayout::new("Three Pairs", vec![vec![0, 1], vec![2, 3], vec![4, 5]]),
-            TableLayout::new(
-                "Two Heads",
-                vec![vec![0], vec![1, 2], vec![3, 4], vec![5]],
-            ),
+            TableLayout::new("Two Heads", vec![vec![0], vec![1, 2], vec![3, 4], vec![5]]),
         ],
         7 => vec![
             TableLayout::new(
@@ -311,10 +313,7 @@ mod tests {
         let two_heads = TableLayout::new("Two Heads", vec![vec![0], vec![1, 2], vec![3]]);
         assert_eq!(two_heads.ring_order(), vec![0, 1, 3, 2]);
 
-        let six = TableLayout::new(
-            "Two Heads",
-            vec![vec![0], vec![1, 2], vec![3, 4], vec![5]],
-        );
+        let six = TableLayout::new("Two Heads", vec![vec![0], vec![1, 2], vec![3, 4], vec![5]]);
         let ring = six.ring_order();
         assert_eq!(ring, vec![0, 1, 3, 5, 4, 2]);
         assert_eq!(ring.len(), 6);

@@ -8,13 +8,14 @@ use rusqlite::Connection;
 
 use crate::app::Message;
 use crate::art;
+use crate::cards;
 use crate::db;
 use crate::layout::{self, SeatOrientation, TableLayout};
-use crate::rotated::{self, Line};
 use crate::model::{
-    Elimination, FinishedGame, HateKind, KillEvent, OutCause, Seat, LETHAL_COMMANDER_DAMAGE,
-    LETHAL_POISON, PARTNER, PRIMARY, WinReason,
+    Elimination, FinishedGame, HateKind, KillEvent, OutCause, Seat, WinReason,
+    LETHAL_COMMANDER_DAMAGE, LETHAL_POISON, PARTNER, PRIMARY,
 };
+use crate::rotated::{self, Line};
 use crate::style;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,10 +132,7 @@ impl GameState {
     /// to what that seat actually has so a stale PARTNER can never point at
     /// a commander that isn't there.
     pub fn damage_slot(&self, seat: usize) -> usize {
-        let has_partner = self
-            .seats
-            .get(seat)
-            .is_some_and(|s| s.partner.is_some());
+        let has_partner = self.seats.get(seat).is_some_and(|s| s.partner.is_some());
         match self.damage_slot.get(seat).copied().unwrap_or(PRIMARY) {
             PARTNER if has_partner => PARTNER,
             _ => PRIMARY,
@@ -760,7 +758,9 @@ pub fn view<'a>(
     .spacing(16)
     .align_y(iced::Alignment::Center);
 
-    let board = layout::render_table(&state.table_layout, |idx| seat_panel(idx, state, image_cache));
+    let board = layout::render_table(&state.table_layout, |idx| {
+        seat_panel(idx, state, image_cache)
+    });
 
     let board_with_timer = stack![
         board,
@@ -808,9 +808,13 @@ fn split_counter<'a>(
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
         )
-        .on_press(Message::Game(GameMessage::CounterPressStart(seat, target, sign)))
+        .on_press(Message::Game(GameMessage::CounterPressStart(
+            seat, target, sign,
+        )))
         .on_move(move |point| {
-            Message::Game(GameMessage::CounterPressMove(target, sign, point.x, point.y))
+            Message::Game(GameMessage::CounterPressMove(
+                target, sign, point.x, point.y,
+            ))
         })
         .on_release(Message::Game(GameMessage::CounterPressEnd(target, sign)))
     };
@@ -851,7 +855,10 @@ fn split_counter<'a>(
         facing,
     );
 
-    stack![zones, number].width(Length::Fill).height(Length::Fill).into()
+    stack![zones, number]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// What a seat's counter currently shows: the value, what it edits, and a
@@ -869,7 +876,9 @@ fn active_counter(index: usize, state: &GameState) -> (i32, CounterTarget, Strin
             return (
                 amount,
                 CounterTarget::Damage(focus, index, slot),
-                format!("{source_name} \u{00b7} to {target_name} (lethal at {LETHAL_COMMANDER_DAMAGE})"),
+                format!(
+                    "{source_name} \u{00b7} to {target_name} (lethal at {LETHAL_COMMANDER_DAMAGE})"
+                ),
             );
         }
     }
@@ -901,7 +910,12 @@ fn action_menu(index: usize, seat: &Seat, facing: SeatOrientation) -> Element<'_
                 Message::Game(GameMessage::SwitchTab(index, SeatTab::Poison)),
             ),
             (
-                if seat.eliminated { "Back In" } else { "Mark Out" }.to_string(),
+                if seat.eliminated {
+                    "Back In"
+                } else {
+                    "Mark Out"
+                }
+                .to_string(),
                 Message::Game(GameMessage::ToggleEliminated(index)),
             ),
             (
@@ -991,7 +1005,10 @@ fn seat_panel<'a>(
         rotated::edge_button(
             vec![
                 Line::new("END TURN", style::T_LABEL as f32),
-                Line::new(format!("Turn {}", state.turn_number), style::T_CAPTION as f32),
+                Line::new(
+                    format!("Turn {}", state.turn_number),
+                    style::T_CAPTION as f32,
+                ),
             ],
             facing,
             rotated::EdgeAlign::End,
@@ -1000,26 +1017,55 @@ fn seat_panel<'a>(
         )
     });
 
-    // While logging commander damage against someone else, a seat running a
-    // partner pair has to say WHICH commander connected - each tracks its
-    // own 21. Single-commander seats never see this.
-    let partner_picker: Option<Element<Message>> = match (state.damage_focus, &seat.partner) {
-        (Some(focus), Some(partner)) if focus != index => {
+    // While commander damage is being logged against someone else, a seat
+    // running a partner pair has to say WHICH commander connected - each
+    // tracks its own 21. Single-commander seats never see this.
+    //
+    // The two chips sit at either hand on the player's own edge, turned to
+    // face them, for the same reason everything else on a tile does. They
+    // used to be a plain row pinned to the bottom of the tile in *screen*
+    // space, which for every seat along the top of the table put them
+    // straight underneath the Done button floating dead centre of the
+    // board. The player's own edge is the one part of a tile that can never
+    // reach the middle of the table.
+    let damage_source = state
+        .damage_focus
+        .filter(|focus| *focus != index && seat.partner.is_some());
+
+    let partner_chips: Vec<Element<Message>> = match damage_source {
+        Some(focus) => {
             let selected = state.damage_slot(index);
-            Some(
-                container(
-                    row![
-                        damage_slot_button(index, PRIMARY, &seat.commander.name, selected),
-                        damage_slot_button(index, PARTNER, &partner.name, selected),
-                    ]
-                    .spacing(10),
+            [
+                (PRIMARY, rotated::EdgeAlign::Start),
+                (PARTNER, rotated::EdgeAlign::End),
+            ]
+            .into_iter()
+            .map(|(slot, align)| {
+                // The short name is what people say out loud, and two of
+                // them on one edge is what makes swapping a glance rather
+                // than a read. The running total under each says which of
+                // the pair is actually close to lethal.
+                let commander = seat.commander_in(slot);
+                let dealt = state.seats[focus].damage_from(index, slot);
+                let paint = if slot == selected {
+                    style::accent_chip_paint()
+                } else {
+                    style::glass_paint()
+                };
+                rotated::edge_button(
+                    vec![
+                        Line::new(cards::first_word(&commander.name), style::T_LABEL as f32),
+                        Line::new(format!("{dealt} dealt"), style::T_CAPTION as f32),
+                    ],
+                    facing,
+                    align,
+                    paint,
+                    Message::Game(GameMessage::SelectDamageSlot(index, slot)),
                 )
-                .padding([0, 12])
-                .width(Length::Fill)
-                .into(),
-            )
+            })
+            .collect()
         }
-        _ => None,
+        None => Vec::new(),
     };
 
     let card: Element<Message> = if state.action_menu_for == Some(index) {
@@ -1034,22 +1080,20 @@ fn seat_panel<'a>(
         // The chips float above the counter zones so they capture their own
         // taps, and each one only claims the rectangle it actually draws -
         // everywhere else the tap falls straight through to the counter.
-        let mut card = stack![
-            art,
-            split_counter(index, value, target, facing),
-            caption,
-            hate_chip
-        ];
-        if let Some(end_turn) = end_turn_chip {
-            card = card.push(end_turn);
-        }
-        if let Some(picker) = partner_picker {
-            card = card.push(
-                column![iced::widget::vertical_space(), picker]
-                    .spacing(8)
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-            );
+        let mut card = stack![art, split_counter(index, value, target, facing), caption];
+        if partner_chips.is_empty() {
+            card = card.push(hate_chip);
+            if let Some(end_turn) = end_turn_chip {
+                card = card.push(end_turn);
+            }
+        } else {
+            // The pair takes both ends of the edge, so hate and end-turn
+            // stand down for as long as the damage is being logged. Neither
+            // is what you reached for mid-count, and three chips a side is
+            // how a long commander name ends up under its neighbour.
+            for chip in partner_chips {
+                card = card.push(chip);
+            }
         }
         card.into()
     };
@@ -1084,7 +1128,8 @@ fn eliminated_tile<'a>(
             text(seat.player.name.clone()).size(style::T_SUBHEAD),
             text(seat.commander.name.clone()).size(style::T_BODY),
             text(out_line.unwrap_or_else(|| "out".to_string())).size(style::T_BODY),
-            text(format!("Final: {} life, {} poison", seat.life, seat.poison)).size(style::T_CAPTION),
+            text(format!("Final: {} life, {} poison", seat.life, seat.poison))
+                .size(style::T_CAPTION),
             style::touch_button("Back In", style::T_ACTION)
                 .width(Length::Fixed(220.0))
                 .style(style::secondary)
@@ -1296,7 +1341,8 @@ fn declare_winner_view(state: &GameState, winner: usize) -> Element<'_, Message>
     )
     .spacing(12);
 
-    let mut confirm = style::cta_button("Confirm & Save", style::T_SUBHEAD).width(Length::Fixed(420.0));
+    let mut confirm =
+        style::cta_button("Confirm & Save", style::T_SUBHEAD).width(Length::Fixed(420.0));
     if state.pending_reason.is_some() {
         confirm = confirm
             .style(style::success)
@@ -1328,26 +1374,6 @@ fn declare_winner_view(state: &GameState, winner: usize) -> Element<'_, Message>
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
-}
-
-/// One half of the partner picker shown on a seat's tile while commander
-/// damage is being logged against someone else.
-fn damage_slot_button<'a>(
-    seat: usize,
-    slot: usize,
-    name: &str,
-    selected: usize,
-) -> Element<'a, Message> {
-    let style_fn: fn(&iced::Theme, button::Status) -> button::Style = if slot == selected {
-        style::primary
-    } else {
-        style::glass_button
-    };
-    style::touch_button(name.to_string(), 18)
-        .width(Length::Fill)
-        .style(style_fn)
-        .on_press(Message::Game(GameMessage::SelectDamageSlot(seat, slot)))
-        .into()
 }
 
 #[cfg(test)]
