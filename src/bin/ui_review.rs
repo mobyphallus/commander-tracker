@@ -48,6 +48,7 @@ struct Review {
     storage: storage::StorageState,
     setup: setup::SetupState,
     players: Vec<model::Player>,
+    decks: Vec<model::SavedDeck>,
     images: cards::Images,
     page: usize,
 }
@@ -72,6 +73,9 @@ const PAGES: &[&str] = &[
     "restore-confirm",
     "rematch",
     "partner-damage",
+    "game-board",
+    "game-paused",
+    "score-badges",
 ];
 impl Review {
     fn new() -> (Self, Task<Msg>) {
@@ -140,7 +144,16 @@ impl Review {
         );
         let images = cards::Images::new();
         let setup = setup::SetupState::rematch(&game, &conn);
+        let decks = game
+            .seats
+            .iter()
+            .map(|seat| model::SavedDeck {
+                commander: seat.commander.clone(),
+                partner: seat.partner.clone(),
+            })
+            .collect();
         let mut review = Self {
+            decks,
             home: home::HomeState::load(&conn),
             history: history::HistoryState::load(&conn),
             stats: stats::StatsState::load(&conn),
@@ -150,7 +163,7 @@ impl Review {
             setup,
             players,
             images,
-            page: review_size_index() * PAGES.len(),
+            page: review_size_index() * PAGES.len() + review_start_page(),
         };
         review.configure();
         (review, Self::later())
@@ -164,6 +177,9 @@ impl Review {
     fn configure(&mut self) {
         let p = self.page % PAGES.len();
         self.game.error = None;
+        self.game.paused = p == 15;
+        self.game.game_seconds = 3725;
+        self.game.turn_seconds = 83;
         let _ = game::update(
             &mut self.game,
             &mut self.conn,
@@ -316,8 +332,30 @@ impl Review {
         let p = self.page % PAGES.len();
         let view = match p {
             0 | 1 => home::view(&self.home, &self.players),
-            2..=5 | 13 => game::view(&self.game, &self.images),
+            2..=5 | 13..=15 => game::view(&self.game, &self.images),
             6..=9 => history::view(&self.history),
+            16 => iced::widget::container(cards::grid(
+                self.decks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, deck)| {
+                        cards::deck_tile(
+                            deck,
+                            i == 0,
+                            &self.images,
+                            cards::DeckMeta {
+                                bracket: Some(i as u8 + 2),
+                                salt: Some([0., 82., 247., 1234.][i]),
+                            },
+                            app::Message::GoHome,
+                            app::Message::GoHome,
+                            320.,
+                        )
+                    })
+                    .collect(),
+            ))
+            .padding(24)
+            .into(),
             10 => stats::view(&self.stats, &self.images),
             11 => storage::view(&self.storage),
             _ => setup::view(&self.setup, &self.players, &self.images),
@@ -327,6 +365,14 @@ impl Review {
             .height(review_size().height)
             .into()
     }
+}
+fn review_start_page() -> usize {
+    let page = std::env::args()
+        .nth(2)
+        .map(|s| s.parse::<usize>().expect("page must be an integer"))
+        .unwrap_or(0);
+    assert!(page < PAGES.len(), "review page out of range");
+    page
 }
 fn review_size_index() -> usize {
     std::env::args()
@@ -349,6 +395,7 @@ fn main() -> iced::Result {
         Review::view,
     )
     .theme(|_| style::app_theme())
+    .antialiasing(true)
     // Fit the portrait review surface on a landscape desktop. The fixed container
     // above still lays out at the requested logical dimensions.
     .scale_factor(|_| 0.5)

@@ -329,11 +329,16 @@ pub fn score_button<'a, Message: Clone + 'a>(
             .width(Length::Shrink)
             .into();
     }
-    let mut scores = row![].spacing(style::GAP_SM).align_y(Alignment::Center);
+    let mut scores = row![].spacing(style::GAP).align_y(Alignment::Center);
     if let Some(bracket) = meta.bracket {
         scores = scores.push(
             column![
-                text(bracket.to_string()).size(style::T_LABEL),
+                row![
+                    crate::icon::view(crate::icon::Glyph::Bracket, 24., style::ACCENT_BRIGHT),
+                    text(bracket.to_string()).size(style::T_ACTION)
+                ]
+                .spacing(style::GAP_XS)
+                .align_y(Alignment::Center),
                 text("BRACKET").size(style::T_MICRO)
             ]
             .align_x(Alignment::Center),
@@ -342,7 +347,12 @@ pub fn score_button<'a, Message: Clone + 'a>(
     if let Some(salt) = meta.salt {
         scores = scores.push(
             column![
-                text(format!("{salt:.0}")).size(style::T_LABEL),
+                row![
+                    crate::icon::view(crate::icon::Glyph::Salt, 24., style::TEXT_MUTED),
+                    text(format!("{salt:.0}")).size(style::T_ACTION)
+                ]
+                .spacing(style::GAP_XS)
+                .align_y(Alignment::Center),
                 text("SALT").size(style::T_MICRO)
             ]
             .align_x(Alignment::Center),

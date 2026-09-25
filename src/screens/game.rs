@@ -1,3 +1,6 @@
+#[path = "game_center.rs"]
+pub(crate) mod center;
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -791,19 +794,6 @@ fn format_duration(total_seconds: u64) -> String {
     format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
 }
 
-/// A clock in the center control, with a stable label width.
-fn clock_row<'a>(label: &str, value: String, size: u16) -> Element<'a, Message> {
-    row![
-        text(label.to_string())
-            .size(style::T_MICRO)
-            .width(Length::Fixed(96.0)),
-        text(value).size(size),
-    ]
-    .spacing(10)
-    .align_y(iced::Alignment::Center)
-    .into()
-}
-
 /// Global controls live away from the counters, behind the central timer.
 fn game_menu_view(state: &GameState) -> Element<'_, Message> {
     dialog(
@@ -981,63 +971,9 @@ fn board_view<'a>(
     image_cache: &'a HashMap<String, image::Handle>,
     size: iced::Size,
 ) -> Element<'a, Message> {
-    let control_size = if state.damage_focus.is_some() {
-        iced::Size::new(240.0, 136.0)
-    } else {
-        iced::Size::new(200.0, 112.0)
-    };
-    let controls: Element<Message> = if let Some(focus) = state.damage_focus {
-        button(
-            column![
-                text("Commander damage").size(style::T_LABEL),
-                row![
-                    crate::icon::view(Glyph::Check, 24., style::TEXT),
-                    text("Done").size(style::T_ACTION)
-                ]
-                .spacing(style::GAP_SM)
-                .align_y(iced::Alignment::Center),
-                container(
-                    text(format!("To {}", state.seats[focus].player.name)).size(style::T_CAPTION)
-                )
-                .height(24)
-                .clip(true),
-            ]
-            .spacing(style::GAP_XS)
-            .align_x(iced::Alignment::Center),
-        )
-        .padding(style::GAP)
-        .width(control_size.width)
-        .height(control_size.height)
-        .style(style::primary)
-        .on_press(Message::Game(GameMessage::EndDamageFocus))
-        .into()
-    } else {
-        button(
-            column![
-                clock_row("GAME", format_duration(state.game_seconds), style::T_LABEL),
-                clock_row(
-                    &format!("TURN {}", state.turn_number),
-                    format_duration(state.turn_seconds),
-                    style::T_LABEL
-                ),
-                text(if state.paused {
-                    "Paused · Game menu"
-                } else {
-                    "Game menu"
-                })
-                .size(style::T_CAPTION)
-                .color(style::TEXT_MUTED),
-            ]
-            .spacing(style::GAP_XS)
-            .align_x(iced::Alignment::Center),
-        )
-        .padding([style::GAP_SM, style::GAP])
-        .width(control_size.width)
-        .height(control_size.height)
-        .style(style::score_button)
-        .on_press(Message::Game(GameMessage::OpenGameMenu))
-        .into()
-    };
+    let diameter = center::diameter(size);
+    let control_size = iced::Size::new(diameter, diameter);
+    let controls = center::view(state, diameter);
     let board_size = iced::Size::new((size.width - 32.0).max(0.0), (size.height - 32.0).max(0.0));
     let board = layout::render_table(&state.table_layout, |idx| {
         let tile = state.table_layout.seat_bounds(idx, board_size);
@@ -1285,7 +1221,7 @@ fn seat_panel<'a>(
     if let Some(partner) = &seat.partner {
         identity.push_str(&partner.color_identity);
     }
-    let mut caption_lines = vec![Line::new(seat.player.name.clone(), style::T_ACTION as f32)];
+    let mut caption_lines = vec![Line::new(seat.player.name.clone(), style::T_PLAYER_NAME as f32)];
     if !subtitle.is_empty() {
         caption_lines.push(Line::new(subtitle, style::T_CAPTION as f32).secondary());
     }

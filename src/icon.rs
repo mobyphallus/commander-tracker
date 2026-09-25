@@ -96,6 +96,8 @@ pub enum Glyph {
     Poison,
     Shield,
     Trophy,
+    Bracket,
+    Salt,
     Rotate(bool),
     Shuffle,
     Mana(char),
@@ -163,6 +165,40 @@ impl<Msg> canvas::Program<Msg> for Symbol {
 /// Draw into an existing canvas, including player-facing controls.
 pub fn draw(f: &mut Frame, glyph: Glyph, c: Color) {
     match glyph {
+        Glyph::Bracket => {
+            // Three rising tiers, distinct from the statistics bar chart.
+            line(
+                f,
+                &[(3., 7.), (12., 3.), (21., 7.), (12., 11.), (3., 7.)],
+                c,
+            );
+            line(f, &[(3., 12.), (12., 16.), (21., 12.)], c);
+            line(f, &[(3., 17.), (12., 21.), (21., 17.)], c);
+        }
+        Glyph::Salt => {
+            // A salt shaker, including its perforated cap and salt grains.
+            line(
+                f,
+                &[(8., 8.), (6., 20.), (18., 20.), (16., 8.), (8., 8.)],
+                c,
+            );
+            line(
+                f,
+                &[
+                    (8., 8.),
+                    (8., 5.),
+                    (10., 3.),
+                    (14., 3.),
+                    (16., 5.),
+                    (16., 8.),
+                ],
+                c,
+            );
+            line(f, &[(8., 5.), (16., 5.)], c);
+            for (x, y) in [(10., 13.), (14., 15.), (10., 17.)] {
+                f.fill(&Path::circle(Point::new(x, y), 0.8), c);
+            }
+        }
         Glyph::Back => {
             line(f, &[(14., 5.), (7., 12.), (14., 19.)], c);
             line(f, &[(7., 12.), (21., 12.)], c);

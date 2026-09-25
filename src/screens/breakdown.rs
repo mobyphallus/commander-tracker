@@ -75,9 +75,14 @@ fn hero<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
         text(analysis.bracket.to_string())
             .size(style::T_DISPLAY)
             .color(style::TEXT),
-        text("EST. BRACKET")
-            .size(style::T_MICRO)
-            .color(style::TEXT_MUTED),
+        row![
+            crate::icon::view(crate::icon::Glyph::Bracket, 20., style::ACCENT_BRIGHT),
+            text("EST. BRACKET")
+                .size(style::T_MICRO)
+                .color(style::TEXT_MUTED)
+        ]
+        .spacing(style::GAP_XS)
+        .align_y(Alignment::Center),
     ]
     .spacing(style::GAP_XS)
     .align_x(Alignment::Center)
@@ -94,9 +99,14 @@ fn hero<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
         ]
         .spacing(style::GAP_SM)
         .align_y(Alignment::Center),
-        text(format!("SALT - {}", analysis.salt_band().to_uppercase()))
-            .size(style::T_MICRO)
-            .color(style::TEXT_MUTED),
+        row![
+            crate::icon::view(crate::icon::Glyph::Salt, 20., style::TEXT_MUTED),
+            text(format!("SALT - {}", analysis.salt_band().to_uppercase()))
+                .size(style::T_MICRO)
+                .color(style::TEXT_MUTED)
+        ]
+        .spacing(style::GAP_XS)
+        .align_y(Alignment::Center),
     ]
     .spacing(style::GAP_XS)
     .align_x(Alignment::Center)

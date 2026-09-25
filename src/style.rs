@@ -108,6 +108,8 @@ pub const T_HEADING: u16 = 32;
 pub const T_TITLE: u16 = 36;
 pub const T_DISPLAY: u16 = 48;
 pub const T_COUNTER: u16 = 76;
+/// Player identity stays distinct from action labels on the board.
+pub const T_PLAYER_NAME: u16 = 28;
 
 /// Elevation. Shadows are neutral and reserved for over-art elements.
 fn shadow(blur: f32, y: f32, alpha: f32) -> Shadow {

@@ -1579,7 +1579,7 @@ fn selected_deck_view<'a>(
         };
         let mut options = vec![
             profile_action(
-                Glyph::Stats,
+                Glyph::Bracket,
                 "Salt & bracket",
                 &scores,
                 PlayersMessage::OpenDeckPage(deck.commander.id),

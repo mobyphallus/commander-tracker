@@ -101,7 +101,7 @@ fn clear_center(
     avoid: Rectangle,
     facing: SeatOrientation,
 ) -> Option<Point> {
-    let gap = 12.0;
+    let gap = if bounds.height < 400.0 { 4.0 } else { 12.0 };
     let avoid = Rectangle {
         x: avoid.x - gap,
         y: avoid.y - gap,
@@ -181,11 +181,20 @@ impl<Msg> Chip<Msg> {
     /// The chip's fitted lines, its own box, and where that box's centre
     /// lands. Drawing and hit-testing both go through this, so a tap can
     /// never land somewhere the chip isn't actually drawn.
+    fn effective_padding(&self, bounds: Size) -> f32 {
+        if self.identity && bounds.height < 400.0 {
+            4.0
+        } else {
+            self.padding
+        }
+    }
+
     fn placement(&self, bounds: Size) -> (Vec<Line>, Size, Point) {
         self.placement_lines(bounds, &self.lines)
     }
 
     fn placement_lines(&self, bounds: Size, source: &[Line]) -> (Vec<Line>, Size, Point) {
+        let padding = self.effective_padding(bounds);
         // A turned chip is limited by the tile's *other* dimension, since
         // its width runs across the tile's height.
         let span = if self.facing.is_sideways() {
@@ -193,7 +202,7 @@ impl<Msg> Chip<Msg> {
         } else {
             bounds.width
         };
-        let mut available = (span - EDGE_MARGIN * 2.0 - self.padding * 2.0).max(0.0);
+        let mut available = (span - EDGE_MARGIN * 2.0 - padding * 2.0).max(0.0);
         if self.hug_edge && !self.identity {
             // Only chips sharing an edge are rationed. The life counter sits
             // in the middle of the tile on its own and gets the whole span,
@@ -207,7 +216,7 @@ impl<Msg> Chip<Msg> {
                     0.44
                 } else {
                     max_share(self.align)
-                } - self.padding * 2.0)
+                } - padding * 2.0)
                     .max(0.0),
             );
         }
@@ -251,11 +260,11 @@ impl<Msg> Chip<Msg> {
         let text_h: f32 = lines.iter().map(Line::height).sum();
         let box_size = Size::new(
             if self.action {
-                (available + self.padding * 2.0).min(176.0)
+                (available + padding * 2.0).min(176.0)
             } else {
-                text_w + self.padding * 2.0
+                text_w + padding * 2.0
             },
-            (text_h + self.padding * 2.0).max(if self.on_press.is_some() {
+            (text_h + padding * 2.0).max(if self.on_press.is_some() {
                 if self.action {
                     108.0
                 } else {
@@ -298,6 +307,19 @@ impl<Msg> Chip<Msg> {
                 // Keep the player's name readable when a compact seat cannot
                 // accommodate secondary details between the timer and controls.
                 return self.placement_lines(bounds, &source[..source.len() - 1]);
+            } else if self.identity && source[0].content.chars().count() > 4 {
+                // Preserve readable type in dense layouts: shorten the name
+                // until its label fits beside the center disc and counters.
+                let mut short = source[0].clone();
+                short.content = format!(
+                    "{}…",
+                    short
+                        .content
+                        .chars()
+                        .take(short.content.chars().count() - 2)
+                        .collect::<String>()
+                );
+                return self.placement_lines(bounds, &[short]);
             }
         }
         (lines, box_size, center)
@@ -536,7 +558,7 @@ impl<Msg: Clone> canvas::Program<Msg> for Chip<Msg> {
                     frame.with_save(|frame| {
                         frame.translate(iced::Vector::new(
                             (if self.identity {
-                                -box_size.width / 2.0 + self.padding
+                                -box_size.width / 2.0 + self.effective_padding(bounds.size())
                             } else {
                                 -line.width() / 2.0
                             }) + i as f32 * (line.size + 4.0),
@@ -560,7 +582,7 @@ impl<Msg: Clone> canvas::Program<Msg> for Chip<Msg> {
                     content: line.content.clone(),
                     position: Point::new(
                         if self.identity {
-                            -box_size.width / 2.0 + self.padding
+                            -box_size.width / 2.0 + self.effective_padding(bounds.size())
                         } else if line.icon.is_some() {
                             14.0
                         } else {
@@ -657,15 +679,12 @@ pub fn identity_chip<'a, Msg: Clone + 'a>(
         facing,
         hug_edge: true,
         align: EdgeAlign::Center,
-        padding: 8.0,
+        padding: 12.0,
         background: Color {
-            a: 0.97,
-            ..style::SURFACE_1
+            a: 0.94,
+            ..style::SURFACE_0
         },
-        border: Color {
-            a: 0.55,
-            ..style::ACCENT_BRIGHT
-        },
+        border: style::HAIRLINE,
         radius: style::R_MD,
         on_press: None,
     })
@@ -892,7 +911,10 @@ mod tests {
             let board = Size::new(screen.width - 32.0, screen.height - 32.0);
             for players in 2..=8 {
                 for layout in crate::layout::options_for(players) {
-                    for control in [Size::new(200.0, 112.0), Size::new(240.0, 136.0)] {
+                    for control in [Size::new(
+                        crate::screens::game::center::diameter(screen),
+                        crate::screens::game::center::diameter(screen),
+                    )] {
                         for seat in 0..players {
                             let tile = layout.seat_bounds(seat, board);
                             let size = Size::new(tile.width - 6.0, tile.height - 6.0);
@@ -912,7 +934,10 @@ mod tests {
                                 ),
                             ] {
                                 let mut chip = chip_at(
-                                    vec![Line::new(name, 22.0), Line::mana("WUBRG")],
+                                    vec![
+                                        Line::new(name, style::T_PLAYER_NAME as f32),
+                                        Line::mana("WUBRG"),
+                                    ],
                                     layout.seat_orientation(seat),
                                     EdgeAlign::Center,
                                 );
@@ -920,7 +945,7 @@ mod tests {
                                     chip.lines.insert(1, Line::new(context, 16.0).secondary());
                                 }
                                 chip.identity = true;
-                                chip.padding = 8.0;
+                                chip.padding = 12.0;
                                 chip.avoid = Some(avoid);
                                 let rect = chip.hit_rect(size);
                                 let mut counter = chip_at(
