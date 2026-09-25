@@ -278,6 +278,18 @@ impl Review {
             });
             session::save(&self.conn, &self.game).unwrap();
         }
+        if p == 20 {
+            let url = "http://192.168.1.50:8787/f/0123456789abcdef0123456789abcdef";
+            self.game.feedback_tiles.insert(
+                0,
+                feedback::Panel {
+                    name: "Alexandra".into(),
+                    url: Some(url.into()),
+                    qr: feedback::qr(url),
+                    error: None,
+                },
+            );
+        }
         if p == 21 {
             let url = "http://192.168.1.50:8787/f/0123456789abcdef0123456789abcdef";
             self.game.feedback_panel = Some(feedback::Panel {

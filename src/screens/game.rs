@@ -33,6 +33,8 @@ pub struct GameState {
     #[serde(skip)]
     pub feedback_panel: Option<crate::feedback::Panel>,
     #[serde(skip)]
+    pub feedback_tiles: HashMap<usize, crate::feedback::Panel>,
+    #[serde(skip)]
     pub error: Option<String>,
     #[serde(skip)]
     pub result_save_failed: bool,
@@ -207,6 +209,7 @@ impl GameState {
         }
         Self {
             feedback_panel: None,
+            feedback_tiles: HashMap::new(),
             error: None,
             result_save_failed: false,
             help_open: false,
@@ -1202,6 +1205,7 @@ fn seat_panel<'a>(
             seat,
             state.table_layout.seat_orientation(index),
             out_line,
+            state.feedback_tiles.get(&index),
             image_cache,
         );
     }
@@ -1367,39 +1371,49 @@ fn eliminated_tile<'a>(
     seat: &'a Seat,
     facing: SeatOrientation,
     out_line: Option<String>,
+    feedback: Option<&'a crate::feedback::Panel>,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
     let art = art::framed(&seat.commander, image_cache, 16, facing.radians());
 
-    let scrim = container(
-        scrollable(
-            column![
-                text("ELIMINATED").size(style::T_HEADING),
-                text(seat.player.name.clone()).size(style::T_SUBHEAD),
-                text(seat.commander.name.clone()).size(style::T_BODY),
-                text(out_line.unwrap_or_else(|| "out".to_string())).size(style::T_BODY),
-                text(format!("Final: {} life, {} poison", seat.life, seat.poison))
-                    .size(style::T_CAPTION),
-                style::touch_button("Rate this game", style::T_ACTION)
-                    .width(Length::Fixed(220.0))
-                    .style(style::primary)
+    let mut content = column![
+        text(seat.player.name.clone()).size(style::T_SUBHEAD),
+        text("ELIMINATED").size(style::T_CAPTION),
+    ]
+    .spacing(8)
+    .align_x(iced::Alignment::Center);
+    if let Some(panel) = feedback {
+        if let Some(qr) = &panel.qr {
+            content = content.push(
+                button(image(qr.clone()).width(160).height(160))
+                    .padding(0)
                     .on_press(Message::Game(GameMessage::OpenFeedback(index))),
-                style::touch_button("Back In", style::T_ACTION)
-                    .width(Length::Fixed(220.0))
-                    .style(style::secondary)
-                    .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
-            ]
-            .spacing(14)
-            .align_x(iced::Alignment::Center),
+            );
+            content = content.push(text("Scan to rate your game").size(style::T_BODY));
+            content = content.push(text("Same Wi-Fi · linked to you").size(style::T_CAPTION));
+        }
+    }
+    content = content
+        .push(
+            style::touch_button("Feedback link", style::T_BODY)
+                .width(Length::Fixed(220.0))
+                .style(style::secondary)
+                .on_press(Message::Game(GameMessage::OpenFeedback(index))),
         )
-        .height(Length::Fill),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .style(style::scrim);
+        .push(text(out_line.unwrap_or_else(|| "out".to_string())).size(style::T_CAPTION))
+        .push(
+            style::touch_button("Back In", style::T_ACTION)
+                .width(Length::Fixed(220.0))
+                .style(style::secondary)
+                .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
+        );
+    let scrim = container(scrollable(content).height(Length::Fill))
+        .padding(16)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(style::scrim);
 
     container(stack![art, scrim])
         .width(Length::Fill)

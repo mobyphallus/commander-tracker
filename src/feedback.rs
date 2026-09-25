@@ -252,6 +252,18 @@ pub fn panel(conn: &Connection, game: &GameState, seat: usize, service: &Service
     }
     panel
 }
+/// Generate each eliminated player's QR once, outside rendering and timer ticks.
+pub fn refresh_tiles(conn: &Connection, game: &mut GameState, service: &Service) {
+    game.feedback_tiles
+        .retain(|seat, _| game.seats.get(*seat).is_some_and(|s| s.eliminated));
+    for seat in 0..game.seats.len() {
+        if game.seats[seat].eliminated && !game.feedback_tiles.contains_key(&seat) {
+            let tile = panel(conn, game, seat, service);
+            game.feedback_tiles.insert(seat, tile);
+        }
+    }
+}
+
 pub(crate) fn qr(url: &str) -> Option<iced::widget::image::Handle> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -343,7 +355,10 @@ pub(super) mod tests {
         let id = db::list_games(&conn).unwrap()[0].id;
         let detail = db::game_detail(&conn, id).unwrap();
         assert_eq!(detail.feedback.len(), 1);
-        assert_eq!(detail.feedback_players, vec![(detail.seats[0].game_player_id, "Ada".into())]);
+        assert_eq!(
+            detail.feedback_players,
+            vec![(detail.seats[0].game_player_id, "Ada".into())]
+        );
         assert_eq!(detail.feedback[0].player_id, game.seats[0].player.id);
         assert_eq!(detail.feedback[0].problem_player.as_deref(), Some("Bo"));
         assert_eq!(detail.feedback[0].kingmaker.as_deref(), Some("Cy"));

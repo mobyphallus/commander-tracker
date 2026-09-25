@@ -1,6 +1,6 @@
 # Phone feedback
 
-Mark a player out, then tap **Rate this game** on their tile. Scan the QR code on
+Mark a player out, then tap **Feedback link** on their tile. Scan the QR code on
 that player's phone, on the same Wi-Fi or local network as the laptop. Keep
 Commander Pod open while people submit feedback. Opening the link does not pause
 the game timers.
@@ -34,3 +34,7 @@ If the page cannot connect, check that both devices are on the same network and
 that the network/firewall permits connections to the laptop on port 8787. A
 port-in-use error is shown in the QR panel; close the other app using that port
 and reopen Commander Pod. No game data needs to be discarded.
+
+The personal QR code appears directly on each eliminated player’s tile. Tap it or Feedback link for the larger code and full address.
+
+On this PC, UFW needs a local Wi-Fi allow rule: `sudo ufw allow in on wlan0 from 10.0.0.0/24 to any port 8787 proto tcp`. This requires an administrator password; adjust the interface and subnet if the network changes.

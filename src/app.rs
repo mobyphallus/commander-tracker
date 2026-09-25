@@ -183,7 +183,11 @@ impl App {
                         self.screen = Screen::Storage(crate::storage::StorageState::default());
                     }
                     home::HomeMessage::ResumeGame => match crate::session::load(&self.conn) {
-                        Ok(Some(state)) => {
+                        Ok(Some(mut state)) => {
+                            if let Err(error) = crate::session::save(&self.conn, &state) {
+                                state.error = Some(error);
+                            }
+                            crate::feedback::refresh_tiles(&self.conn, &mut state, &self.feedback);
                             let task = self.game_art(&state);
                             self.screen = Screen::Game(state);
                             return task;
@@ -269,6 +273,7 @@ impl App {
                         return Task::none();
                     }
                     let (task, action) = game::update(state, &mut self.conn, msg);
+                    crate::feedback::refresh_tiles(&self.conn, state, &self.feedback);
                     match action {
                         Some(game::Action::Finished)
                         | Some(game::Action::Abandoned)
