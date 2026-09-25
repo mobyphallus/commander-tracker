@@ -275,14 +275,14 @@ pub fn view<'a>(state: &'a HomeState, players: &'a [Player]) -> Element<'a, Mess
     responsive(move |size| {
         let wide = size.width >= 1100.;
         let main_height = if wide {
-            (size.height - 440.).clamp(400., 600.)
+            (size.height - 440.).clamp(540., 600.)
         } else {
-            460.
+            540.
         };
         let nav_height = if wide {
-            (size.height * 0.22).clamp(190., 280.)
+            (size.height * 0.22).clamp(248., 280.)
         } else {
-            168.
+            248.
         };
         let header = row![
             container(icon::view(Glyph::Decks, 36., style::ACCENT_BRIGHT))

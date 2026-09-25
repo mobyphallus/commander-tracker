@@ -2,6 +2,7 @@
 name = "commander_pod"
 version = "0.1.0"
 edition = "2021"
+default-run = "commander_pod"
 description = "Local MTG Commander pod tracker: life, poison, commander damage, turn timers, and win-rate stats."
 
 [dependencies]

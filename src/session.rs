@@ -78,6 +78,8 @@ fn decode(raw: &str) -> Result<GameState, String> {
     state.undo = saved.undo.into_iter().rev().take(40).collect();
     state.undo.reverse();
     state.paused = true;
+    // Dismissing a restored help dialog must not restart the timers.
+    state.help_was_paused = true;
     state.game_menu_open = true;
     state.pending_abandon = false;
     Ok(state)
@@ -164,10 +166,10 @@ fn describe_action(snapshot: &str, after: &GameState, fallback: &str) -> String 
             return format!("{} · commander damage changed", b.player.name);
         }
         if a.life != b.life {
-            return format!("{} · life {} → {}", b.player.name, a.life, b.life);
+            return format!("{} · life {} to {}", b.player.name, a.life, b.life);
         }
         if a.poison != b.poison {
-            return format!("{} · poison {} → {}", b.player.name, a.poison, b.poison);
+            return format!("{} · poison {} to {}", b.player.name, a.poison, b.poison);
         }
         if a.eliminated != b.eliminated {
             return format!(
@@ -372,6 +374,20 @@ pub(crate) mod tests {
         send(&mut conn, &mut game, GameMessage::ShowHelp);
         send(&mut conn, &mut game, GameMessage::DismissHelp);
         assert!(game.paused);
+    }
+
+    #[test]
+    fn restoring_with_help_open_stays_paused_after_dismissal() {
+        let (mut conn, mut game) = fixture();
+        send(&mut conn, &mut game, GameMessage::ShowHelp);
+        let mut restored = load(&conn).unwrap().unwrap();
+        send(&mut conn, &mut restored, GameMessage::DismissHelp);
+        send(&mut conn, &mut restored, GameMessage::Tick);
+        assert!(restored.paused);
+        assert_eq!(restored.game_seconds, 0);
+        send(&mut conn, &mut restored, GameMessage::TogglePause);
+        send(&mut conn, &mut restored, GameMessage::Tick);
+        assert_eq!(restored.game_seconds, 1);
     }
 
     #[test]

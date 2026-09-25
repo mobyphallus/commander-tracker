@@ -328,3 +328,104 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+    use crate::model::WinReason;
+    use game::{CounterTarget, GameMessage};
+
+    fn fixture() -> App {
+        let (conn, game) = crate::session::tests::fixture();
+        App {
+            home: home::HomeState::load(&conn),
+            players: db::list_players(&conn).unwrap(),
+            conn,
+            fatal_error: None,
+            rematch: None,
+            image_cache: HashMap::new(),
+            screen: Screen::Game(game),
+        }
+    }
+
+    #[test]
+    fn suspend_resume_finish_correct_and_rematch_through_app_messages() {
+        let mut app = fixture();
+        for msg in [
+            GameMessage::CounterPressStart(0, CounterTarget::Life(0), -1),
+            GameMessage::CounterPressEnd(CounterTarget::Life(0), -1),
+            GameMessage::SaveAndHome,
+        ] {
+            let _ = app.update(Message::Game(msg));
+        }
+        assert!(matches!(app.screen, Screen::Home));
+        assert!(app.home.resumable);
+        let _ = app.update(Message::Home(home::HomeMessage::ResumeGame));
+        let Screen::Game(game) = &app.screen else {
+            panic!("resume did not open game")
+        };
+        assert!(game.paused);
+        assert_eq!(game.seats[0].life, 39);
+        for msg in [
+            GameMessage::TogglePause,
+            GameMessage::StartDeclareWinner(0),
+            GameMessage::PickWinReason(WinReason::CombatDamage),
+            GameMessage::ConfirmEndGame,
+        ] {
+            let _ = app.update(Message::Game(msg));
+        }
+        assert!(matches!(app.screen, Screen::Home));
+        assert!(!app.home.resumable);
+        assert!(app.home.play_again);
+        let games = db::list_games(&app.conn).unwrap();
+        assert_eq!(games.len(), 1);
+        let _ = app.update(Message::Home(home::HomeMessage::ViewGame(games[0].id)));
+        let detail = db::game_detail(&app.conn, games[0].id).unwrap();
+        for msg in [
+            history::HistoryMessage::Edit,
+            history::HistoryMessage::Winner(Some(detail.seats[1].game_player_id)),
+            history::HistoryMessage::Reason(WinReason::Poison),
+            history::HistoryMessage::Review,
+            history::HistoryMessage::SaveCorrection,
+        ] {
+            let _ = app.update(Message::History(msg));
+        }
+        let _ = app.update(Message::GoHome);
+        assert_eq!(app.home.recent[0].winner_name.as_deref(), Some("Bo"));
+        let _ = app.update(Message::Home(home::HomeMessage::ViewStats));
+        let Screen::Stats(state) = &app.screen else {
+            panic!("stats did not open")
+        };
+        assert!(state.error.is_none());
+        let _ = app.update(Message::GoHome);
+        let _ = app.update(Message::Home(home::HomeMessage::PlayAgain));
+        let Screen::Setup(state) = &app.screen else {
+            panic!("rematch did not open")
+        };
+        assert!(state.all_seats_ready());
+        assert_eq!(state.first_seat, None);
+    }
+
+    #[test]
+    fn failed_suspend_keeps_game_open_and_retry_preserves_counters() {
+        let mut app = fixture();
+        app.conn.pragma_update(None, "query_only", true).unwrap();
+        let _ = app.update(Message::Game(GameMessage::SaveAndHome));
+        let Screen::Game(game) = &app.screen else {
+            panic!("unsaved game was closed")
+        };
+        assert!(game.error.is_some());
+        app.conn.pragma_update(None, "query_only", false).unwrap();
+        let _ = app.update(Message::Game(GameMessage::RetrySave));
+        let Screen::Game(game) = &app.screen else {
+            panic!("retry closed game")
+        };
+        assert!(game.error.is_none());
+        let _ = app.update(Message::Game(GameMessage::SaveAndHome));
+        assert!(app.home.resumable);
+        assert_eq!(
+            crate::session::load(&app.conn).unwrap().unwrap().seats[0].life,
+            40
+        );
+    }
+}

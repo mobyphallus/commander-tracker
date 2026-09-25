@@ -182,7 +182,7 @@ pub fn view(state: &StorageState) -> Element<'_, Message> {
     body = body.push(choose);
     if let Some(path) = &state.candidate {
         body = body.push(container(column![text("Replace current data with this backup?").size(style::T_SUBHEAD), text(path.display().to_string()), text("A safety backup of your current data will be created first. Restoring replaces players, decks, history, and any unfinished game."),
-            style::touch_button("Cancel", style::T_ACTION).on_press(Message::Storage(StorageMessage::CancelRestore)),
+            style::touch_button("Cancel", style::T_ACTION).style(style::secondary).on_press(Message::Storage(StorageMessage::CancelRestore)),
             style::touch_button("Restore this backup", style::T_ACTION).style(style::danger).on_press(Message::Storage(StorageMessage::ConfirmRestore))].spacing(style::GAP)).padding(24).style(style::panel));
     }
     if let Some(s) = &state.status {

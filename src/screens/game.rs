@@ -894,8 +894,10 @@ pub fn view<'a>(
                 text("Your game is still here").size(style::T_TITLE),
                 text(error),
                 style::touch_button("Try saving again", style::T_ACTION)
+                    .style(style::primary)
                     .on_press(Message::Game(GameMessage::RetrySave)),
                 style::touch_button("Back to game", style::T_ACTION)
+                    .style(style::secondary)
                     .on_press(Message::Game(GameMessage::DismissError))
             ]
             .spacing(style::GAP),

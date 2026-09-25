@@ -71,28 +71,60 @@ const PAGES: &[&str] = &[
     "stats",
     "restore-confirm",
     "rematch",
+    "partner-damage",
 ];
 impl Review {
     fn new() -> (Self, Task<Msg>) {
-        let source = rusqlite::Connection::open_with_flags(
-            "/home/moby/.local/share/commander_pod/pod.db",
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        rusqlite::backup::Backup::new(&source, &mut conn)
-            .unwrap()
-            .run_to_completion(100, std::time::Duration::from_millis(5), None)
-            .unwrap();
         db::init(&conn).unwrap();
-        let players = db::list_players(&conn).unwrap();
-        let commanders = db::all_commanders(&conn).unwrap();
-        let seats = players
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let players: Vec<_> = [
+            "Alexandra the Unreasonably Long-Named",
+            "Bo",
+            "Casey",
+            "Drew",
+        ]
+        .into_iter()
+        .map(|name| db::create_player(&conn, name).unwrap())
+        .collect();
+        let commanders: Vec<_> = [
+            "Tymna the Weaver",
+            "Kraum, Ludevic's Opus",
+            "Atraxa, Praetors' Voice",
+            "The Ur-Dragon",
+            "Rograkh, Son of Rohgahh",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
+            db::upsert_commander(&conn, &format!("review-{i}"), name, None, None, "WUBRG").unwrap()
+        })
+        .collect();
+        let seats: Vec<_> = players
             .iter()
-            .take(4)
             .enumerate()
-            .map(|(i, p)| model::Seat::new(p.clone(), commanders[i % commanders.len()].clone(), 40))
+            .map(|(i, p)| {
+                model::Seat::new(p.clone(), commanders[i].clone(), 40)
+                    .with_partner((i == 0).then(|| commanders[4].clone()))
+            })
             .collect();
+        for i in 0..6 {
+            let ended_at = chrono::Utc::now() - chrono::Duration::days(i);
+            db::record_game(
+                &mut conn,
+                &model::FinishedGame {
+                    elapsed_seconds: 3600,
+                    seats: seats.clone(),
+                    winner_seat: Some(i as usize % 4),
+                    win_reason: Some(model::WinReason::CombatDamage),
+                    ending_turn: 9,
+                    kills: vec![],
+                    started_at: ended_at - chrono::Duration::hours(1),
+                    ended_at,
+                },
+            )
+            .unwrap();
+        }
         let mut game =
             game::GameState::new(seats, layout::options_for(4)[0].clone(), vec![0, 1, 2, 3]);
         let _ = game::update(&mut game, &mut conn, game::GameMessage::NextTurn);
@@ -106,31 +138,7 @@ impl Review {
             &mut conn,
             game::GameMessage::CounterPressEnd(game::CounterTarget::Life(0), -1),
         );
-        let mut images = cards::Images::new();
-        for c in &commanders {
-            if let Some(url) = c.portrait_url() {
-                let mut hash: u64 = 0xcbf29ce484222325;
-                for b in url.bytes() {
-                    hash ^= b as u64;
-                    hash = hash.wrapping_mul(0x100000001b3);
-                }
-                if let Ok(bytes) = std::fs::read(format!(
-                    "/home/moby/.local/share/commander_pod/art/{hash:016x}"
-                )) {
-                    if let Ok(img) = image::load_from_memory(&bytes) {
-                        let rgba = img.to_rgba8();
-                        images.insert(
-                            url.into(),
-                            iced::widget::image::Handle::from_rgba(
-                                rgba.width(),
-                                rgba.height(),
-                                rgba.into_raw(),
-                            ),
-                        );
-                    }
-                }
-            }
-        }
+        let images = cards::Images::new();
         let setup = setup::SetupState::rematch(&game, &conn);
         let mut review = Self {
             home: home::HomeState::load(&conn),
@@ -142,7 +150,7 @@ impl Review {
             setup,
             players,
             images,
-            page: 0,
+            page: review_size_index() * PAGES.len(),
         };
         review.configure();
         (review, Self::later())
@@ -156,6 +164,18 @@ impl Review {
     fn configure(&mut self) {
         let p = self.page % PAGES.len();
         self.game.error = None;
+        let _ = game::update(
+            &mut self.game,
+            &mut self.conn,
+            game::GameMessage::EndDamageFocus,
+        );
+        if p == 13 {
+            let _ = game::update(
+                &mut self.game,
+                &mut self.conn,
+                game::GameMessage::StartDamageFocus(1),
+            );
+        }
         self.game.game_menu_open = p == 2;
         self.game.undo_open = p == 3;
         self.game.help_open = p == 4;
@@ -204,7 +224,7 @@ impl Review {
                 &mut self.storage,
                 &mut self.conn,
                 storage::StorageMessage::Chosen(Ok(Some(
-                    "/home/moby/Backups/commander-pod-backup.db".into(),
+                    std::env::temp_dir().join("commander-pod-review-backup.db"),
                 ))),
             );
         }
@@ -215,6 +235,25 @@ impl Review {
                 .and_then(window::screenshot)
                 .map(Msg::Captured),
             Msg::Captured(shot) => {
+                let target = review_size();
+                let width = (target.width as f64 * shot.scale_factor).round() as u32;
+                let height = (target.height as f64 * shot.scale_factor).round() as u32;
+                assert!(
+                    shot.size.width >= width && shot.size.height >= height,
+                    "review surface too small: {}x{}; need {}x{}",
+                    shot.size.width,
+                    shot.size.height,
+                    width,
+                    height
+                );
+                let shot = shot
+                    .crop(iced::Rectangle {
+                        x: 0,
+                        y: 0,
+                        width,
+                        height,
+                    })
+                    .expect("review viewport must fit screenshot");
                 let path = format!(
                     "/tmp/commander-finish-{}-{}.png",
                     self.page / PAGES.len(),
@@ -256,20 +295,19 @@ impl Review {
                     )
                     .unwrap();
                 }
+                eprintln!(
+                    "{}: {}x{} ({} bytes)",
+                    path,
+                    shot.size.width,
+                    shot.size.height,
+                    std::fs::metadata(&path).unwrap().len()
+                );
                 self.page += 1;
-                if self.page == PAGES.len() * 3 {
+                if self.page % PAGES.len() == 0 {
                     std::process::exit(0)
                 }
                 self.configure();
-                if self.page == PAGES.len() {
-                    Task::batch([
-                        window::get_latest()
-                            .and_then(|id| window::resize(id, Size::new(800., 1280.))),
-                        Self::later(),
-                    ])
-                } else {
-                    Self::later()
-                }
+                Self::later()
             }
             Msg::App(_) => Task::none(),
         }
@@ -278,25 +316,31 @@ impl Review {
         let p = self.page % PAGES.len();
         let view = match p {
             0 | 1 => home::view(&self.home, &self.players),
-            2..=5 => game::view(&self.game, &self.images),
+            2..=5 | 13 => game::view(&self.game, &self.images),
             6..=9 => history::view(&self.history),
             10 => stats::view(&self.stats, &self.images),
             11 => storage::view(&self.storage),
             _ => setup::view(&self.setup, &self.players, &self.images),
         };
         iced::widget::container(view.map(Msg::App))
-            .width(match self.page / PAGES.len() {
-                0 => 1875.,
-                1 => 800.,
-                _ => 1280.,
-            })
-            .height(if self.page / PAGES.len() == 2 {
-                800.
-            } else {
-                1205.
-            })
+            .width(review_size().width)
+            .height(review_size().height)
             .into()
     }
+}
+fn review_size_index() -> usize {
+    std::env::args()
+        .nth(1)
+        .map(|v| v.parse::<usize>().expect("size index must be 0, 1, or 2"))
+        .filter(|&i| i < 3)
+        .unwrap_or(0)
+}
+fn review_size() -> Size {
+    [
+        Size::new(1875., 1205.),
+        Size::new(800., 1280.),
+        Size::new(1280., 800.),
+    ][review_size_index()]
 }
 fn main() -> iced::Result {
     iced::application(
@@ -305,8 +349,11 @@ fn main() -> iced::Result {
         Review::view,
     )
     .theme(|_| style::app_theme())
+    // Fit the portrait review surface on a landscape desktop. The fixed container
+    // above still lays out at the requested logical dimensions.
+    .scale_factor(|_| 0.5)
     .window(iced::window::Settings {
-        size: Size::new(1875., 1205.),
+        size: review_size(),
         ..Default::default()
     })
     .run_with(Review::new)
