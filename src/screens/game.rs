@@ -1230,8 +1230,8 @@ fn seat_panel<'a>(
 
     let hate_chip = rotated::action_button(
         Glyph::Shield,
-        "Log hate",
-        "Commander",
+        "Commander hate",
+        "",
         facing,
         rotated::EdgeAlign::Start,
         false,

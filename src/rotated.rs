@@ -702,12 +702,15 @@ pub fn action_button<'a, Msg: Clone + 'a>(
     primary: bool,
     message: Msg,
 ) -> Element<'a, Msg> {
+    let mut lines = vec![
+        Line::new("", 22.0).with_icon(glyph),
+        Line::new(title, 20.0),
+    ];
+    if !subtitle.is_empty() {
+        lines.push(Line::new(subtitle, 14.0).secondary());
+    }
     Canvas::new(Chip {
-        lines: vec![
-            Line::new("", 22.0).with_icon(glyph),
-            Line::new(title, 20.0),
-            Line::new(subtitle, 14.0).secondary(),
-        ],
+        lines,
         identity: false,
         avoid: None,
         action: true,
@@ -959,8 +962,7 @@ mod tests {
                                     let mut action = chip_at(
                                         vec![
                                             Line::new("", 22.0).with_icon(Glyph::Shield),
-                                            Line::new("Log hate", 20.0),
-                                            Line::new("Commander", 14.0),
+                                            Line::new("Commander hate", 20.0),
                                         ],
                                         layout.seat_orientation(seat),
                                         align,
@@ -1013,8 +1015,7 @@ mod tests {
                 let mut start = chip_at(
                     vec![
                         Line::new("", 22.0).with_icon(Glyph::Shield),
-                        Line::new("Log hate", 20.0),
-                        Line::new("Commander", 14.0),
+                        Line::new("Commander hate", 20.0),
                     ],
                     facing,
                     EdgeAlign::Start,
