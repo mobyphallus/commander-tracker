@@ -1376,43 +1376,35 @@ fn eliminated_tile<'a>(
 ) -> Element<'a, Message> {
     let art = art::framed(&seat.commander, image_cache, 16, facing.radians());
 
-    let mut content = column![
-        text(seat.player.name.clone()).size(style::T_SUBHEAD),
-        text("ELIMINATED").size(style::T_CAPTION),
-    ]
-    .spacing(8)
-    .align_x(iced::Alignment::Center);
-    if let Some(panel) = feedback {
-        if let Some(qr) = &panel.qr {
-            content = content.push(
-                button(image(qr.clone()).width(160).height(160))
-                    .padding(0)
-                    .on_press(Message::Game(GameMessage::OpenFeedback(index))),
-            );
-            content = content.push(text("Scan to rate your game").size(style::T_BODY));
-            content = content.push(text("Same Wi-Fi · linked to you").size(style::T_CAPTION));
-        }
-    }
-    content = content
-        .push(
-            style::touch_button("Feedback link", style::T_BODY)
-                .width(Length::Fixed(220.0))
-                .style(style::secondary)
-                .on_press(Message::Game(GameMessage::OpenFeedback(index))),
-        )
-        .push(text(out_line.unwrap_or_else(|| "out".to_string())).size(style::T_CAPTION))
-        .push(
-            style::touch_button("Back In", style::T_ACTION)
-                .width(Length::Fixed(220.0))
-                .style(style::secondary)
-                .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
-        );
-    let scrim = container(scrollable(content).height(Length::Fill))
-        .padding(16)
+    let content = rotated::outcome(
+        vec![
+            Line::new(&seat.player.name, style::T_SUBHEAD as f32),
+            Line::new("ELIMINATED", style::T_CAPTION as f32).secondary(),
+            Line::new(
+                out_line.unwrap_or_else(|| "out".into()),
+                style::T_CAPTION as f32,
+            )
+            .secondary(),
+            Line::new("Scan to rate your game · Same Wi-Fi", style::T_BODY as f32),
+        ],
+        feedback.and_then(|p| p.qr.clone()),
+        vec![
+            rotated::OutcomeAction {
+                label: "Feedback link".into(),
+                message: Some(Message::Game(GameMessage::OpenFeedback(index))),
+                selected: false,
+            },
+            rotated::OutcomeAction {
+                label: "Back In".into(),
+                message: Some(Message::Game(GameMessage::ToggleEliminated(index))),
+                selected: false,
+            },
+        ],
+        facing,
+    );
+    let scrim = container(content)
         .width(Length::Fill)
         .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
         .style(style::scrim);
 
     container(stack![art, scrim])
@@ -1686,41 +1678,38 @@ fn hate_view(state: &GameState, flow: HateFlow) -> Element<'_, Message> {
 
 fn declare_winner_view(state: &GameState, winner: usize) -> Element<'_, Message> {
     let seat = &state.seats[winner];
-    let reasons = WinReason::ALL
+    let mut actions: Vec<_> = WinReason::ALL
         .iter()
-        .map(|reason| {
-            let (glyph, detail) = match reason {
-                WinReason::CommanderDamage => (Glyph::Shield, "Lethal damage from a commander"),
-                WinReason::Poison => (Glyph::Poison, "Opponents reached lethal poison"),
-                WinReason::CombatDamage => (Glyph::Heart, "Combat damage closed out the game"),
-                WinReason::InfiniteCombo => {
-                    (Glyph::Rotate(true), "A repeating combo secured the win")
-                }
-                WinReason::Concede => (Glyph::Back, "The remaining opponents conceded"),
-                WinReason::Other => (Glyph::Trophy, "Another effect or win condition"),
-            };
-            decision_option(
-                glyph,
-                reason.label().into(),
-                detail.into(),
-                state.pending_reason == Some(*reason),
-                GameMessage::PickWinReason(*reason),
-            )
+        .map(|reason| rotated::OutcomeAction {
+            label: reason.label().into(),
+            message: Some(Message::Game(GameMessage::PickWinReason(*reason))),
+            selected: state.pending_reason == Some(*reason),
         })
         .collect();
-    let mut confirm = style::icon_button(Glyph::Check, "Confirm & save", style::T_ACTION)
-        .width(260)
-        .style(style::primary);
-    if state.pending_reason.is_some() {
-        confirm = confirm.on_press(Message::Game(GameMessage::ConfirmEndGame));
-    }
-    decision_page(
-        Glyph::Trophy,
-        format!("{} wins", seat.player.name),
-        format!("{} · Choose how the game ended", seat.deck_name()),
-        reasons,
-        GameMessage::CancelDeclareWinner,
-        Some(confirm.into()),
+    actions.push(rotated::OutcomeAction {
+        label: "Back".into(),
+        message: Some(Message::Game(GameMessage::CancelDeclareWinner)),
+        selected: false,
+    });
+    actions.push(rotated::OutcomeAction {
+        label: "Confirm & save".into(),
+        message: state
+            .pending_reason
+            .map(|_| Message::Game(GameMessage::ConfirmEndGame)),
+        selected: state.pending_reason.is_some(),
+    });
+    rotated::outcome(
+        vec![
+            Line::new(
+                format!("{} wins", seat.player.name),
+                style::T_HEADING as f32,
+            ),
+            Line::new(seat.deck_name(), style::T_BODY as f32).secondary(),
+            Line::new("Choose how the game ended", style::T_SUBHEAD as f32),
+        ],
+        None,
+        actions,
+        state.table_layout.seat_orientation(winner),
     )
 }
 

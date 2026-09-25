@@ -86,6 +86,8 @@ const PAGES: &[&str] = &[
     "feedback-out",
     "feedback-qr",
     "feedback-history",
+    "winner-facing",
+    "feedback-sideways",
 ];
 impl Review {
     fn new() -> (Self, Task<Msg>) {
@@ -270,7 +272,7 @@ impl Review {
             );
         }
         self.game.feedback_panel = None;
-        if p == 20 {
+        if p == 20 || p == 24 {
             self.game.seats[0].mark_out(model::Elimination {
                 cause: model::OutCause::Concede,
                 killer_seat: None,
@@ -278,7 +280,7 @@ impl Review {
             });
             session::save(&self.conn, &self.game).unwrap();
         }
-        if p == 20 {
+        if p == 20 || p == 24 {
             let url = "http://192.168.1.50:8787/f/0123456789abcdef0123456789abcdef";
             self.game.feedback_tiles.insert(
                 0,
@@ -330,6 +332,16 @@ impl Review {
                 &self.conn,
                 history::HistoryMessage::ViewGame(id),
             );
+        }
+        if p == 23 {
+            self.game.pending_winner = Some(0);
+            self.game.pending_reason = Some(model::WinReason::CombatDamage);
+        }
+        if p == 24 {
+            self.game.pending_winner = None;
+            self.game.table_layout = layout::TableLayout {
+                name: "Two heads".into(), columns: vec![vec![0], vec![1, 2], vec![3]],
+            };
         }
         self.game.game_menu_open = p == 2;
         self.game.undo_open = p == 3;
@@ -471,7 +483,7 @@ impl Review {
         let p = self.page % PAGES.len();
         let view = match p {
             0 | 1 => home::view(&self.home, &self.players),
-            2..=5 | 13..=15 | 20..=21 => game::view(&self.game, &self.images),
+            2..=5 | 13..=15 | 20..=21 | 23..=24 => game::view(&self.game, &self.images),
             6..=9 | 22 => history::view(&self.history),
             16 => iced::widget::container(cards::grid(
                 self.decks

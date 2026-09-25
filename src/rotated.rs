@@ -702,10 +702,7 @@ pub fn action_button<'a, Msg: Clone + 'a>(
     primary: bool,
     message: Msg,
 ) -> Element<'a, Msg> {
-    let mut lines = vec![
-        Line::new("", 22.0).with_icon(glyph),
-        Line::new(title, 20.0),
-    ];
+    let mut lines = vec![Line::new("", 22.0).with_icon(glyph), Line::new(title, 20.0)];
     if !subtitle.is_empty() {
         lines.push(Line::new(subtitle, 14.0).secondary());
     }
@@ -1344,6 +1341,223 @@ mod fitting_tests {
         for available in [0.0, 1.0, 5.0, 20.0] {
             let out = fit_to_width("Winota, Joiner of Forces", 26.0, available);
             assert!(out.chars().count() <= 24);
+        }
+    }
+}
+
+/// Player-facing outcome content. Drawing and hit testing share player-local bounds.
+pub struct OutcomeAction<Msg> {
+    pub label: String,
+    pub message: Option<Msg>,
+    pub selected: bool,
+}
+
+struct Outcome<Msg> {
+    lines: Vec<Line>,
+    qr: Option<iced::widget::image::Handle>,
+    actions: Vec<OutcomeAction<Msg>>,
+    facing: SeatOrientation,
+}
+
+impl<Msg> Outcome<Msg> {
+    fn layout(&self, bounds: Size) -> (Size, f32, Vec<Rectangle>) {
+        let available = screen_footprint(bounds, self.facing);
+        let width = available.width.min(800.0).max(1.0);
+        let columns = if self.actions.len() > 2 { 2 } else { 1 };
+        let rows = self.actions.len().div_ceil(columns);
+        let header: f32 = self.lines.iter().map(|l| l.height() + 8.0).sum();
+        let top = 16.0 + header + if self.qr.is_some() { 184.0 } else { 0.0 };
+        let height = top + rows as f32 * 80.0 + 8.0;
+        let scale = (available.height / height).min(1.0);
+        let cell = (width - 32.0 - (columns - 1) as f32 * 8.0) / columns as f32;
+        let rects = (0..self.actions.len())
+            .map(|i| {
+                Rectangle::new(
+                    Point::new(
+                        -width / 2.0 + 16.0 + (i % columns) as f32 * (cell + 8.0),
+                        -height / 2.0 + top + (i / columns) as f32 * 80.0,
+                    ),
+                    Size::new(cell, 72.0),
+                )
+            })
+            .collect();
+        (Size::new(width, height), scale, rects)
+    }
+    fn local_point(&self, bounds: Size, p: Point) -> Point {
+        let (_, scale, _) = self.layout(bounds);
+        let (sin, cos) = self.facing.radians().sin_cos();
+        let x = p.x - bounds.width / 2.0;
+        let y = p.y - bounds.height / 2.0;
+        Point::new((x * cos + y * sin) / scale, (-x * sin + y * cos) / scale)
+    }
+}
+
+impl<Msg: Clone> canvas::Program<Msg> for Outcome<Msg> {
+    type State = ();
+    fn update(
+        &self,
+        _: &mut (),
+        event: canvas::Event,
+        bounds: Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Msg>) {
+        let Some(p) = press_position(&event, bounds, cursor) else {
+            return (canvas::event::Status::Ignored, None);
+        };
+        let p = self.local_point(bounds.size(), p);
+        let (_, _, rects) = self.layout(bounds.size());
+        let message =
+            self.actions.iter().zip(rects).find_map(|(action, rect)| {
+                rect.contains(p).then(|| action.message.clone()).flatten()
+            });
+        (canvas::event::Status::Captured, message)
+    }
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let (size, scale, rects) = self.layout(bounds.size());
+        let hovered = cursor
+            .position_in(bounds)
+            .map(|p| self.local_point(bounds.size(), p));
+        frame.translate(iced::Vector::new(bounds.width / 2.0, bounds.height / 2.0));
+        frame.rotate(iced::Radians(self.facing.radians()));
+        frame.scale(scale);
+        let mut y = -size.height / 2.0 + 16.0;
+        for line in &self.lines {
+            frame.fill_text(Text {
+                content: fit_to_width(&line.content, line.size, size.width - 32.0),
+                position: Point::new(0.0, y),
+                size: line.size.into(),
+                color: if line.muted {
+                    style::TEXT_MUTED
+                } else {
+                    style::TEXT
+                },
+                horizontal_alignment: alignment::Horizontal::Center,
+                ..Text::default()
+            });
+            y += line.height() + 8.0;
+        }
+        if let Some(qr) = &self.qr {
+            frame.draw_image(
+                Rectangle::new(Point::new(-80.0, y), Size::new(160.0, 160.0)),
+                qr,
+            );
+        }
+        for (action, rect) in self.actions.iter().zip(rects) {
+            let active = action.message.is_some();
+            let highlighted =
+                action.selected || (active && hovered.is_some_and(|p| rect.contains(p)));
+            let path = Path::rounded_rectangle(rect.position(), rect.size(), style::R_MD.into());
+            frame.fill(
+                &path,
+                if highlighted {
+                    style::ACCENT_DEEP
+                } else {
+                    style::SURFACE_2
+                },
+            );
+            frame.stroke(
+                &path,
+                canvas::Stroke::default().with_color(if action.selected {
+                    style::ACCENT_BRIGHT
+                } else {
+                    style::SURFACE_3
+                }),
+            );
+            frame.fill_text(Text {
+                content: fit_to_width(&action.label, 22.0, rect.width - 24.0),
+                position: rect.center(),
+                size: 22.0.into(),
+                color: if active {
+                    style::TEXT
+                } else {
+                    style::TEXT_MUTED
+                },
+                horizontal_alignment: alignment::Horizontal::Center,
+                vertical_alignment: alignment::Vertical::Center,
+                ..Text::default()
+            });
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+pub fn outcome<'a, Msg: Clone + 'a>(
+    lines: Vec<Line>,
+    qr: Option<iced::widget::image::Handle>,
+    actions: Vec<OutcomeAction<Msg>>,
+    facing: SeatOrientation,
+) -> Element<'a, Msg> {
+    Canvas::new(Outcome {
+        lines,
+        qr,
+        actions,
+        facing,
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+    #[test]
+    fn outcome_buttons_follow_all_seat_orientations_for_mouse_and_touch() {
+        for facing in [
+            SeatOrientation::Upright,
+            SeatOrientation::UpsideDown,
+            SeatOrientation::LeftHead,
+            SeatOrientation::RightHead,
+        ] {
+            let panel = Outcome {
+                lines: vec![Line::new("Ada wins", 32.0)],
+                qr: None,
+                actions: (0..8)
+                    .map(|i| OutcomeAction {
+                        label: i.to_string(),
+                        message: (i != 7).then_some(i),
+                        selected: i == 2,
+                    })
+                    .collect(),
+                facing,
+            };
+            let bounds = Rectangle::new(Point::new(30.0, 50.0), Size::new(400.0, 300.0));
+            let (_, scale, rects) = panel.layout(bounds.size());
+            for (i, rect) in rects.iter().enumerate() {
+                let p = rect.center();
+                let (sin, cos) = facing.radians().sin_cos();
+                let screen = Point::new(
+                    bounds.center_x() + scale * (p.x * cos - p.y * sin),
+                    bounds.center_y() + scale * (p.x * sin + p.y * cos),
+                );
+                assert!(bounds.contains(screen));
+                for event in [
+                    canvas::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                        iced::mouse::Button::Left,
+                    )),
+                    canvas::Event::Touch(iced::touch::Event::FingerPressed {
+                        id: iced::touch::Finger(0),
+                        position: screen,
+                    }),
+                ] {
+                    let (_, message) = canvas::Program::update(
+                        &panel,
+                        &mut (),
+                        event,
+                        bounds,
+                        iced::mouse::Cursor::Available(screen),
+                    );
+                    assert_eq!(message, (i != 7).then_some(i as i32));
+                }
+            }
         }
     }
 }
