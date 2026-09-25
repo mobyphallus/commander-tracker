@@ -87,6 +87,8 @@ impl Dataset {
     }
 }
 pub struct StatsState {
+    pictures: std::collections::HashMap<i64, iced::widget::image::Handle>,
+    commanders: std::collections::HashMap<i64, crate::model::Commander>,
     pub tab: StatsTab,
     pub scope: Scope,
     pub display: Display,
@@ -110,6 +112,12 @@ impl StatsState {
             ),
         };
         Self {
+            pictures: crate::screens::players::load_pictures(conn),
+            commanders: crate::db::all_commanders(conn)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| (c.id, c))
+                .collect(),
             tab: StatsTab::Overview,
             scope: Scope::Players,
             display: Display::Table,
@@ -156,6 +164,7 @@ impl StatsState {
 }
 #[derive(Debug, Clone)]
 pub enum StatsMessage {
+    Retry,
     SwitchTab(StatsTab),
     Scope(Scope),
     Leaderboard(Scope),
@@ -172,6 +181,7 @@ pub enum StatsMessage {
 }
 pub fn update(state: &mut StatsState, message: StatsMessage) {
     match message {
+        StatsMessage::Retry => {}
         StatsMessage::SwitchTab(tab) => {
             state.tab = tab;
             state.kb.close();
@@ -482,10 +492,14 @@ fn chart_scaled<'a>(
     .into()
 }
 
-pub fn view(state: &StatsState) -> Element<'_, Message> {
-    iced::widget::responsive(move |size| view_sized(state, size.width < 1100.0)).into()
+pub fn view<'a>(state: &'a StatsState, images: &'a crate::cards::Images) -> Element<'a, Message> {
+    iced::widget::responsive(move |size| view_sized(state, size.width < 1100.0, images)).into()
 }
-fn view_sized(state: &StatsState, compact: bool) -> Element<'_, Message> {
+fn view_sized<'a>(
+    state: &'a StatsState,
+    compact: bool,
+    images: &'a crate::cards::Images,
+) -> Element<'a, Message> {
     let header = style::page_header(
         "Table Stats",
         "Your pod, across every game",
@@ -526,7 +540,12 @@ fn view_sized(state: &StatsState, compact: bool) -> Element<'_, Message> {
         ));
     }
     let body = if let Some(error) = &state.error {
-        empty("Statistics unavailable", error)
+        column![
+            empty("Statistics unavailable", error),
+            choose("Retry", false, StatsMessage::Retry)
+        ]
+        .spacing(16)
+        .into()
     } else if state.data.games.is_empty() {
         empty(
             "The story starts with your first game",
@@ -534,7 +553,7 @@ fn view_sized(state: &StatsState, compact: bool) -> Element<'_, Message> {
         )
     } else {
         match state.tab {
-            StatsTab::Overview => overview(state, compact),
+            StatsTab::Overview => overview(state, compact, images),
             StatsTab::Wins => wins(state, compact),
             StatsTab::Rivalries => rivalries(state, compact, false),
             StatsTab::Hate => hate(state, compact),
@@ -626,7 +645,11 @@ fn filters<'a>(
     }
 }
 
-fn overview(state: &StatsState, compact: bool) -> Element<'_, Message> {
+fn overview<'a>(
+    state: &'a StatsState,
+    compact: bool,
+    images: &'a crate::cards::Images,
+) -> Element<'a, Message> {
     let data = &state.data;
     let mut leaders = Vec::new();
     for scope in Scope::ALL {
@@ -635,15 +658,30 @@ fn overview(state: &StatsState, compact: bool) -> Element<'_, Message> {
             container(
                 column![
                     note(format!("MOST WINS · {}", scope.label().to_uppercase())),
-                    record_name(&r.identity),
-                    text(format!("{} wins", r.wins))
-                        .size(36)
-                        .color(style::ACCENT_BRIGHT),
+                    row![
+                        leader_images(state, &r.identity, images),
+                        record_name(&r.identity)
+                    ]
+                    .spacing(16)
+                    .height(80)
+                    .align_y(Alignment::Center),
+                    text(format!(
+                        "{} {}",
+                        r.wins,
+                        if r.wins == 1 { "win" } else { "wins" }
+                    ))
+                    .size(36)
+                    .color(style::ACCENT_BRIGHT),
                     note(format!(
-                        "{} appearances · {} win rate",
-                        r.appearances,
+                        "{} decided games · {} win rate",
+                        r.decided(),
                         win_rate(r)
                     )),
+                    note(if r.decided() < 5 {
+                        "Small sample · fewer than 5 decided games"
+                    } else {
+                        "Based on this entry’s recorded results"
+                    }),
                     choose("Explore wins", false, StatsMessage::Leaderboard(scope))
                 ]
                 .spacing(14),
@@ -1275,4 +1313,64 @@ mod tests {
         assert!(state.kb.field().is_none());
         assert_eq!(state.data.seats.len(), 2);
     }
+}
+
+impl StatsState {
+    pub fn art_task(&self) -> iced::Task<Message> {
+        let ids: std::collections::BTreeSet<_> = Scope::ALL
+            .into_iter()
+            .filter_map(|s| self.data.summary(s).records.first())
+            .flat_map(|r| r.identity.key.commanders.iter().copied())
+            .collect();
+        crate::screens::players::fetch_all(
+            ids.into_iter()
+                .filter_map(|id| {
+                    self.commanders
+                        .get(&id)
+                        .and_then(|c| c.portrait_url())
+                        .map(str::to_owned)
+                })
+                .collect(),
+        )
+    }
+}
+fn leader_images<'a>(
+    state: &'a StatsState,
+    identity: &'a Identity,
+    images: &'a crate::cards::Images,
+) -> Element<'a, Message> {
+    let mut pictures = row![].spacing(8);
+    if let Some(player) = identity.key.player {
+        let photo: Element<_> = match state.pictures.get(&player) {
+            Some(handle) => iced::widget::image(handle.clone())
+                .width(64)
+                .height(64)
+                .content_fit(iced::ContentFit::Contain)
+                .into(),
+            None => container(
+                text(
+                    identity
+                        .name
+                        .chars()
+                        .next()
+                        .unwrap_or('?')
+                        .to_uppercase()
+                        .to_string(),
+                )
+                .size(style::T_TITLE)
+                .color(style::ACCENT_BRIGHT),
+            )
+            .center_x(64)
+            .center_y(64)
+            .style(style::badge)
+            .into(),
+        };
+        pictures = pictures.push(photo);
+    }
+    for id in &identity.key.commanders {
+        if let Some(commander) = state.commanders.get(id) {
+            pictures = pictures.push(crate::cards::portrait(commander, images, 72.));
+        }
+    }
+    pictures.into()
 }

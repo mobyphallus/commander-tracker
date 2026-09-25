@@ -38,6 +38,16 @@ Standard controls are 72 logical pixels tall; major actions are 88. Touch target
 - Dense history and stats views switch to stacked rows below 1100 logical pixels. Long lists scroll; headers and action bars stay reachable.
 - Keep search and data loading feedback in stable content slots. Empty states explain what is missing and the next available action. Keyboard panels take layout space so fields remain above them.
 
+## Recovery and data confidence
+
+- The main home action resumes a saved game when one exists; after a completed game, offer Play again with the same pod and a separate option for a new pod. Backup and restore stays in the header.
+- Save each game action and checkpoint running timers every five seconds. Resume paused. Record actual play duration separately from start/end timestamps; finish the history write and removal of recovery data atomically.
+- The game menu provides recent actions and undo, a revisitable touch guide, and Save & return home. Keep touch hints short and pause timers while the guide is open. Long dialogs must scroll at shorter window heights.
+- Failed data loads must say what failed and offer a retry, never masquerade as empty history. Failed writes retain the current game or editor. Restore requires a review step and creates a safety backup before replacement.
+- History filters include every participant and both partner commanders. Result corrections require a review step and retain the previous record for audit.
+- Stats leaders pair photos/art with names, and show decided-game counts beside rates. Mark samples under five decided games as small samples.
+- Deck brackets are local estimates. Starting mana is not total setup cost; unknown prerequisites cannot establish an early combo. Keep salt scores and setup uncertainty separate.
+
 ## Icons and images
 
 `src/icon.rs` contains original canvas vectors on a 24-unit grid, with rounded strokes. Use 24px for actions, 32px for destinations, and 30px for mana. Keep action labels; do not substitute emoji or platform-dependent icon-font characters. Mana symbols are sun, droplet, skull, flame, tree, and diamond.

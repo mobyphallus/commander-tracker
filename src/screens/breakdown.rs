@@ -46,6 +46,9 @@ pub fn body<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
     if !stacked.is_empty() {
         body = body.push(stacked_section(&stacked));
     }
+    if analysis.scoring_version < 2 {
+        body = body.push(text("Saved with an older scoring method. Refresh this deck to check combo setup costs; salt and card data are preserved.").size(style::T_BODY).color(style::ACCENT_BRIGHT));
+    }
     body = body.push(footnotes(analysis));
 
     scrollable(body.padding(style::GAP_SM))
@@ -72,7 +75,7 @@ fn hero<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
         text(analysis.bracket.to_string())
             .size(style::T_DISPLAY)
             .color(style::TEXT),
-        text("BRACKET")
+        text("EST. BRACKET")
             .size(style::T_MICRO)
             .color(style::TEXT_MUTED),
     ]
@@ -115,7 +118,7 @@ fn hero<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
     if analysis.understated() {
         detail = detail.push(
             text(format!(
-                "Listed on Moxfield as bracket {}, but the cards support {}.",
+                "Moxfield lists bracket {}; this local estimate suggests {}. Discuss setup and game speed with your pod.",
                 analysis.owner_bracket.unwrap_or(analysis.bracket),
                 analysis.bracket
             ))
@@ -157,7 +160,7 @@ fn criteria_section<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
 
     section(
         "Bracket criteria",
-        Some("The five things Wizards' guidelines measure. The deck lands on the highest floor any of them sets."),
+        Some("Local estimates for a pregame conversation, not an official rating. Card counts and combo costs cannot predict how consistently a deck wins early."),
         rows,
     )
 }
@@ -234,7 +237,7 @@ fn combos_section<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
                 tags.push("two-card".to_string());
             }
             if combo.early {
-                tags.push("low starting mana".to_string());
+                tags.push("low cost from hand".to_string());
             }
             if combo.lock {
                 tags.push("lock".to_string());
@@ -266,6 +269,13 @@ fn combos_section<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
             if !tags.is_empty() {
                 details = details.push(text(tags.join(" · ")).size(style::T_CAPTION).color(tone));
             }
+            if !combo.setup_cost_checked {
+                details = details.push(
+                    text("Setup cost not established · review prerequisites before judging speed")
+                        .size(style::T_CAPTION)
+                        .color(style::TEXT_MUTED),
+                );
+            }
             if !combo.mana_needed.is_empty() {
                 details = details.push(
                     text(format!("Mana requirement: {}", combo.mana_needed))
@@ -290,7 +300,7 @@ fn combos_section<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
 
     section(
         &format!("Combo lines ({})", analysis.combos.len()),
-        Some("Starting mana assumes the combo is already set up; it excludes the cost of pieces already in play. Zero means no extra mana after setup, not free cards. The local bracket estimate flags two-card lines needing seven or less starting mana."),
+        Some("Starting mana assumes the combo is already set up; it excludes the cost of pieces already in play. Zero means no extra mana after setup, not free cards. Only fully specified lines starting from hand can trigger the local low-cost estimate. Other lines need a setup and speed review."),
         rows,
     )
 }

@@ -181,8 +181,12 @@ impl ManagedPlayer {
 
 impl PlayersState {
     pub fn load(conn: &Connection) -> Self {
+        let (players, error) = match db::list_players(conn) {
+            Ok(p) => (p, None),
+            Err(e) => (Vec::new(), Some(format!("Couldn’t load players: {e}"))),
+        };
         Self {
-            players: db::list_players(conn).unwrap_or_default(),
+            players,
             profile: None,
             pictures: load_pictures(conn),
             choosing_picture: false,
@@ -192,17 +196,21 @@ impl PlayersState {
             managing: None,
             cooldown: Cooldown::default(),
             kb: Keyboard::default(),
-            error: None,
+            error,
         }
     }
 
     fn refresh(&mut self, conn: &Connection) {
-        self.players = db::list_players(conn).unwrap_or_default();
+        match db::list_players(conn) {
+            Ok(p) => self.players = p,
+            Err(e) => self.error = Some(format!("Couldn’t reload players: {e}")),
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum PlayersMessage {
+    RetryLoad,
     OpenProfile(i64),
     ChoosePicture(i64),
     PictureChosen(i64, Result<Option<Vec<u8>>, String>),
@@ -261,6 +269,10 @@ pub fn update(
 ) -> Task<Message> {
     state.error = None;
     match message {
+        PlayersMessage::RetryLoad => {
+            state.error = None;
+            state.refresh(conn);
+        }
         PlayersMessage::ChoosePicture(id) => {
             if state.choosing_picture {
                 return Task::none();
@@ -651,8 +663,10 @@ pub fn update(
                         Some(SearchFor::Partner(primary)) => Some(primary.id),
                         _ => Some(commander.id),
                     };
-                    m.commanders =
-                        db::player_commander_history(conn, m.player.id).unwrap_or_default();
+                    match db::player_commander_history(conn, m.player.id) {
+                        Ok(decks) => m.commanders = decks,
+                        Err(e) => state.error = Some(format!("Couldn’t load decks: {e}")),
+                    }
                     m.search_for = None;
                     m.results.clear();
                     m.query.clear();
@@ -673,7 +687,10 @@ pub fn update(
                     .deck(commander_id)
                     .and_then(|d| d.partner.as_ref())
                     .map(|p| p.id);
-                let _ = db::set_player_partner(conn, m.player.id, commander_id, None);
+                if let Err(e) = db::set_player_partner(conn, m.player.id, commander_id, None) {
+                    state.error = Some(format!("Couldn’t save the partner change: {e}"));
+                    return Task::none();
+                }
                 let removed = db::remove_player_commander(conn, m.player.id, commander_id)
                     .and_then(|()| match partner_id {
                         Some(id) => db::remove_player_commander(conn, m.player.id, id),
@@ -682,8 +699,10 @@ pub fn update(
                 match removed {
                     Ok(()) => {
                         m.selected = None;
-                        m.commanders =
-                            db::player_commander_history(conn, m.player.id).unwrap_or_default();
+                        match db::player_commander_history(conn, m.player.id) {
+                            Ok(decks) => m.commanders = decks,
+                            Err(e) => state.error = Some(format!("Couldn’t load decks: {e}")),
+                        }
                     }
                     Err(e) => state.error = Some(format!("Couldn't remove: {e}")),
                 }
@@ -745,8 +764,10 @@ pub fn update(
                 &target.color_identity,
             ) {
                 Ok(commander) => {
-                    m.commanders =
-                        db::player_commander_history(conn, m.player.id).unwrap_or_default();
+                    match db::player_commander_history(conn, m.player.id) {
+                        Ok(decks) => m.commanders = decks,
+                        Err(e) => state.error = Some(format!("Couldn’t load decks: {e}")),
+                    }
                     if let Some(url) = commander.portrait_url() {
                         let url = url.to_string();
                         let key = url.clone();
@@ -772,18 +793,32 @@ pub fn update(
                 return Task::none();
             };
             if primary.id != partner.id {
-                let _ = db::set_player_partner(conn, m.player.id, primary.id, Some(partner.id));
+                if let Err(e) =
+                    db::set_player_partner(conn, m.player.id, primary.id, Some(partner.id))
+                {
+                    state.error = Some(format!("Couldn’t save the partner change: {e}"));
+                    return Task::none();
+                }
             }
             m.selected = Some(primary.id);
-            m.commanders = db::player_commander_history(conn, m.player.id).unwrap_or_default();
+            match db::player_commander_history(conn, m.player.id) {
+                Ok(decks) => m.commanders = decks,
+                Err(e) => state.error = Some(format!("Couldn’t load decks: {e}")),
+            }
             m.query.clear();
             m.results.clear();
             state.kb.close();
         }
         PlayersMessage::Unpair(commander) => {
             if let Some(m) = &mut state.managing {
-                let _ = db::set_player_partner(conn, m.player.id, commander.id, None);
-                m.commanders = db::player_commander_history(conn, m.player.id).unwrap_or_default();
+                if let Err(e) = db::set_player_partner(conn, m.player.id, commander.id, None) {
+                    state.error = Some(format!("Couldn’t save the partner change: {e}"));
+                    return Task::none();
+                }
+                match db::player_commander_history(conn, m.player.id) {
+                    Ok(decks) => m.commanders = decks,
+                    Err(e) => state.error = Some(format!("Couldn’t load decks: {e}")),
+                }
             }
         }
         PlayersMessage::Focus(field) => {
@@ -900,7 +935,7 @@ fn card_art_tasks(cards: &[ScryfallCard]) -> Task<Message> {
     fetch_all(urls)
 }
 
-fn fetch_all(urls: Vec<String>) -> Task<Message> {
+pub(crate) fn fetch_all(urls: Vec<String>) -> Task<Message> {
     Task::batch(urls.into_iter().map(|url| {
         let key = url.clone();
         Task::perform(scryfall::fetch_image(url), move |res| {
@@ -1187,7 +1222,11 @@ pub fn view<'a>(
     .spacing(style::GAP);
 
     if let Some(e) = &state.error {
-        content = content.push(error_banner(e));
+        content = content.push(error_banner(e)).push(
+            style::touch_button("Reload players", style::T_LABEL)
+                .style(style::ghost)
+                .on_press(Message::Players(PlayersMessage::RetryLoad)),
+        );
     }
 
     with_keyboard(

@@ -3,6 +3,8 @@ mod art;
 mod cache;
 mod cards;
 mod db;
+mod session;
+mod storage;
 
 mod icon;
 mod keyboard;

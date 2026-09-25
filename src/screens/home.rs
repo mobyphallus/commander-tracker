@@ -10,6 +10,10 @@ use crate::{db, layout, style, table_preview};
 #[derive(Debug, Clone)]
 pub enum HomeMessage {
     StartGame,
+    ResumeGame,
+    PlayAgain,
+    Storage,
+    Retry,
     ViewStats,
     ViewHistory,
     ManagePlayers,
@@ -19,15 +23,45 @@ pub enum HomeMessage {
 /// Loaded when returning home, never queried on each rendered frame.
 #[derive(Default)]
 pub struct HomeState {
+    pub error: Option<String>,
+    pub resumable: bool,
+    pub saved_layout: Option<layout::TableLayout>,
+    pub play_again: bool,
     pub games_played: usize,
     pub recent: Vec<GameSummary>,
 }
 impl HomeState {
     pub fn load(conn: &Connection) -> Self {
-        let mut recent = db::list_games(conn).unwrap_or_default();
+        let (mut recent, mut error) = match db::list_games(conn) {
+            Ok(games) => (games, None),
+            Err(e) => (Vec::new(), Some(format!("Couldn’t load history: {e}"))),
+        };
+        let resumable = match db::active_game(conn) {
+            Ok(s) => s.is_some(),
+            Err(e) => {
+                error = Some(format!("Couldn’t check for a saved game: {e}"));
+                true
+            }
+        };
         let games_played = recent.len();
         recent.truncate(3);
+        let saved_layout = if resumable {
+            match crate::session::load(conn) {
+                Ok(Some(game)) => Some(game.table_layout),
+                Ok(None) => None,
+                Err(e) => {
+                    error = Some(e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Self {
+            saved_layout,
+            error,
+            resumable,
+            play_again: false,
             games_played,
             recent,
         }
@@ -67,34 +101,77 @@ fn destination(
     .into()
 }
 
-fn start_card(height: f32) -> Element<'static, Message> {
-    let table = layout::options_for(4).remove(0);
+fn start_card(height: f32, state: &HomeState) -> Element<'static, Message> {
+    let resumable = state.resumable;
+    let play_again = state.play_again && !resumable;
+    let table = state
+        .saved_layout
+        .clone()
+        .unwrap_or_else(|| layout::options_for(4).remove(0));
     container(
         column![
             text("YOUR NEXT GAME")
                 .size(style::T_CAPTION)
                 .color(style::ACCENT_BRIGHT),
-            text("Gather your pod.").size(style::T_DISPLAY),
-            text("Pick your players. Bring your commanders.")
-                .size(style::T_LABEL)
-                .color(style::TEXT_MUTED),
+            text(if resumable {
+                "Your game is saved."
+            } else if play_again {
+                "Another round?"
+            } else {
+                "Gather your pod."
+            })
+            .size(style::T_DISPLAY),
+            text(if resumable {
+                "Pick up where you left off. Timers resume paused."
+            } else if play_again {
+                "Same players and decks. Choose who starts."
+            } else {
+                "Pick your players. Bring your commanders."
+            })
+            .size(style::T_LABEL)
+            .color(style::TEXT_MUTED),
             container(table_preview::view(&table))
                 .height(Length::Fill)
                 .padding([8, 32]),
             row![
                 column![
-                    text("2–8 players").size(style::T_SUBHEAD),
-                    text("40 starting life")
-                        .size(style::T_BODY)
-                        .color(style::TEXT_MUTED)
+                    text(if resumable {
+                        "Saved table"
+                    } else {
+                        "2–8 players"
+                    })
+                    .size(style::T_SUBHEAD),
+                    text(if resumable {
+                        "Life, damage & turns preserved"
+                    } else {
+                        "40 starting life"
+                    })
+                    .size(style::T_BODY)
+                    .color(style::TEXT_MUTED)
                 ]
                 .spacing(style::GAP_XS),
                 iced::widget::horizontal_space(),
-                style::icon_button(Glyph::Play, "Start Game", style::T_ACTION)
-                    .width(240)
-                    .height(style::TOUCH_H_LG)
-                    .style(style::primary)
-                    .on_press(Message::Home(HomeMessage::StartGame)),
+                style::icon_button(
+                    Glyph::Play,
+                    if resumable {
+                        "Resume Game"
+                    } else if play_again {
+                        "Play again"
+                    } else {
+                        "Start Game"
+                    },
+                    style::T_ACTION
+                )
+                .width(240)
+                .height(style::TOUCH_H_LG)
+                .style(style::primary)
+                .on_press(Message::Home(if resumable {
+                    HomeMessage::ResumeGame
+                } else if play_again {
+                    HomeMessage::PlayAgain
+                } else {
+                    HomeMessage::StartGame
+                })),
             ]
             .align_y(Alignment::Center)
             .spacing(style::GAP),
@@ -218,15 +295,23 @@ pub fn view<'a>(state: &'a HomeState, players: &'a [Player]) -> Element<'a, Mess
                     .color(style::TEXT_MUTED)
             ]
             .spacing(style::GAP_XS),
+            iced::widget::horizontal_space(),
+            style::touch_button("Backup & restore", style::T_LABEL)
+                .width(200)
+                .style(style::ghost)
+                .on_press(Message::Home(HomeMessage::Storage)),
         ]
         .spacing(style::GAP)
         .align_y(Alignment::Center);
         let main: Element<Message> = if wide {
-            row![start_card(main_height), recent_games(state, main_height)]
-                .spacing(24)
-                .into()
+            row![
+                start_card(main_height, state),
+                recent_games(state, main_height)
+            ]
+            .spacing(24)
+            .into()
         } else {
-            column![start_card(main_height), recent_games(state, 460.)]
+            column![start_card(main_height, state), recent_games(state, 460.)]
                 .spacing(24)
                 .into()
         };
@@ -274,17 +359,28 @@ pub fn view<'a>(state: &'a HomeState, players: &'a [Player]) -> Element<'a, Mess
         } else {
             column(destinations).spacing(16).into()
         };
-        scrollable(
-            container(
-                column![header, main, nav]
-                    .spacing(24)
-                    .padding(32)
-                    .max_width(1800),
-            )
-            .center_x(Length::Fill),
-        )
-        .height(Length::Fill)
-        .into()
+        let mut extras = column![].spacing(style::GAP);
+        if state.play_again && !state.resumable {
+            extras = extras.push(
+                style::touch_button("Set up a different pod", style::T_LABEL)
+                    .style(style::ghost)
+                    .on_press(Message::Home(HomeMessage::StartGame)),
+            );
+        }
+        if let Some(error) = &state.error {
+            extras = extras.push(text(error).color(style::DANGER)).push(
+                style::touch_button("Retry loading", style::T_LABEL)
+                    .on_press(Message::Home(HomeMessage::Retry)),
+            );
+        }
+        let mut page = column![header, main];
+        if state.error.is_some() || (state.play_again && !state.resumable) {
+            page = page.push(extras);
+        }
+        page = page.push(nav);
+        scrollable(container(page.spacing(24).padding(32).max_width(1800)).center_x(Length::Fill))
+            .height(Length::Fill)
+            .into()
     })
     .into()
 }

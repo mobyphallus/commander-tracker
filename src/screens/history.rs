@@ -4,19 +4,48 @@ use rusqlite::Connection;
 
 use crate::app::Message;
 use crate::db;
-use crate::model::{GameDetail, GameDetailSeat, GameSummary};
+use crate::keyboard;
+use crate::model::{GameDetail, GameDetailSeat, GameSummary, WinReason};
 use crate::style;
 
 pub struct HistoryState {
     pub games: Vec<GameSummary>,
+    pub error: Option<String>,
+    query: String,
+    days: Option<i64>,
+    terms: std::collections::HashMap<i64, String>,
+    kb: keyboard::Keyboard<()>,
+    editing: bool,
+    confirming: bool,
+    winner: Option<i64>,
+    reason: Option<WinReason>,
     pub selected: Option<GameDetail>,
 }
 
 impl HistoryState {
     pub fn load(conn: &Connection) -> Self {
+        let (games, terms, error) = match db::list_games(conn)
+            .and_then(|g| db::history_search_terms(conn).map(|t| (g, t)))
+        {
+            Ok((g, t)) => (g, t, None),
+            Err(e) => (
+                Vec::new(),
+                Default::default(),
+                Some(format!("Couldn’t load history: {e}")),
+            ),
+        };
         Self {
-            games: db::list_games(conn).unwrap_or_default(),
+            games,
+            terms,
+            error,
             selected: None,
+            query: String::new(),
+            days: None,
+            kb: keyboard::Keyboard::default(),
+            editing: false,
+            confirming: false,
+            winner: None,
+            reason: None,
         }
     }
 }
@@ -24,14 +53,83 @@ impl HistoryState {
 #[derive(Debug, Clone)]
 pub enum HistoryMessage {
     ViewGame(i64),
+    Retry,
+    Query(String),
+    Days(Option<i64>),
+    Search,
+    Key(keyboard::Key),
+    Edit,
+    Winner(Option<i64>),
+    Reason(WinReason),
+    Review,
+    BackToEdit,
+    SaveCorrection,
+    CancelEdit,
     Back,
 }
 
 pub fn update(state: &mut HistoryState, conn: &Connection, message: HistoryMessage) {
     match message {
-        HistoryMessage::ViewGame(id) => {
-            state.selected = db::game_detail(conn, id).ok();
+        HistoryMessage::Retry => *state = HistoryState::load(conn),
+        HistoryMessage::Query(q) => state.query = q,
+        HistoryMessage::Days(days) => state.days = days,
+        HistoryMessage::Search => state.kb.open((), &state.query),
+        HistoryMessage::Key(key) => {
+            if state.kb.press(key, &mut state.query) == keyboard::Outcome::Submit {
+                state.kb.close();
+            }
         }
+        HistoryMessage::Edit => {
+            if let Some(detail) = &state.selected {
+                state.winner = detail
+                    .seats
+                    .iter()
+                    .find(|s| s.won)
+                    .map(|s| s.game_player_id);
+                state.reason = detail.win_reason;
+                state.editing = true;
+                state.confirming = false;
+            }
+        }
+        HistoryMessage::Winner(winner) => {
+            state.winner = winner;
+            if winner.is_none() {
+                state.reason = None;
+            }
+        }
+        HistoryMessage::Reason(reason) => state.reason = Some(reason),
+        HistoryMessage::Review => state.confirming = true,
+        HistoryMessage::BackToEdit => state.confirming = false,
+        HistoryMessage::CancelEdit => {
+            state.editing = false;
+            state.confirming = false;
+            state.error = None;
+        }
+        HistoryMessage::SaveCorrection => {
+            if state.confirming {
+                if let Some(id) = state.selected.as_ref().map(|d| d.id) {
+                    match db::correct_game_result(conn, id, state.winner, state.reason) {
+                        Ok(()) => {
+                            let query = state.query.clone();
+                            let days = state.days;
+                            *state = HistoryState::load(conn);
+                            state.query = query;
+                            state.days = days;
+                            update(state, conn, HistoryMessage::ViewGame(id));
+                        }
+                        Err(e) => state.error = Some(e),
+                    }
+                }
+            }
+        }
+        HistoryMessage::ViewGame(id) => match db::game_detail(conn, id) {
+            Ok(detail) => {
+                state.selected = Some(detail);
+                state.error = None;
+                state.kb.close();
+            }
+            Err(e) => state.error = Some(format!("Couldn’t open this game: {e}")),
+        },
         HistoryMessage::Back => {
             state.selected = None;
         }
@@ -173,6 +271,9 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
 
 fn view_sized(state: &HistoryState, compact: bool) -> Element<'_, Message> {
     if let Some(detail) = &state.selected {
+        if state.editing {
+            return correction_view(state, detail);
+        }
         return detail_view(detail, compact);
     }
 
@@ -188,12 +289,18 @@ fn view_sized(state: &HistoryState, compact: bool) -> Element<'_, Message> {
             "No games yet",
             "Finish a game and its box score lands here.",
         )
+    } else if !state.games.iter().any(|game| state.matches(game)) {
+        empty_state(
+            "No matching games",
+            "Try another player or commander, or choose All dates.",
+        )
     } else {
         scrollable(
             column(
                 state
                     .games
                     .iter()
+                    .filter(|game| state.matches(game))
                     .map(|game| game_row(game, compact))
                     .collect::<Vec<Element<Message>>>(),
             )
@@ -205,14 +312,58 @@ fn view_sized(state: &HistoryState, compact: bool) -> Element<'_, Message> {
         .into()
     };
 
-    container(
-        column![header, body]
-            .spacing(style::GAP)
-            .padding(style::GAP),
+    let input = iced::widget::mouse_area(
+        iced::widget::text_input("Search any player or commander", &state.query)
+            .on_input(|q| Message::History(HistoryMessage::Query(q)))
+            .size(style::T_LABEL)
+            .style(style::input)
+            .padding(16),
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    .on_press(Message::History(HistoryMessage::Search));
+    let dates = row([
+        ("All dates", None),
+        ("Last 30 days", Some(30)),
+        ("Last 90 days", Some(90)),
+        ("Last year", Some(365)),
+    ]
+    .into_iter()
+    .map(|(label, days)| {
+        style::touch_button(label, style::T_LABEL)
+            .style(if state.days == days {
+                style::primary
+            } else {
+                style::ghost
+            })
+            .on_press(Message::History(HistoryMessage::Days(days)))
+            .into()
+    }))
+    .spacing(style::GAP_SM);
+    let matched = state.games.iter().filter(|g| state.matches(g)).count();
+    let mut page = column![
+        header,
+        input,
+        dates,
+        text(format!("{matched} matching games")).color(style::TEXT_MUTED)
+    ]
+    .spacing(style::GAP);
+    if let Some(e) = &state.error {
+        page = page.push(text(e).color(style::DANGER)).push(
+            style::touch_button("Retry", style::T_LABEL)
+                .on_press(Message::History(HistoryMessage::Retry)),
+        );
+    }
+    page = page.push(body);
+    if state.kb.field().is_some() {
+        page = page.push(keyboard::view(
+            &state.kb,
+            |k| Message::History(HistoryMessage::Key(k)),
+            Some("Filter"),
+        ));
+    }
+    container(page.padding(style::GAP))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// One past game, read left to right: when it was, who took it and with
@@ -297,14 +448,26 @@ fn detail_view(detail: &GameDetail, compact: bool) -> Element<'_, Message> {
             detail.started_at.format("%H:%M"),
             duration_label(
                 detail
-                    .ended_at
-                    .signed_duration_since(detail.started_at)
-                    .num_minutes()
+                    .elapsed_seconds
+                    .map(|s| s as i64 / 60)
+                    .unwrap_or_else(|| detail
+                        .ended_at
+                        .signed_duration_since(detail.started_at)
+                        .num_minutes())
             ),
         ),
         "Back to list",
         Message::History(HistoryMessage::Back),
     );
+
+    let header = row![
+        header,
+        style::touch_button("Correct result", style::T_LABEL)
+            .style(style::secondary)
+            .on_press(Message::History(HistoryMessage::Edit))
+    ]
+    .spacing(style::GAP)
+    .align_y(Alignment::Center);
 
     let winner = detail
         .seats
@@ -501,4 +664,246 @@ fn seat_row(s: &GameDetailSeat, compact: bool) -> Element<'_, Message> {
         style::panel
     })
     .into()
+}
+
+impl HistoryState {
+    fn matches(&self, game: &GameSummary) -> bool {
+        let query = self.query.trim().to_lowercase();
+        let matches_name =
+            query.is_empty() || self.terms.get(&game.id).is_some_and(|t| t.contains(&query));
+        matches_name
+            && self.days.is_none_or(|days| {
+                game.started_at >= chrono::Utc::now() - chrono::Duration::days(days)
+            })
+    }
+}
+fn correction_view<'a>(state: &'a HistoryState, detail: &'a GameDetail) -> Element<'a, Message> {
+    let header = style::page_header(
+        if state.confirming {
+            "Review corrected result"
+        } else {
+            "Correct game result"
+        },
+        "Choose the winner and how the game ended",
+        Message::History(HistoryMessage::CancelEdit),
+    );
+    let mut body = column![text("Your statistics will use this result. The original result is kept in case it needs to be checked.").size(style::T_BODY).color(style::TEXT_MUTED)].spacing(style::GAP);
+    if state.confirming {
+        let winner = state
+            .winner
+            .and_then(|id| detail.seats.iter().find(|s| s.game_player_id == id))
+            .map(|s| s.player_name.as_str())
+            .unwrap_or("No winner / unresolved");
+        body = body.push(
+            container(
+                column![
+                    text("CORRECTED RESULT")
+                        .size(style::T_CAPTION)
+                        .color(style::ACCENT_BRIGHT),
+                    text(winner).size(style::T_TITLE),
+                    text(state.reason.map(|r| r.label()).unwrap_or("Unresolved"))
+                        .size(style::T_SUBHEAD)
+                ]
+                .spacing(style::GAP),
+            )
+            .padding(24)
+            .width(Length::Fill)
+            .style(style::panel),
+        );
+    } else {
+        body = body.push(text("Winner").size(style::T_SUBHEAD));
+        let mut choices: Vec<Element<'a, Message>> = detail
+            .seats
+            .iter()
+            .map(|seat| {
+                button(
+                    column![
+                        text(&seat.player_name).size(style::T_SUBHEAD),
+                        text(&seat.commander_name)
+                            .size(style::T_CAPTION)
+                            .color(style::TEXT_MUTED)
+                    ]
+                    .spacing(6),
+                )
+                .padding(16)
+                .width(Length::Fill)
+                .height(100)
+                .style(if state.winner == Some(seat.game_player_id) {
+                    style::tile_selected
+                } else {
+                    style::secondary
+                })
+                .on_press(Message::History(HistoryMessage::Winner(Some(
+                    seat.game_player_id,
+                ))))
+                .into()
+            })
+            .collect();
+        choices.push(
+            style::touch_button("No winner / unresolved", style::T_LABEL)
+                .width(Length::Fill)
+                .height(100)
+                .style(if state.winner.is_none() {
+                    style::tile_selected
+                } else {
+                    style::secondary
+                })
+                .on_press(Message::History(HistoryMessage::Winner(None)))
+                .into(),
+        );
+        let mut choices = choices.into_iter();
+        loop {
+            let batch: Vec<_> = choices.by_ref().take(2).collect();
+            if batch.is_empty() {
+                break;
+            }
+            body = body.push(row(batch).spacing(style::GAP));
+        }
+        if state.winner.is_some() {
+            body = body.push(text("Ending reason").size(style::T_SUBHEAD));
+            for reasons in WinReason::ALL.chunks(2) {
+                body = body.push(
+                    row(reasons.iter().map(|&reason| {
+                        style::touch_button(reason.label(), style::T_LABEL)
+                            .width(Length::Fill)
+                            .height(64)
+                            .style(if state.reason == Some(reason) {
+                                style::tile_selected
+                            } else {
+                                style::secondary
+                            })
+                            .on_press(Message::History(HistoryMessage::Reason(reason)))
+                            .into()
+                    }))
+                    .spacing(style::GAP),
+                );
+            }
+        }
+    }
+    if let Some(e) = &state.error {
+        body = body.push(text(e).color(style::DANGER));
+    }
+    let back = style::touch_button(
+        if state.confirming {
+            "Change selection"
+        } else {
+            "Cancel"
+        },
+        style::T_ACTION,
+    )
+    .width(Length::Fill)
+    .style(style::secondary)
+    .on_press(Message::History(if state.confirming {
+        HistoryMessage::BackToEdit
+    } else {
+        HistoryMessage::CancelEdit
+    }));
+    let mut next = style::touch_button(
+        if state.confirming {
+            "Save corrected result"
+        } else {
+            "Review change"
+        },
+        style::T_ACTION,
+    )
+    .width(Length::Fill)
+    .style(style::primary);
+    if state.winner.is_none() || state.reason.is_some() {
+        next = next.on_press(Message::History(if state.confirming {
+            HistoryMessage::SaveCorrection
+        } else {
+            HistoryMessage::Review
+        }));
+    }
+    container(
+        column![
+            header,
+            scrollable(body.padding(iced::Padding::ZERO.right(12))).height(Length::Fill),
+            row![back, next].spacing(style::GAP)
+        ]
+        .spacing(style::GAP)
+        .padding(24)
+        .max_width(1100),
+    )
+    .center_x(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn corrections_update_stats_keep_audit_and_search_losing_players() {
+        let (mut conn, mut game) = crate::session::tests::fixture();
+        game.pending_winner = Some(0);
+        game.pending_reason = Some(WinReason::CombatDamage);
+        let _ = crate::screens::game::update(
+            &mut game,
+            &mut conn,
+            crate::screens::game::GameMessage::ConfirmEndGame,
+        );
+        let mut state = HistoryState::load(&conn);
+        let id = state.games[0].id;
+        update(
+            &mut state,
+            &conn,
+            HistoryMessage::Query("Bo commander".into()),
+        );
+        assert!(state.matches(&state.games[0]));
+        update(&mut state, &conn, HistoryMessage::ViewGame(id));
+        let winner = state.selected.as_ref().unwrap().seats[1].game_player_id;
+        update(&mut state, &conn, HistoryMessage::Edit);
+        update(&mut state, &conn, HistoryMessage::Winner(Some(winner)));
+        update(&mut state, &conn, HistoryMessage::Reason(WinReason::Poison));
+        update(&mut state, &conn, HistoryMessage::SaveCorrection);
+        assert_eq!(
+            db::list_games(&conn).unwrap()[0].winner_name.as_deref(),
+            Some("Ada"),
+            "confirmation is required"
+        );
+        update(&mut state, &conn, HistoryMessage::Review);
+        update(&mut state, &conn, HistoryMessage::SaveCorrection);
+        assert_eq!(
+            state.selected.as_ref().unwrap().win_reason,
+            Some(WinReason::Poison)
+        );
+        let stats = crate::screens::stats::data::Data::load(&conn).unwrap();
+        assert_eq!(
+            stats
+                .summary(crate::screens::stats::data::Scope::Players)
+                .records
+                .iter()
+                .find(|r| r.identity.name == "Bo")
+                .unwrap()
+                .wins,
+            1
+        );
+        let audit: String = conn
+            .query_row("SELECT before_json FROM game_result_edits", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let before: GameDetail = serde_json::from_str(&audit).unwrap();
+        assert!(before.seats[0].won);
+        assert!(db::correct_game_result(&conn, id, Some(99999), Some(WinReason::Other)).is_err());
+        assert_eq!(
+            db::list_games(&conn).unwrap()[0].winner_name.as_deref(),
+            Some("Bo")
+        );
+        update(&mut state, &conn, HistoryMessage::Back);
+        update(&mut state, &conn, HistoryMessage::Days(Some(30)));
+        assert!(state.matches(&state.games[0]));
+        state.games[0].started_at = chrono::Utc::now() - chrono::Duration::days(31);
+        assert!(!state.matches(&state.games[0]));
+    }
+    #[test]
+    fn load_errors_are_explicit() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(HistoryState::load(&conn).error.is_some());
+        assert!(crate::screens::home::HomeState::load(&conn).error.is_some());
+        assert!(crate::screens::players::PlayersState::load(&conn)
+            .error
+            .is_some());
+    }
 }

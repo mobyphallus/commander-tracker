@@ -19,13 +19,26 @@ use crate::model::{
 use crate::rotated::{self, Line};
 use crate::style;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SeatTab {
     Life,
     Poison,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GameState {
+    #[serde(skip)]
+    pub error: Option<String>,
+    #[serde(skip)]
+    pub result_save_failed: bool,
+    #[serde(skip)]
+    pub help_open: bool,
+    #[serde(skip)]
+    pub help_was_paused: bool,
+    #[serde(skip)]
+    pub undo_open: bool,
+    #[serde(skip)]
+    pub undo: Vec<crate::session::UndoEntry>,
     pub seats: Vec<Seat>,
     pub table_layout: TableLayout,
     pub started_at: chrono::DateTime<Utc>,
@@ -66,6 +79,7 @@ pub struct GameState {
     /// couple of seconds instead of the normal +/-1 on release, and an
     /// upward drag past the swipe threshold turns it into opening the
     /// action menu instead.
+    #[serde(skip)]
     pub press_hold: Option<PressHold>,
     /// Which seat's action menu (Commander Damage / Poison / Mark Out /
     /// Declare Winner) is currently open, if any.
@@ -81,14 +95,14 @@ pub struct GameState {
 
 /// Marking a seat out: why first, then who gets the kill. Some causes skip
 /// straight past the first question, and one skips both.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct OutFlow {
     pub seat: usize,
     /// `None` while the cause is still being asked.
     pub cause: Option<OutCause>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct HateFlow {
     pub victim: usize,
     pub kind: Option<HateKind>,
@@ -132,6 +146,33 @@ const SWIPE_DAMAGE_THRESHOLD: f32 = 90.0;
 const HOLD_THRESHOLD: Duration = Duration::from_secs(2);
 
 impl GameState {
+    pub(crate) fn valid_recovery_lengths(&self) -> bool {
+        let n = self.seats.len();
+        self.turns_taken.len() == n
+            && self.seat_tab.len() == n
+            && self.zero_life_prompt_dismissed.len() == n
+            && self.damage_slot.len() == n
+            && [
+                self.pending_life_check,
+                self.pending_winner,
+                self.action_menu_for,
+                self.damage_focus,
+                self.out_flow.map(|f| f.seat),
+                self.hate_flow.map(|f| f.victim),
+            ]
+            .into_iter()
+            .flatten()
+            .all(|i| i < n)
+            && self
+                .kills
+                .iter()
+                .all(|k| k.victim_seat < n && k.killer_seat.is_none_or(|i| i < n))
+            && self.seats.iter().all(|s| {
+                s.elimination
+                    .is_none_or(|e| e.killer_seat.is_none_or(|i| i < n))
+            })
+    }
+
     /// Which of `seat`'s commanders the damage focus is logging, clamped
     /// to what that seat actually has so a stale PARTNER can never point at
     /// a commander that isn't there.
@@ -160,6 +201,12 @@ impl GameState {
             *turns = 1;
         }
         Self {
+            error: None,
+            result_save_failed: false,
+            help_open: false,
+            help_was_paused: false,
+            undo_open: false,
+            undo: Vec::new(),
             turns_taken,
             seats,
             table_layout,
@@ -265,6 +312,14 @@ impl GameState {
 #[derive(Debug, Clone)]
 pub enum GameMessage {
     Tick,
+    Undo,
+    OpenUndo,
+    CloseUndo,
+    ShowHelp,
+    DismissHelp,
+    RetrySave,
+    DismissError,
+    SaveAndHome,
     TogglePause,
     OpenGameMenu,
     CloseGameMenu,
@@ -305,6 +360,7 @@ pub enum GameMessage {
 pub enum Action {
     Finished,
     Abandoned,
+    Suspended,
 }
 
 pub fn update(
@@ -312,7 +368,67 @@ pub fn update(
     conn: &mut Connection,
     message: GameMessage,
 ) -> (iced::Task<Message>, Option<Action>) {
+    crate::session::update(state, conn, message)
+}
+
+pub(crate) fn update_inner(
+    state: &mut GameState,
+    conn: &mut Connection,
+    message: GameMessage,
+) -> (iced::Task<Message>, Option<Action>) {
     match message {
+        GameMessage::Undo => {
+            crate::session::undo(state);
+            (iced::Task::none(), None)
+        }
+        GameMessage::OpenUndo => {
+            state.undo_open = true;
+            state.game_menu_open = false;
+            (iced::Task::none(), None)
+        }
+        GameMessage::CloseUndo => {
+            state.undo_open = false;
+            (iced::Task::none(), None)
+        }
+        GameMessage::ShowHelp => {
+            state.help_was_paused = state.paused;
+            state.paused = true;
+            state.help_open = true;
+            state.game_menu_open = false;
+            (iced::Task::none(), None)
+        }
+        GameMessage::DismissHelp => {
+            state.help_open = false;
+            state.paused = state.help_was_paused;
+            if let Err(e) = db::set_setting(conn, "gestures_seen", "yes") {
+                state.error = Some(e.to_string());
+            }
+            (iced::Task::none(), None)
+        }
+        GameMessage::DismissError => {
+            state.error = None;
+            (iced::Task::none(), None)
+        }
+        GameMessage::RetrySave => {
+            state.error = None;
+            if std::mem::take(&mut state.result_save_failed) {
+                return update_inner(state, conn, GameMessage::ConfirmEndGame);
+            }
+            if let Err(e) = crate::session::save(conn, state) {
+                state.error = Some(e);
+            }
+            (iced::Task::none(), None)
+        }
+        GameMessage::SaveAndHome => {
+            state.paused = true;
+            match crate::session::save(conn, state) {
+                Ok(()) => (iced::Task::none(), Some(Action::Suspended)),
+                Err(e) => {
+                    state.error = Some(e);
+                    (iced::Task::none(), None)
+                }
+            }
+        }
         GameMessage::Tick => {
             if !state.paused {
                 state.turn_seconds += 1;
@@ -569,6 +685,7 @@ pub fn update(
             (iced::Task::none(), None)
         }
         GameMessage::CancelDeclareWinner => {
+            state.result_save_failed = false;
             state.pending_winner = None;
             state.pending_reason = None;
             (iced::Task::none(), None)
@@ -580,6 +697,7 @@ pub fn update(
         GameMessage::ConfirmEndGame => {
             if let (Some(winner), Some(reason)) = (state.pending_winner, state.pending_reason) {
                 let finished = FinishedGame {
+                    elapsed_seconds: state.game_seconds,
                     seats: state.seats.clone(),
                     winner_seat: Some(winner),
                     win_reason: Some(reason),
@@ -590,7 +708,13 @@ pub fn update(
                 };
                 match db::record_game(conn, &finished) {
                     Ok(()) => (iced::Task::none(), Some(Action::Finished)),
-                    Err(_) => (iced::Task::none(), None),
+                    Err(e) => {
+                        state.result_save_failed = true;
+                        state.error = Some(format!(
+                            "Couldn’t save this game: {e}. Your game is still open; try again."
+                        ));
+                        (iced::Task::none(), None)
+                    }
                 }
             } else {
                 (iced::Task::none(), None)
@@ -606,10 +730,15 @@ pub fn update(
             state.pending_abandon = false;
             (iced::Task::none(), None)
         }
-        GameMessage::AbandonGame => (
-            iced::Task::none(),
-            state.pending_abandon.then_some(Action::Abandoned),
-        ),
+        GameMessage::AbandonGame => {
+            if state.pending_abandon {
+                match db::clear_active_game(conn) {
+                    Ok(()) => return (iced::Task::none(), Some(Action::Abandoned)),
+                    Err(e) => state.error = Some(format!("Couldn’t discard the saved game: {e}")),
+                }
+            }
+            (iced::Task::none(), None)
+        }
     }
 }
 
@@ -704,6 +833,18 @@ fn game_menu_view(state: &GameState) -> Element<'_, Message> {
             .width(Length::Fill)
             .style(style::secondary)
             .on_press(Message::Game(GameMessage::TogglePause)),
+            style::touch_button("Recent actions & undo", style::T_LABEL)
+                .width(Length::Fill)
+                .style(style::secondary)
+                .on_press(Message::Game(GameMessage::OpenUndo)),
+            style::touch_button("Touch controls", style::T_LABEL)
+                .width(Length::Fill)
+                .style(style::secondary)
+                .on_press(Message::Game(GameMessage::ShowHelp)),
+            style::touch_button("Save & return home", style::T_LABEL)
+                .width(Length::Fill)
+                .style(style::secondary)
+                .on_press(Message::Game(GameMessage::SaveAndHome)),
             style::touch_button("Back to game", style::T_ACTION)
                 .width(Length::Fill)
                 .style(style::primary)
@@ -719,7 +860,7 @@ fn game_menu_view(state: &GameState) -> Element<'_, Message> {
 
 fn dialog<'a>(content: iced::widget::Column<'a, Message>) -> Element<'a, Message> {
     container(
-        container(content)
+        container(scrollable(content).height(Length::Shrink))
             .padding(32)
             .max_width(560)
             .style(style::panel),
@@ -747,6 +888,69 @@ pub fn view<'a>(
     state: &'a GameState,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
+    if let Some(error) = &state.error {
+        return dialog(
+            column![
+                text("Your game is still here").size(style::T_TITLE),
+                text(error),
+                style::touch_button("Try saving again", style::T_ACTION)
+                    .on_press(Message::Game(GameMessage::RetrySave)),
+                style::touch_button("Back to game", style::T_ACTION)
+                    .on_press(Message::Game(GameMessage::DismissError))
+            ]
+            .spacing(style::GAP),
+        );
+    }
+    if state.help_open {
+        return dialog(
+            column![
+                text("Touch controls").size(style::T_TITLE),
+                text("Each tile faces its player. These gestures follow your seat’s orientation.")
+                    .size(style::T_BODY),
+                text("Tap the left / right half to subtract / add 1.").size(style::T_LABEL),
+                text("Hold for 2 seconds to change by 10; keep holding to repeat.")
+                    .size(style::T_LABEL),
+                text("Swipe away from yourself for poison and player actions.")
+                    .size(style::T_LABEL),
+                text("Swipe sideways to record commander damage.").size(style::T_LABEL),
+                text("Tap the center timer for pause, undo, help, and saving.")
+                    .size(style::T_LABEL),
+                style::touch_button("Got it", style::T_ACTION)
+                    .width(Length::Fill)
+                    .style(style::primary)
+                    .on_press(Message::Game(GameMessage::DismissHelp))
+            ]
+            .spacing(style::GAP),
+        );
+    }
+    if state.undo_open {
+        let mut actions = column![
+            text("Recent actions").size(style::T_TITLE),
+            text("Undo restores the most recent action, including any elimination it caused.")
+                .size(style::T_BODY)
+        ]
+        .spacing(style::GAP);
+        for entry in state.undo.iter().rev().take(10) {
+            actions = actions.push(text(&entry.label).size(style::T_LABEL));
+        }
+        if state.undo.is_empty() {
+            actions = actions.push(text("No actions to undo in this session."));
+        }
+        let mut undo = style::touch_button("Undo latest action", style::T_ACTION)
+            .width(Length::Fill)
+            .style(style::secondary);
+        if !state.undo.is_empty() {
+            undo = undo.on_press(Message::Game(GameMessage::Undo));
+        }
+        return dialog(
+            actions.push(undo).push(
+                style::touch_button("Back to game", style::T_ACTION)
+                    .width(Length::Fill)
+                    .style(style::primary)
+                    .on_press(Message::Game(GameMessage::CloseUndo)),
+            ),
+        );
+    }
     if let Some(seat) = state.pending_life_check {
         return zero_life_check_view(state, seat);
     }
@@ -1573,6 +1777,7 @@ mod elimination_tests {
     /// carving out a separate code path for the tests to exercise.
     fn update_for_test(state: &mut GameState, message: GameMessage) {
         let mut conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        db::init(&conn).unwrap();
         let _ = update(state, &mut conn, message);
     }
 
@@ -1643,6 +1848,7 @@ mod elimination_tests {
     fn abandoning_requires_confirmation_and_cancel_keeps_state() {
         let mut state = game();
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::init(&conn).unwrap();
         assert!(update(&mut state, &mut conn, GameMessage::AbandonGame)
             .1
             .is_none());

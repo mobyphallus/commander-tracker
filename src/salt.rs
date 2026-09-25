@@ -1,29 +1,21 @@
-//! Bracket and salt scoring for a linked Moxfield deck.
+//! Local deck analysis for pregame conversations.
 //!
-//! Two numbers come out of here, and they answer different questions at the
-//! table. The **bracket** is the rules-of-engagement question - it applies
-//! Wizards' published bracket criteria, and every floor it reports can be
-//! pointed at ("bracket 4, because of these two cards"). The **salt score**
-//! is the social question - how much the deck is likely to annoy the other
-//! three players, which the bracket says nothing about.
+//! Brackets are estimates: card-count heuristics cannot establish a deck's
+//! consistency, intended speed, or competitive intent. Combo starting mana
+//! excludes prerequisite setup; only fully specified lines from hand qualify
+//! for the low-cost heuristic. Unknown setup is shown for manual review.
 //!
-//! # Where the numbers come from
-//!
-//! The bracket thresholds and the salt weights below are commandersalt.com's,
-//! recovered from its client and its public deck analyses, because that's the
-//! scale this pod already argues in. Two things are deliberately *not*
-//! copied: their own "Commandersalt bracket" and power-level rating, both of
-//! which need manabase and castability modelling that has no published
-//! constants and is retuned constantly. What's here is the WotC bracket,
-//! which is fully specified, plus a salt sum whose every term is either
-//! measured or marked.
+//! Salt combines EDHREC per-card scores with local category weights modeled
+//! on public commandersalt.com analyses. Each contribution is shown in the
+//! breakdown; it is not an official rating or an exact service replica.
 //!
 //! Three sources feed it, and only the first two cost a request:
 //!
-//! - **Commander Spellbook** `/estimate-bracket` classifies the list: which
-//!   cards are game changers, mass land denial or extra turns, and which
-//!   combos in the deck are two-card, fast, or locks. This is what makes the
-//!   two-card and early-infinite criteria real rather than guesswork.
+//! - **Commander Spellbook** supplies actual combo lines and prerequisites.
+//!   Starting mana excludes setup. Only fully specified lines from hand
+//!   participate in the local low-cost heuristic; this is not an official
+//!   turn-speed classification. See Wizards' October 21, 2025 bracket update:
+//!   https://magic.wizards.com/en/news/announcements/commander-brackets-beta-update-october-21-2025
 //! - **EDHREC** supplies per-card salt, the largest term in the sum. Cached
 //!   per card by `crate::cache`, so a pod pays for its card pool once.
 //! - **Moxfield's own deck JSON** supplies oracle text, type lines, prices
@@ -107,7 +99,7 @@ impl CriterionKind {
             CriterionKind::MassLandDenial => "Mass Land Denial",
             CriterionKind::ExtraTurns => "Extra Turns",
             CriterionKind::TwoCardCombos => "Two-Card Combos",
-            CriterionKind::EarlyGameInfiniteCombos => "Early-Game Infinites",
+            CriterionKind::EarlyGameInfiniteCombos => "Low-Cost Combos From Hand",
         }
     }
 
@@ -125,16 +117,16 @@ impl CriterionKind {
                 "Extra-turn spells. None is bracket 2, up to four is 3, five or more is 4."
             }
             CriterionKind::TwoCardCombos => {
-                "Clean two-card wins, locks or infinites - no extra cards, nothing already on board. Any inclusion floors the deck at 3."
+                "Spellbook’s relevant two-card lines. Commanders and setup requirements may still be involved. These set a local estimated floor of 3."
             }
             CriterionKind::EarlyGameInfiniteCombos => {
-                "Two-card combos that go infinite or win for seven mana or less. Any presence means bracket 4."
+                "Local estimate: a relevant two-card line starting entirely from hand, with no extra prerequisites, needing at most seven mana. Starting mana alone cannot establish how early a deck wins."
             }
         }
     }
 
     /// The bracket this criterion floors the deck at, given how many it
-    /// found. These thresholds are the published ones.
+    /// found. These are local screening heuristics, not official definitions.
     pub fn floor(self, count: u32) -> u8 {
         match self {
             CriterionKind::GameChangers => match count {
@@ -328,6 +320,8 @@ pub struct ComboLine {
     pub prerequisites: String,
     pub two_card: bool,
     pub early: bool,
+    #[serde(default)]
+    pub setup_cost_checked: bool,
     pub lock: bool,
 }
 
@@ -350,6 +344,8 @@ impl ComboLine {
 /// which also means it still opens at a table with no wifi.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
+    #[serde(default)]
+    pub scoring_version: u8,
     pub deck_name: String,
     /// Moxfield's id for the list this came from, so a stored analysis can be
     /// matched back to the link that produced it.
@@ -377,6 +373,26 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    /// Older cached analyses treated free activation as free assembly.
+    /// Re-evaluate their combo floor without inventing missing prerequisites.
+    pub fn review_saved(mut self) -> Self {
+        if self.scoring_version < 2 {
+            for combo in &mut self.combos {
+                combo.early = false;
+                combo.setup_cost_checked = false;
+            }
+            for criterion in &mut self.criteria {
+                if criterion.kind == CriterionKind::EarlyGameInfiniteCombos {
+                    criterion.count = 0;
+                    criterion.floor = 2;
+                    criterion.culprits.clear();
+                }
+            }
+            self.bracket = self.criteria.iter().map(|c| c.floor).max().unwrap_or(2);
+        }
+        self
+    }
+
     /// Where this deck sits on the 0-300 salt scale, clamped for the meter.
     pub fn salt_percent(&self) -> f64 {
         (self.salt_total / SALT_CEILING * 100.0).clamp(0.0, 100.0)
@@ -658,6 +674,10 @@ struct Variant {
     #[serde(default)]
     uses: Vec<Uses>,
     #[serde(default)]
+    requires: Vec<serde_json::Value>,
+    #[serde(rename = "isManaNeededAnAccurateMinimum", default)]
+    accurate_minimum: bool,
+    #[serde(default)]
     produces: Vec<Produces>,
     /// Leniently typed on purpose: this is the one field the early-infinite
     /// criterion depends on, and a shape change shouldn't sink the whole
@@ -675,6 +695,8 @@ struct Variant {
 #[derive(Debug, Deserialize)]
 struct Uses {
     card: SpellbookCardName,
+    #[serde(rename = "zoneLocations", default)]
+    zone_locations: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -909,6 +931,12 @@ fn score(
             continue;
         }
         let mana = mana_value(&variant.combo.mana_value_needed);
+        let setup_cost_checked = !variant.combo.uses.is_empty()
+            && variant.combo.uses.iter().all(|u| u.zone_locations == ["H"])
+            && variant.combo.requires.is_empty()
+            && variant.combo.notable_prerequisites.is_empty()
+            && variant.combo.easy_prerequisites.is_empty()
+            && variant.combo.accurate_minimum;
         let line = ComboLine {
             cards: variant
                 .combo
@@ -934,7 +962,10 @@ fn score(
             .collect::<Vec<_>>()
             .join("\n"),
             two_card: variant.definitely_two_card,
-            early: variant.definitely_two_card && mana.is_some_and(|m| m <= 7),
+            setup_cost_checked,
+            early: variant.definitely_two_card
+                && setup_cost_checked
+                && mana.is_some_and(|m| m <= 7),
             lock: variant.lock,
         };
 
@@ -1005,6 +1036,7 @@ fn score(
     unscored.dedup();
 
     Analysis {
+        scoring_version: 2,
         deck_name: deck.name.clone(),
         public_id: deck.public_id.clone(),
         url: deck.url.clone(),
@@ -1244,13 +1276,14 @@ mod tests {
             "cards": [],
             "combos": [{
                 "combo": {
-                    "uses": [{"card": {"name": "Demonic Consultation"}},
-                             {"card": {"name": "Thassa's Oracle"}}],
+                    "uses": [{"card": {"name": "Demonic Consultation"}, "zoneLocations": ["H"]},
+                             {"card": {"name": "Thassa's Oracle"}, "zoneLocations": ["H"]}],
                     "produces": [{"feature": {"name": "Win the game"}}],
                     "manaValueNeeded": 3,
                     "manaNeeded": "{U}{U}{B}",
-                    "easyPrerequisites": "Both cards in hand.",
-                    "notablePrerequisites": "Your library can be exiled."
+                    "easyPrerequisites": "",
+                    "notablePrerequisites": "",
+                    "isManaNeededAnAccurateMinimum": true
                 },
                 "relevant": true,
                 "definitelyTwoCard": true,
@@ -1265,10 +1298,7 @@ mod tests {
         assert_eq!(a.combos.len(), 1);
         assert!(a.combos[0].early);
         assert_eq!(a.combos[0].mana_needed, "{U}{U}{B}");
-        assert_eq!(
-            a.combos[0].prerequisites,
-            "Both cards in hand.\nYour library can be exiled."
-        );
+        assert_eq!(a.combos[0].prerequisites, "");
         let saved = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<Analysis>(&saved).unwrap(), a);
         // The owner says bracket 2. This is exactly the disagreement the
@@ -1276,7 +1306,43 @@ mod tests {
         assert!(a.understated());
 
         let deciding: Vec<&str> = a.deciding().iter().map(|c| c.kind.label()).collect();
-        assert_eq!(deciding, vec!["Early-Game Infinites"]);
+        assert_eq!(deciding, vec!["Low-Cost Combos From Hand"]);
+    }
+
+    #[test]
+    fn free_activation_does_not_imply_free_setup_or_early_combo() {
+        let deck = moxfield::Deck {
+            public_id: "test".into(),
+            name: "Setup costs".into(),
+            url: String::new(),
+            owner_bracket: None,
+            auto_bracket: None,
+            commanders: vec![card("Leader", "", "")],
+            mainboard: vec![],
+        };
+        let estimate: EstimateResponse = serde_json::from_value(serde_json::json!({"cards":[],"combos":[{"relevant":true,"definitelyTwoCard":true,"combo":{"uses":[{"card":{"name":"Expensive piece"},"zoneLocations":["B"]},{"card":{"name":"Another piece"},"zoneLocations":["B"]}],"manaValueNeeded":0,"isManaNeededAnAccurateMinimum":true,"easyPrerequisites":"Both permanents on the battlefield.","produces":[{"feature":{"name":"Infinite life loss"}}]}}]})).unwrap();
+        let result = score(&deck, &estimate, &HashMap::new());
+        assert_eq!(result.bracket, 3);
+        assert!(!result.combos[0].early);
+        assert!(!result.combos[0].setup_cost_checked);
+        assert_eq!(
+            result.combos[0].prerequisites,
+            "Both permanents on the battlefield."
+        );
+        let mut cached = result.clone();
+        cached.scoring_version = 0;
+        cached.bracket = 4;
+        cached.combos[0].early = true;
+        let criterion = cached
+            .criteria
+            .iter_mut()
+            .find(|c| c.kind == CriterionKind::EarlyGameInfiniteCombos)
+            .unwrap();
+        criterion.floor = 4;
+        criterion.count = 1;
+        let reviewed = cached.review_saved();
+        assert_eq!(reviewed.bracket, 3);
+        assert_eq!(reviewed.salt_total, result.salt_total);
     }
 
     #[test]

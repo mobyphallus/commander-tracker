@@ -31,13 +31,30 @@ pub fn open() -> rusqlite::Result<Connection> {
     path.push("pod.db");
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "foreign_keys", true)?;
+    // Preserve an upgrade copy before the first recovery/duration migration.
+    let existing: bool = conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='games'")?
+        .exists([])?;
+    let current: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('games') WHERE name='elapsed_seconds'")?
+        .exists([])?;
+    if existing && !current {
+        crate::storage::backup(&conn, &data_dir().join("backups")).map_err(|e| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "Couldn’t create the pre-upgrade backup: {e}"
+            ))
+        })?;
+    }
     init(&conn)?;
     Ok(conn)
 }
 
-fn init(conn: &Connection) -> rusqlite::Result<()> {
+pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
+        CREATE TABLE IF NOT EXISTS game_result_edits (id INTEGER PRIMARY KEY, game_id INTEGER NOT NULL REFERENCES games(id), before_json TEXT NOT NULL, edited_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS active_game (id INTEGER PRIMARY KEY CHECK(id = 1), snapshot TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS players (
             id   INTEGER PRIMARY KEY,
             name TEXT NOT NULL UNIQUE
@@ -115,6 +132,12 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
 
     migrate_scryfall_id_to_oracle_id(conn)?;
     migrate_add_ending_turn(conn)?;
+    if !conn
+        .prepare("SELECT 1 FROM pragma_table_info('games') WHERE name = 'elapsed_seconds'")?
+        .exists([])?
+    {
+        conn.execute_batch("ALTER TABLE games ADD COLUMN elapsed_seconds INTEGER;")?;
+    }
     migrate_add_hate_kind(conn)?;
     migrate_add_art_framing(conn)?;
     migrate_add_partners(conn)?;
@@ -305,12 +328,21 @@ pub fn player_game_count(conn: &Connection, id: i64) -> rusqlite::Result<i64> {
 }
 
 pub fn delete_player(conn: &Connection, id: i64) -> rusqlite::Result<()> {
-    conn.execute(
+    let active: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM active_game, json_each(snapshot, '$.game.seats') seat WHERE json_extract(seat.value, '$.player.id')=?1 OR json_extract(seat.value, '$.borrowed_from.id')=?1)", [id], |r| r.get(0))?;
+    if active {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Resume or abandon the saved game before removing one of its players or deck owners."
+                .into(),
+        ));
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM deck_analysis WHERE player_id=?1", [id])?;
+    tx.execute(
         "DELETE FROM player_commanders WHERE player_id = ?1",
         params![id],
     )?;
-    conn.execute("DELETE FROM players WHERE id = ?1", params![id])?;
-    Ok(())
+    tx.execute("DELETE FROM players WHERE id = ?1", params![id])?;
+    tx.commit()
 }
 
 pub fn remove_player_commander(
@@ -572,13 +604,14 @@ pub fn upsert_commander(
 pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO games (started_at, ended_at, pod_size, win_reason, ending_turn) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO games (started_at, ended_at, pod_size, win_reason, ending_turn, elapsed_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             game.started_at.to_rfc3339(),
             game.ended_at.to_rfc3339(),
             game.seats.len() as i64,
             game.win_reason.map(|r| r.as_db_str()),
-            game.ending_turn as i64
+            game.ending_turn as i64,
+            game.elapsed_seconds as i64
         ],
     )?;
     let game_id = tx.last_insert_rowid();
@@ -660,6 +693,7 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
         )?;
     }
 
+    tx.execute("DELETE FROM active_game", [])?;
     tx.commit()
 }
 
@@ -699,11 +733,11 @@ pub fn list_games(conn: &Connection) -> rusqlite::Result<Vec<GameSummary>> {
 }
 
 pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDetail> {
-    let (started_at, ended_at, win_reason, ending_turn): (String, String, Option<String>, i64) =
+    let (started_at, ended_at, win_reason, ending_turn, elapsed_seconds): (String, String, Option<String>, i64, Option<u64>) =
         conn.query_row(
-            "SELECT started_at, ended_at, win_reason, ending_turn FROM games WHERE id = ?1",
+            "SELECT started_at, ended_at, win_reason, ending_turn, elapsed_seconds FROM games WHERE id = ?1",
             params![game_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )?;
 
     struct SeatRow {
@@ -809,6 +843,7 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
         };
 
         seats.push(GameDetailSeat {
+            game_player_id: r.id,
             player_name,
             commander_name,
             borrowed_from,
@@ -844,6 +879,7 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
     };
 
     Ok(GameDetail {
+        elapsed_seconds,
         id: game_id,
         started_at: parse_dt(&started_at),
         ended_at: parse_dt(&ended_at),
@@ -878,7 +914,11 @@ fn deck_link_from_row(row: &rusqlite::Row) -> rusqlite::Result<(i64, DeckLink)> 
             public_id: row.get("public_id")?,
             url: row.get("url")?,
             deck_name: row.get("deck_name")?,
-            bracket: row.get::<_, Option<i64>>("bracket")?.map(|b| b as u8),
+            bracket: row
+                .get::<_, Option<String>>("breakdown")?
+                .and_then(|raw| serde_json::from_str::<crate::salt::Analysis>(&raw).ok())
+                .map(|a| a.review_saved().bracket)
+                .or(row.get::<_, Option<i64>>("bracket")?.map(|b| b as u8)),
             salt_total: row.get("salt_total")?,
         },
     ))
@@ -973,7 +1013,7 @@ pub fn deck_links(
     player_id: i64,
 ) -> rusqlite::Result<std::collections::HashMap<i64, DeckLink>> {
     let mut stmt = conn.prepare(
-        "SELECT commander_id, public_id, url, deck_name, bracket, salt_total
+        "SELECT commander_id, public_id, url, deck_name, bracket, salt_total, breakdown
          FROM deck_analysis WHERE player_id = ?1",
     )?;
     let rows = stmt.query_map(params![player_id], deck_link_from_row)?;
@@ -1001,7 +1041,9 @@ pub fn deck_breakdown(
         .optional()
         .ok()
         .flatten()?;
-    serde_json::from_str(&json).ok()
+    serde_json::from_str::<crate::salt::Analysis>(&json)
+        .ok()
+        .map(crate::salt::Analysis::review_saved)
 }
 
 #[cfg(test)]
@@ -1119,6 +1161,7 @@ mod tests {
 
     fn analysis(public_id: &str, bracket: u8, salt: f64) -> Analysis {
         Analysis {
+            scoring_version: 2,
             deck_name: "Test Deck".into(),
             public_id: public_id.into(),
             url: format!("https://moxfield.com/decks/{public_id}"),
@@ -1280,4 +1323,87 @@ mod tests {
         // screen can then offer a re-check.
         assert!(deck_breakdown(&conn, player, commander).is_none());
     }
+}
+
+pub fn save_active_game(conn: &Connection, snapshot: &str) -> rusqlite::Result<()> {
+    conn.execute("INSERT INTO active_game(id, snapshot) VALUES(1, ?1) ON CONFLICT(id) DO UPDATE SET snapshot=excluded.snapshot", [snapshot])?;
+    Ok(())
+}
+pub fn active_game(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT snapshot FROM active_game WHERE id=1", [], |r| {
+        r.get(0)
+    })
+    .optional()
+}
+pub fn clear_active_game(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM active_game", [])?;
+    Ok(())
+}
+pub fn setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+        r.get(0)
+    })
+    .optional()
+}
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,value])?;
+    Ok(())
+}
+
+/// Search all participants, including losing pilots and both partner commanders.
+pub fn history_search_terms(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::HashMap<i64, String>> {
+    let mut stmt = conn.prepare("SELECT gp.game_id, group_concat(p.name || ' ' || c.name || ' ' || coalesce(partner.name,''), ' ') FROM game_players gp JOIN players p ON p.id=gp.player_id JOIN commanders c ON c.id=gp.commander_id LEFT JOIN commanders partner ON partner.id=gp.partner_commander_id GROUP BY gp.game_id")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get::<_, String>(1)?.to_lowercase()))
+    })?;
+    rows.collect()
+}
+pub fn correct_game_result(
+    conn: &Connection,
+    game_id: i64,
+    winner: Option<i64>,
+    reason: Option<WinReason>,
+) -> Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let before = game_detail(&tx, game_id).map_err(|e| e.to_string())?;
+    if winner.is_some_and(|id| !before.seats.iter().any(|s| s.game_player_id == id)) {
+        return Err("Choose a player who participated in this game.".into());
+    }
+    if winner.is_some() != reason.is_some() {
+        return Err(
+            "Choose an ending reason for the winner, or mark the result unresolved.".into(),
+        );
+    }
+    let json = serde_json::to_string(&before).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO game_result_edits(game_id,before_json,edited_at) VALUES(?1,?2,?3)",
+        params![game_id, json, chrono::Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE game_players SET won = CASE WHEN id=?2 THEN 1 ELSE 0 END WHERE game_id=?1",
+        params![game_id, winner],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE games SET win_reason=?2 WHERE id=?1",
+        params![game_id, reason.map(|r| r.as_db_str())],
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(winner) = winner {
+        tx.execute(
+            "DELETE FROM eliminations WHERE game_id=?1 AND victim_game_player_id=?2",
+            params![game_id, winner],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+pub fn all_commanders(conn: &Connection) -> rusqlite::Result<Vec<Commander>> {
+    let mut stmt = conn.prepare(&format!("SELECT {COMMANDER_COLUMNS} FROM commanders"))?;
+    let rows = stmt.query_map([], commander_from_row)?;
+    rows.collect()
 }

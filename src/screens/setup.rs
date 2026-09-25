@@ -199,6 +199,55 @@ pub struct SetupState {
 }
 
 impl SetupState {
+    pub fn rematch(game: &crate::screens::game::GameState, conn: &Connection) -> Self {
+        let mut state = Self::new();
+        state.stage = SetupStage::TurnOrder;
+        state.pod_size = game.seats.len();
+        state.table_layout = Some(game.table_layout.clone());
+        state.profile_pictures = crate::screens::players::load_pictures(conn);
+        state.seats = game
+            .seats
+            .iter()
+            .map(|seat| {
+                let deck = SavedDeck {
+                    commander: seat.commander.clone(),
+                    partner: seat.partner.clone(),
+                };
+                let owner = seat.borrowed_from.as_ref().unwrap_or(&seat.player);
+                let links = match db::deck_links(conn, owner.id) {
+                    Ok(links) => links,
+                    Err(e) => {
+                        state.error = Some(format!("Couldn’t load deck scores: {e}"));
+                        HashMap::new()
+                    }
+                };
+                let borrowed_scores = seat
+                    .borrowed_from
+                    .as_ref()
+                    .and_then(|_| links.get(&seat.commander.id))
+                    .map(|link| {
+                        (
+                            deck,
+                            cards::DeckMeta {
+                                bracket: link.bracket,
+                                salt: link.salt_total,
+                            },
+                        )
+                    });
+                SeatSetup {
+                    player: Some(seat.player.clone()),
+                    commander: Some(seat.commander.clone()),
+                    partner: seat.partner.clone(),
+                    borrowed_from: seat.borrowed_from.clone(),
+                    borrowed_scores,
+                    deck_links: links,
+                    ..SeatSetup::default()
+                }
+            })
+            .collect();
+        state
+    }
+
     pub fn new() -> Self {
         Self {
             stage: SetupStage::ChoosePodSize,
@@ -687,9 +736,16 @@ pub fn update(
                 return (Task::none(), None);
             };
             if let Some(player) = &state.seats[seat].player {
-                let _ = db::record_player_commander_use(conn, player.id, deck.commander.id);
+                if let Err(e) = db::record_player_commander_use(conn, player.id, deck.commander.id)
+                {
+                    state.error = Some(format!("Couldn’t save the deck selection: {e}"));
+                    return (Task::none(), None);
+                }
                 if let Some(p) = &deck.partner {
-                    let _ = db::record_player_commander_use(conn, player.id, p.id);
+                    if let Err(e) = db::record_player_commander_use(conn, player.id, p.id) {
+                        state.error = Some(format!("Couldn’t save the deck selection: {e}"));
+                        return (Task::none(), None);
+                    }
                 }
             }
             let mut tasks = vec![load_portrait_task(&deck.commander)];
@@ -754,7 +810,12 @@ pub fn update(
             ) {
                 Ok(commander) => {
                     if let Some(player) = &state.seats[seat].player {
-                        let _ = db::record_player_commander_use(conn, player.id, commander.id);
+                        if let Err(e) =
+                            db::record_player_commander_use(conn, player.id, commander.id)
+                        {
+                            state.error = Some(format!("Couldn’t save the deck selection: {e}"));
+                            return (Task::none(), None);
+                        }
                     }
                     let mut tasks = vec![load_portrait_task(&commander)];
                     let slot = state.editing_slot;
@@ -837,13 +898,17 @@ pub fn update(
                 let layout_name = layout.name.clone();
                 let slot = state.editing_slot;
                 if let Some(commander) = state.seats[seat_index].commander_in(slot) {
-                    let _ = db::save_framing(
+                    if let Err(e) = db::save_framing(
                         conn,
                         commander.id,
                         &layout_name,
                         seat_index,
                         commander.framing,
-                    );
+                    ) {
+                        state.framing = true;
+                        state.error = Some(format!("Couldn’t save the art framing: {e}"));
+                        return (Task::none(), None);
+                    }
                 }
             }
             (Task::none(), None)

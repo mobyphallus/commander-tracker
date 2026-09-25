@@ -10,7 +10,7 @@
 use iced::widget::{column, row};
 use iced::{Element, Length};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TableLayout {
     pub name: String,
     pub columns: Vec<Vec<usize>>,

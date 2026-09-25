@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Player {
     pub id: i64,
     pub name: String,
@@ -14,7 +15,7 @@ pub struct Player {
 /// art can move before an edge would show. Storing the fraction rather than
 /// pixels means the same framing holds at any tile size, which matters
 /// because the same art is drawn into tiles of very different shapes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct ArtFraming {
     pub zoom: f32,
     pub pan_x: f32,
@@ -44,7 +45,7 @@ impl ArtFraming {
 pub const MIN_ART_ZOOM: f32 = 1.0;
 pub const MAX_ART_ZOOM: f32 = 3.0;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Commander {
     pub id: i64,
     /// Scryfall's oracle id: stable across every printing/art of this card.
@@ -70,7 +71,7 @@ impl Commander {
 /// One entry in a player's saved commander list: a single commander, or a
 /// partner pair they've saved as one deck. Picking either half of a saved
 /// pair during setup brings the other with it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SavedDeck {
     pub commander: Commander,
     pub partner: Option<Commander>,
@@ -97,7 +98,7 @@ pub const PARTNER: usize = 1;
 pub const LETHAL_POISON: i32 = 10;
 
 /// One seat at the table for the game currently being set up / played.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Seat {
     pub player: Player,
     pub commander: Commander,
@@ -108,6 +109,7 @@ pub struct Seat {
     /// Commander damage taken by this seat, keyed by which commander dealt
     /// it: `(source seat index, PRIMARY | PARTNER)`. Keyed per commander
     /// rather than per seat because each one has its own lethal threshold.
+    #[serde(with = "damage_entries")]
     pub commander_damage_taken: HashMap<(usize, usize), i32>,
     pub eliminated: bool,
     /// How this seat went out, recorded the moment it happens. Who got the
@@ -188,7 +190,7 @@ impl Seat {
 pub const STARTING_LIFE: i32 = 40;
 
 /// How the winner actually closed out the game, for matchup/stat breakdowns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WinReason {
     CommanderDamage,
     Poison,
@@ -245,7 +247,7 @@ impl WinReason {
 /// Why a seat went out. The first three are worked out from the board -
 /// nobody is asked - and the last two are what a player picks when they are
 /// marked out by hand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutCause {
     LifeLoss,
     CommanderDamage,
@@ -309,7 +311,7 @@ impl OutCause {
 }
 
 /// How and when a seat went out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Elimination {
     pub cause: OutCause,
     /// Who gets the kill. `None` is a real answer, not missing data - a
@@ -320,7 +322,7 @@ pub struct Elimination {
 }
 
 /// The kind of interaction logged against a player mid-game.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HateKind {
     CommanderKill,
     BoardWipe,
@@ -365,7 +367,7 @@ impl HateKind {
 }
 
 /// A piece of commander hate aimed at a seat, and who (if anyone) is credited.
-#[derive(Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct KillEvent {
     pub victim_seat: usize,
     pub killer_seat: Option<usize>,
@@ -373,8 +375,9 @@ pub struct KillEvent {
 }
 
 /// A fully finished game, ready to be persisted.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FinishedGame {
+    pub elapsed_seconds: u64,
     pub seats: Vec<Seat>,
     pub winner_seat: Option<usize>,
     pub win_reason: Option<WinReason>,
@@ -386,7 +389,7 @@ pub struct FinishedGame {
 }
 
 /// One row in the game history list.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GameSummary {
     pub id: i64,
     pub started_at: chrono::DateTime<chrono::Utc>,
@@ -400,15 +403,16 @@ pub struct GameSummary {
 
 /// A seat's elimination as it comes back out of the database, with the
 /// killer resolved to a name.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GameDetailOut {
     pub cause: OutCause,
     pub killer_name: Option<String>,
     pub turn: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GameDetailSeat {
+    pub game_player_id: i64,
     pub player_name: String,
     pub commander_name: String,
     /// Whose deck it was, when the player was borrowing it.
@@ -422,7 +426,7 @@ pub struct GameDetailSeat {
     pub out: Option<GameDetailOut>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GameDetailKill {
     pub victim: String,
     pub killer: Option<String>,
@@ -430,8 +434,9 @@ pub struct GameDetailKill {
 }
 
 /// The full box score for a single past game.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GameDetail {
+    pub elapsed_seconds: Option<u64>,
     pub id: i64,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub ended_at: chrono::DateTime<chrono::Utc>,
@@ -439,4 +444,28 @@ pub struct GameDetail {
     pub ending_turn: i64,
     pub seats: Vec<GameDetailSeat>,
     pub kills: Vec<GameDetailKill>,
+}
+
+// JSON object keys cannot represent (seat, commander-slot) tuples.
+mod damage_entries {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        map: &HashMap<(usize, usize), i32>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut entries: Vec<_> = map
+            .iter()
+            .map(|(&(seat, slot), &amount)| (seat, slot, amount))
+            .collect();
+        entries.sort();
+        entries.serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<(usize, usize), i32>, D::Error> {
+        Ok(Vec::<(usize, usize, i32)>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(seat, slot, amount)| ((seat, slot), amount))
+            .collect())
+    }
 }

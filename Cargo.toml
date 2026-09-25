@@ -6,7 +6,7 @@ description = "Local MTG Commander pod tracker: life, poison, commander damage, 
 
 [dependencies]
 iced = { version = "0.13", features = ["tokio", "image", "lazy", "advanced", "canvas"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["time", "sync"] }
 serde = { version = "1", features = ["derive"] }
