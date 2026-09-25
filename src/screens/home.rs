@@ -218,14 +218,6 @@ pub fn view<'a>(state: &'a HomeState, players: &'a [Player]) -> Element<'a, Mess
                     .color(style::TEXT_MUTED)
             ]
             .spacing(style::GAP_XS),
-            iced::widget::horizontal_space(),
-            container(
-                text("GAME NIGHT")
-                    .size(style::T_CAPTION)
-                    .color(style::ACCENT_BRIGHT)
-            )
-            .padding([12, 20])
-            .style(style::badge),
         ]
         .spacing(style::GAP)
         .align_y(Alignment::Center);

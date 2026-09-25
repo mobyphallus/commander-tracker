@@ -14,6 +14,7 @@ use crate::layout::SeatOrientation;
 
 /// Average glyph advance as a fraction of font size, for the UI font.
 const AVERAGE_ADVANCE: f32 = 0.56;
+use crate::icon::{self, Glyph};
 use crate::style;
 
 /// One line of a chip, with its own size.
@@ -21,6 +22,9 @@ use crate::style;
 pub struct Line {
     pub content: String,
     pub size: f32,
+    pub icon: Option<Glyph>,
+    pub mana: Vec<char>,
+    pub muted: bool,
 }
 
 impl Line {
@@ -28,14 +32,39 @@ impl Line {
         Self {
             content: content.into(),
             size,
+            icon: None,
+            mana: Vec::new(),
+            muted: false,
         }
+    }
+
+    pub fn with_icon(mut self, icon: Glyph) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn secondary(mut self) -> Self {
+        self.muted = true;
+        self
+    }
+    pub fn mana(identity: &str) -> Self {
+        let mut line = Self::new("", 20.0);
+        line.mana = "WUBRG".chars().filter(|c| identity.contains(*c)).collect();
+        if line.mana.is_empty() {
+            line.mana.push('C');
+        }
+        line
     }
 
     /// Rough rendered width. Canvas text can't be measured before it's
     /// drawn, and this only has to size the chip behind it, so an average
     /// advance width for the UI font is close enough.
     fn width(&self) -> f32 {
+        if !self.mana.is_empty() {
+            return self.mana.len() as f32 * (self.size + 4.0) - 4.0;
+        }
         self.content.chars().count() as f32 * self.size * AVERAGE_ADVANCE
+            + if self.icon.is_some() { 28.0 } else { 0.0 }
     }
 
     fn height(&self) -> f32 {
@@ -45,6 +74,9 @@ impl Line {
 
 struct Chip<Msg> {
     lines: Vec<Line>,
+    identity: bool,
+    avoid: Option<Rectangle>,
+    action: bool,
     facing: SeatOrientation,
     /// When set, the chip sits against the edge of the box nearest its
     /// player instead of dead centre.
@@ -60,11 +92,100 @@ struct Chip<Msg> {
     on_press: Option<Msg>,
 }
 
+/// Move an identity label around the actual center control, staying inside
+/// its tile. Prefer sliding along the edge before moving toward the counter.
+fn clear_center(
+    bounds: Size,
+    footprint: Size,
+    original: Point,
+    avoid: Rectangle,
+    facing: SeatOrientation,
+) -> Option<Point> {
+    let gap = 12.0;
+    let avoid = Rectangle {
+        x: avoid.x - gap,
+        y: avoid.y - gap,
+        width: avoid.width + gap * 2.0,
+        height: avoid.height + gap * 2.0,
+    };
+    let rect = |p: Point| {
+        Rectangle::new(
+            Point::new(p.x - footprint.width / 2.0, p.y - footprint.height / 2.0),
+            footprint,
+        )
+    };
+    let counter_size = screen_footprint(Size::new(160.0, 147.0), facing);
+    let counter = Rectangle::new(
+        Point::new(
+            (bounds.width - counter_size.width) / 2.0,
+            (bounds.height - counter_size.height) / 2.0,
+        ),
+        counter_size,
+    );
+    let span = if facing.is_sideways() {
+        bounds.height
+    } else {
+        bounds.width
+    };
+    let action_size = Size::new(((span - EDGE_MARGIN * 2.0) * 0.44).min(176.0), 108.0);
+    let action_rects = [EdgeAlign::Start, EdgeAlign::End].map(|align| {
+        let center = chip_center(bounds, action_size, facing, true, align);
+        let footprint = screen_footprint(action_size, facing);
+        Rectangle::new(
+            Point::new(
+                center.x - footprint.width / 2.0,
+                center.y - footprint.height / 2.0,
+            ),
+            footprint,
+        )
+    });
+    let clear = |r: Rectangle| {
+        !r.intersects(&avoid)
+            && !r.intersects(&counter)
+            && action_rects.iter().all(|a| !r.intersects(a))
+    };
+    if clear(rect(original)) {
+        return Some(original);
+    }
+    let xs = [
+        original.x,
+        counter.x - footprint.width / 2.0 - 1.0,
+        counter.x + counter.width + footprint.width / 2.0 + 1.0,
+        avoid.x - footprint.width / 2.0,
+        avoid.x + avoid.width + footprint.width / 2.0,
+    ];
+    let ys = [
+        original.y,
+        counter.y - footprint.height / 2.0 - 1.0,
+        counter.y + counter.height + footprint.height / 2.0 + 1.0,
+        avoid.y - footprint.height / 2.0,
+        avoid.y + avoid.height + footprint.height / 2.0,
+    ];
+    xs.into_iter()
+        .flat_map(|x| ys.map(|y| Point::new(x, y)))
+        .filter(|&p| {
+            let r = rect(p);
+            r.x >= 0.0
+                && r.y >= 0.0
+                && r.x + r.width <= bounds.width
+                && r.y + r.height <= bounds.height
+                && clear(r)
+        })
+        .min_by(|a, b| {
+            let distance = |p: &Point| (p.x - original.x).powi(2) + (p.y - original.y).powi(2);
+            distance(a).total_cmp(&distance(b))
+        })
+}
+
 impl<Msg> Chip<Msg> {
     /// The chip's fitted lines, its own box, and where that box's centre
     /// lands. Drawing and hit-testing both go through this, so a tap can
     /// never land somewhere the chip isn't actually drawn.
     fn placement(&self, bounds: Size) -> (Vec<Line>, Size, Point) {
+        self.placement_lines(bounds, &self.lines)
+    }
+
+    fn placement_lines(&self, bounds: Size, source: &[Line]) -> (Vec<Line>, Size, Point) {
         // A turned chip is limited by the tile's *other* dimension, since
         // its width runs across the tile's height.
         let span = if self.facing.is_sideways() {
@@ -73,27 +194,112 @@ impl<Msg> Chip<Msg> {
             bounds.width
         };
         let mut available = (span - EDGE_MARGIN * 2.0 - self.padding * 2.0).max(0.0);
-        if self.hug_edge {
+        if self.hug_edge && !self.identity {
             // Only chips sharing an edge are rationed. The life counter sits
             // in the middle of the tile on its own and gets the whole span,
             // which it needs - a three-digit total must never be truncated.
-            available = available.min((span * max_share(self.align) - self.padding * 2.0).max(0.0));
+            available = available.min(
+                ((if self.action {
+                    (span - EDGE_MARGIN * 2.0).max(0.0)
+                } else {
+                    span
+                }) * if self.action {
+                    0.44
+                } else {
+                    max_share(self.align)
+                } - self.padding * 2.0)
+                    .max(0.0),
+            );
         }
 
-        let lines: Vec<Line> = self
-            .lines
+        if self.identity {
+            available = available.min(260.0);
+        }
+        let narrow_head = self.identity && self.facing.is_sideways() && bounds.width < 320.0;
+        if narrow_head {
+            available = available.min(200.0);
+        }
+        let lines: Vec<Line> = source
             .iter()
-            .map(|line| Line {
-                content: fit_to_width(&line.content, line.size, available),
-                size: line.size,
+            .map(|line| {
+                let icon_width = if line.icon.is_some() { 28.0 } else { 0.0 };
+                let text_space = (available - icon_width).max(0.0);
+                let size = if !line.mana.is_empty() {
+                    line.size
+                        .min((available + 4.0) / line.mana.len() as f32 - 4.0)
+                        .max(1.0)
+                } else if self.action && !line.content.is_empty() {
+                    line.size
+                        .min(text_space / (line.content.chars().count() as f32 * AVERAGE_ADVANCE))
+                        .max(12.0)
+                } else if self.identity && !self.facing.is_sideways() && bounds.height < 400.0 {
+                    line.size.min(18.0)
+                } else {
+                    line.size
+                };
+                Line {
+                    content: fit_to_width(&line.content, size, text_space),
+                    icon: line.icon,
+                    mana: line.mana.clone(),
+                    muted: line.muted,
+                    size,
+                }
             })
             .collect();
 
         let text_w = lines.iter().map(Line::width).fold(0.0_f32, f32::max);
         let text_h: f32 = lines.iter().map(Line::height).sum();
-        let box_size = Size::new(text_w + self.padding * 2.0, text_h + self.padding * 2.0);
-        let center = chip_center(bounds, box_size, self.facing, self.hug_edge, self.align);
+        let box_size = Size::new(
+            if self.action {
+                (available + self.padding * 2.0).min(176.0)
+            } else {
+                text_w + self.padding * 2.0
+            },
+            (text_h + self.padding * 2.0).max(if self.on_press.is_some() {
+                if self.action {
+                    108.0
+                } else {
+                    style::TOUCH_H
+                }
+            } else {
+                0.0
+            }),
+        );
+        let edge = if self.identity {
+            match self.facing {
+                SeatOrientation::Upright => SeatOrientation::UpsideDown,
+                SeatOrientation::UpsideDown => SeatOrientation::Upright,
+                SeatOrientation::LeftHead => SeatOrientation::RightHead,
+                SeatOrientation::RightHead => SeatOrientation::LeftHead,
+            }
+        } else {
+            self.facing
+        };
+        let mut center = chip_center(bounds, box_size, edge, self.hug_edge, self.align);
 
+        if narrow_head {
+            center.y = bounds.height
+                * if reads_forward(self.facing) {
+                    0.25
+                } else {
+                    0.75
+                };
+        }
+        if let Some(avoid) = self.avoid {
+            if let Some(clear) = clear_center(
+                bounds,
+                screen_footprint(box_size, self.facing),
+                center,
+                avoid,
+                self.facing,
+            ) {
+                center = clear;
+            } else if source.len() > 1 {
+                // Keep the player's name readable when a compact seat cannot
+                // accommodate secondary details between the timer and controls.
+                return self.placement_lines(bounds, &source[..source.len() - 1]);
+            }
+        }
         (lines, box_size, center)
     }
 
@@ -288,7 +494,7 @@ impl<Msg: Clone> canvas::Program<Msg> for Chip<Msg> {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
+        cursor: iced::mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
@@ -303,7 +509,18 @@ impl<Msg: Clone> canvas::Program<Msg> for Chip<Msg> {
 
             let top_left = Point::new(-box_size.width / 2.0, -box_size.height / 2.0);
             let chip = Path::rounded_rectangle(top_left, box_size, self.radius.into());
-            frame.fill(&chip, self.background);
+            let hovered = self.on_press.is_some()
+                && cursor
+                    .position_in(bounds)
+                    .is_some_and(|p| self.hit_rect(bounds.size()).contains(p));
+            frame.fill(
+                &chip,
+                if hovered {
+                    style::ACCENT_DEEP
+                } else {
+                    self.background
+                },
+            );
             frame.stroke(
                 &chip,
                 canvas::Stroke {
@@ -314,13 +531,62 @@ impl<Msg: Clone> canvas::Program<Msg> for Chip<Msg> {
             );
 
             let mut y = -text_h / 2.0;
-            for line in &lines {
+            for (line_index, line) in lines.iter().enumerate() {
+                for (i, symbol) in line.mana.iter().enumerate() {
+                    frame.with_save(|frame| {
+                        frame.translate(iced::Vector::new(
+                            (if self.identity {
+                                -box_size.width / 2.0 + self.padding
+                            } else {
+                                -line.width() / 2.0
+                            }) + i as f32 * (line.size + 4.0),
+                            y,
+                        ));
+                        frame.scale(line.size / 24.0);
+                        icon::draw(frame, Glyph::Mana(*symbol), style::MANA_INK);
+                    });
+                }
+                if let Some(glyph) = line.icon {
+                    frame.with_save(|frame| {
+                        frame.translate(iced::Vector::new(
+                            -line.width() / 2.0,
+                            y + line.height() / 2.0 - 10.0,
+                        ));
+                        frame.scale(20.0_f32 / 24.0);
+                        icon::draw(frame, glyph, style::ACCENT_BRIGHT);
+                    });
+                }
                 frame.fill_text(Text {
                     content: line.content.clone(),
-                    position: Point::new(0.0, y + line.height() / 2.0),
-                    color: style::TEXT,
+                    position: Point::new(
+                        if self.identity {
+                            -box_size.width / 2.0 + self.padding
+                        } else if line.icon.is_some() {
+                            14.0
+                        } else {
+                            0.0
+                        },
+                        y + line.height() / 2.0,
+                    ),
+                    color: if line.muted {
+                        style::TEXT_MUTED
+                    } else {
+                        style::TEXT
+                    },
                     size: line.size.into(),
-                    horizontal_alignment: alignment::Horizontal::Center,
+                    font: iced::Font {
+                        weight: if self.identity && line_index == 0 {
+                            iced::font::Weight::Semibold
+                        } else {
+                            iced::font::Weight::Normal
+                        },
+                        ..iced::Font::DEFAULT
+                    },
+                    horizontal_alignment: if self.identity {
+                        alignment::Horizontal::Left
+                    } else {
+                        alignment::Horizontal::Center
+                    },
                     vertical_alignment: alignment::Vertical::Center,
                     ..Text::default()
                 });
@@ -346,6 +612,9 @@ fn chip_canvas<'a, Msg: Clone + 'a>(
 ) -> Element<'a, Msg> {
     Canvas::new(Chip {
         lines,
+        identity: false,
+        avoid: None,
+        action: false,
         facing,
         hug_edge,
         align,
@@ -358,23 +627,6 @@ fn chip_canvas<'a, Msg: Clone + 'a>(
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
-}
-
-/// A frosted label turned to face `facing`, centred on the edge of the tile
-/// that player is on.
-pub fn edge_chip<'a, Msg: Clone + 'a>(
-    lines: Vec<Line>,
-    facing: SeatOrientation,
-) -> Element<'a, Msg> {
-    chip_canvas(
-        lines,
-        facing,
-        true,
-        EdgeAlign::Center,
-        18.0,
-        style::glass_paint(),
-        None,
-    )
 }
 
 /// A chip that can be tapped, sitting at one end of the player's own edge
@@ -391,73 +643,137 @@ pub fn edge_button<'a, Msg: Clone + 'a>(
     chip_canvas(lines, facing, true, align, 16.0, paint, Some(on_press))
 }
 
+/// Identity owns the opposite edge so names never compete with action buttons.
+pub fn identity_chip<'a, Msg: Clone + 'a>(
+    lines: Vec<Line>,
+    facing: SeatOrientation,
+    avoid: Rectangle,
+) -> Element<'a, Msg> {
+    Canvas::new(Chip {
+        lines,
+        identity: true,
+        avoid: Some(avoid),
+        action: false,
+        facing,
+        hug_edge: true,
+        align: EdgeAlign::Center,
+        padding: 8.0,
+        background: Color {
+            a: 0.97,
+            ..style::SURFACE_1
+        },
+        border: Color {
+            a: 0.55,
+            ..style::ACCENT_BRIGHT
+        },
+        radius: style::R_MD,
+        on_press: None,
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+pub fn action_button<'a, Msg: Clone + 'a>(
+    glyph: Glyph,
+    title: &str,
+    subtitle: &str,
+    facing: SeatOrientation,
+    align: EdgeAlign,
+    primary: bool,
+    message: Msg,
+) -> Element<'a, Msg> {
+    Canvas::new(Chip {
+        lines: vec![
+            Line::new("", 22.0).with_icon(glyph),
+            Line::new(title, 20.0),
+            Line::new(subtitle, 14.0).secondary(),
+        ],
+        identity: false,
+        avoid: None,
+        action: true,
+        facing,
+        hug_edge: true,
+        align,
+        padding: 12.0,
+        background: if primary {
+            style::ACCENT_DEEP
+        } else {
+            style::SURFACE_1
+        },
+        border: if primary {
+            style::ACCENT_BRIGHT
+        } else {
+            style::SURFACE_3
+        },
+        radius: style::R_MD,
+        on_press: Some(message),
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 // --- The seat action menu --------------------------------------------------
 
-/// Height of one row of a turned menu, and the gap between rows. Both are
-/// sized for a finger rather than a cursor.
-const MENU_ROW_H: f32 = 84.0;
-const MENU_ROW_GAP: f32 = 10.0;
-const MENU_TEXT: f32 = 22.0;
-/// How much of the tile a menu row spans.
-const MENU_WIDTH_SHARE: f32 = 0.7;
-
-/// A list of tappable rows, centred on the tile and turned to face its
-/// player. One canvas draws and hit-tests the lot - the rows have to read
-/// the right way up for whoever the tile belongs to, and iced can't rotate
-/// a column of real buttons.
+/// A compact grid keeps every action inside the player's tile, including
+/// eight-player boards. Drawing and touch use the same local rectangles.
 struct Menu<Msg> {
-    items: Vec<(String, Msg)>,
+    items: Vec<(Glyph, String, Msg)>,
     facing: SeatOrientation,
 }
 
 impl<Msg> Menu<Msg> {
-    /// The row width, and each row's centre offset along the *text's* own
-    /// down axis - so the list reads top to bottom for its player whichever
-    /// way the tile is turned.
-    fn layout(&self, bounds: Size) -> (f32, Vec<f32>) {
-        let span = if self.facing.is_sideways() {
-            bounds.height
+    fn layout(&self, bounds: Size) -> Vec<Rectangle> {
+        let local = if self.facing.is_sideways() {
+            Size::new(bounds.height, bounds.width)
         } else {
-            bounds.width
+            bounds
         };
-        let width = (span * MENU_WIDTH_SHARE).max(0.0);
-        let count = self.items.len() as f32;
-        let total = count * MENU_ROW_H + (count - 1.0).max(0.0) * MENU_ROW_GAP;
-        let offsets = (0..self.items.len())
-            .map(|i| -total / 2.0 + MENU_ROW_H / 2.0 + i as f32 * (MENU_ROW_H + MENU_ROW_GAP))
-            .collect();
-        (width, offsets)
+        let columns = if local.width >= 260.0 { 2 } else { 1 };
+        let rows = self.items.len().div_ceil(columns);
+        let gap = 8.0;
+        let width = ((local.width - 32.0 - gap * (columns - 1) as f32) / columns as f32)
+            .max(0.0)
+            .min(240.0);
+        let height = ((local.height - 32.0 - gap * rows.saturating_sub(1) as f32)
+            / rows.max(1) as f32)
+            .clamp(0.0, 88.0);
+        let total_w = columns as f32 * width + (columns - 1) as f32 * gap;
+        let total_h = rows as f32 * height + rows.saturating_sub(1) as f32 * gap;
+        (0..self.items.len())
+            .map(|i| {
+                Rectangle::new(
+                    Point::new(
+                        -total_w / 2.0 + (i % columns) as f32 * (width + gap),
+                        -total_h / 2.0 + (i / columns) as f32 * (height + gap),
+                    ),
+                    Size::new(width, height),
+                )
+            })
+            .collect()
     }
 
-    /// A row's offset turned into screen space. Rows only ever sit along the
-    /// text's down axis, so each quarter turn is a straight swap of axes.
-    fn screen_offset(&self, local_y: f32) -> (f32, f32) {
-        match self.facing {
-            SeatOrientation::Upright => (0.0, local_y),
-            SeatOrientation::UpsideDown => (0.0, -local_y),
-            SeatOrientation::LeftHead => (-local_y, 0.0),
-            SeatOrientation::RightHead => (local_y, 0.0),
-        }
-    }
-
-    fn row_rect(&self, bounds: Size, width: f32, local_y: f32) -> Rectangle {
-        let footprint = screen_footprint(Size::new(width, MENU_ROW_H), self.facing);
-        let (dx, dy) = self.screen_offset(local_y);
-        let cx = bounds.width / 2.0 + dx;
-        let cy = bounds.height / 2.0 + dy;
+    fn screen_rect(&self, bounds: Size, rect: Rectangle) -> Rectangle {
+        let p = rect.center();
+        let (sin, cos) = self.facing.radians().sin_cos();
+        let center = Point::new(
+            bounds.width / 2.0 + p.x * cos - p.y * sin,
+            bounds.height / 2.0 + p.x * sin + p.y * cos,
+        );
+        let size = screen_footprint(rect.size(), self.facing);
         Rectangle::new(
-            Point::new(cx - footprint.width / 2.0, cy - footprint.height / 2.0),
-            footprint,
+            Point::new(center.x - size.width / 2.0, center.y - size.height / 2.0),
+            size,
         )
     }
 }
 
 impl<Msg: Clone> canvas::Program<Msg> for Menu<Msg> {
     type State = ();
-
     fn update(
         &self,
-        _state: &mut Self::State,
+        _: &mut (),
         event: canvas::Event,
         bounds: Rectangle,
         cursor: iced::mouse::Cursor,
@@ -465,71 +781,72 @@ impl<Msg: Clone> canvas::Program<Msg> for Menu<Msg> {
         let Some(position) = press_position(&event, bounds, cursor) else {
             return (canvas::event::Status::Ignored, None);
         };
-        let (width, offsets) = self.layout(bounds.size());
-        for ((_, message), &local_y) in self.items.iter().zip(offsets.iter()) {
-            if self
-                .row_rect(bounds.size(), width, local_y)
-                .contains(position)
-            {
+        for ((_, _, message), rect) in self.items.iter().zip(self.layout(bounds.size())) {
+            if self.screen_rect(bounds.size(), rect).contains(position) {
                 return (canvas::event::Status::Captured, Some(message.clone()));
             }
         }
-        // The menu covers the tile, so swallow presses that miss a row
-        // rather than letting them fall through to the counter underneath.
         (canvas::event::Status::Captured, None)
     }
-
     fn draw(
         &self,
-        _state: &Self::State,
+        _: &(),
         renderer: &Renderer,
-        _theme: &Theme,
+        _: &Theme,
         bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
+        cursor: iced::mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let (width, offsets) = self.layout(bounds.size());
-        let paint = style::glass_strong_paint();
-
         frame.with_save(|frame| {
             frame.translate(iced::Vector::new(bounds.width / 2.0, bounds.height / 2.0));
             frame.rotate(iced::Radians(self.facing.radians()));
-
-            for ((label, _), &local_y) in self.items.iter().zip(offsets.iter()) {
-                let top_left = Point::new(-width / 2.0, local_y - MENU_ROW_H / 2.0);
-                let row = Path::rounded_rectangle(
-                    top_left,
-                    Size::new(width, MENU_ROW_H),
-                    paint.radius.into(),
-                );
-                frame.fill(&row, paint.background);
-                frame.stroke(
-                    &row,
-                    canvas::Stroke {
-                        style: canvas::Style::Solid(paint.border),
-                        width: 1.0,
-                        ..Default::default()
+            for ((glyph, label, _), rect) in self.items.iter().zip(self.layout(bounds.size())) {
+                let hovered = cursor
+                    .position_in(bounds)
+                    .is_some_and(|p| self.screen_rect(bounds.size(), rect).contains(p));
+                let path =
+                    Path::rounded_rectangle(rect.position(), rect.size(), style::R_MD.into());
+                frame.fill(
+                    &path,
+                    if hovered {
+                        style::ACCENT_DEEP
+                    } else {
+                        style::SURFACE_2
                     },
                 );
+                frame.stroke(
+                    &path,
+                    canvas::Stroke::default()
+                        .with_color(if hovered {
+                            style::ACCENT_BRIGHT
+                        } else {
+                            style::SURFACE_3
+                        })
+                        .with_width(1.0),
+                );
+                let center = rect.center();
+                frame.with_save(|frame| {
+                    frame.translate(iced::Vector::new(center.x - 12.0, center.y - 27.0));
+                    icon::draw(frame, *glyph, style::ACCENT_BRIGHT);
+                });
                 frame.fill_text(Text {
-                    content: fit_to_width(label, MENU_TEXT, width - 32.0),
-                    position: Point::new(0.0, local_y),
+                    content: fit_to_width(label, 18.0, rect.width - 16.0),
+                    position: Point::new(center.x, center.y + 17.0),
                     color: style::TEXT,
-                    size: MENU_TEXT.into(),
+                    size: 18.0.into(),
                     horizontal_alignment: alignment::Horizontal::Center,
                     vertical_alignment: alignment::Vertical::Center,
                     ..Text::default()
                 });
             }
         });
-
         vec![frame.into_geometry()]
     }
 }
 
-/// The swipe-up seat menu, turned to face the player whose tile it is.
+/// The swipe seat menu, turned to face its player.
 pub fn menu<'a, Msg: Clone + 'a>(
-    items: Vec<(String, Msg)>,
+    items: Vec<(Glyph, String, Msg)>,
     facing: SeatOrientation,
 ) -> Element<'a, Msg> {
     Canvas::new(Menu { items, facing })
@@ -558,6 +875,194 @@ pub fn strong_chip<'a, Msg: Clone + 'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mana_keeps_standard_order_and_colorless_symbol() {
+        assert_eq!(Line::mana("GRWUG").mana, vec!['W', 'U', 'R', 'G']);
+        assert_eq!(Line::mana("").mana, vec!['C']);
+    }
+
+    #[test]
+    fn names_clear_center_controls_in_every_supported_layout() {
+        for screen in [
+            Size::new(1875.0, 1205.0),
+            Size::new(1280.0, 800.0),
+            Size::new(800.0, 1280.0),
+        ] {
+            let board = Size::new(screen.width - 32.0, screen.height - 32.0);
+            for players in 2..=8 {
+                for layout in crate::layout::options_for(players) {
+                    for control in [Size::new(200.0, 112.0), Size::new(240.0, 136.0)] {
+                        for seat in 0..players {
+                            let tile = layout.seat_bounds(seat, board);
+                            let size = Size::new(tile.width - 6.0, tile.height - 6.0);
+                            let avoid = Rectangle {
+                                x: (board.width - control.width) / 2.0 - tile.x - 3.0,
+                                y: (board.height - control.height) / 2.0 - tile.y - 3.0,
+                                width: control.width,
+                                height: control.height,
+                            };
+                            for (name, context) in [
+                                ("Ben", None),
+                                ("Alexandria With A Very Long Player Name", None),
+                                ("Ben", Some("Poison (lethal at 10)")),
+                                (
+                                    "Alexandria With A Very Long Player Name",
+                                    Some("Commander damage to another player"),
+                                ),
+                            ] {
+                                let mut chip = chip_at(
+                                    vec![Line::new(name, 22.0), Line::mana("WUBRG")],
+                                    layout.seat_orientation(seat),
+                                    EdgeAlign::Center,
+                                );
+                                if let Some(context) = context {
+                                    chip.lines.insert(1, Line::new(context, 16.0).secondary());
+                                }
+                                chip.identity = true;
+                                chip.padding = 8.0;
+                                chip.avoid = Some(avoid);
+                                let rect = chip.hit_rect(size);
+                                let mut counter = chip_at(
+                                    vec![Line::new("40", 76.0)],
+                                    layout.seat_orientation(seat),
+                                    EdgeAlign::Center,
+                                );
+                                counter.hug_edge = false;
+                                counter.padding = 26.0;
+                                for align in [EdgeAlign::Start, EdgeAlign::End] {
+                                    let mut action = chip_at(
+                                        vec![
+                                            Line::new("", 22.0).with_icon(Glyph::Shield),
+                                            Line::new("Log hate", 20.0),
+                                            Line::new("Commander", 14.0),
+                                        ],
+                                        layout.seat_orientation(seat),
+                                        align,
+                                    );
+                                    action.action = true;
+                                    action.padding = 12.0;
+                                    action.on_press = Some(());
+                                    assert!(
+                                        !overlaps(rect, action.hit_rect(size)),
+                                        "name hits action: {players} {} seat {seat} {screen:?}",
+                                        layout.name
+                                    );
+                                }
+                                assert!(!overlaps(rect, counter.hit_rect(size)), "name hits counter: {players} {} seat {seat} {screen:?} {control:?}", layout.name);
+                                assert!(!overlaps(rect, avoid), "{players} {} seat {seat} {screen:?} {control:?}: {rect:?} vs {avoid:?}", layout.name);
+                                assert!(
+                                    rect.x >= -0.01
+                                        && rect.y >= -0.01
+                                        && rect.x + rect.width <= size.width + 0.01
+                                        && rect.y + rect.height <= size.height + 0.01
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identity_and_action_buttons_fit_separate_edges() {
+        for facing in ALL {
+            for size in [
+                Size::new(900.0, 580.0),
+                Size::new(360.0, 580.0),
+                Size::new(360.0, 1160.0),
+                Size::new(240.0, 800.0),
+            ] {
+                let mut identity = chip_at(
+                    vec![
+                        Line::new("A long player name", 22.0),
+                        Line::new("A commander with a very long name", 16.0),
+                        Line::mana("WUBRG"),
+                    ],
+                    facing,
+                    EdgeAlign::Center,
+                );
+                identity.identity = true;
+                identity.padding = 8.0;
+                let mut start = chip_at(
+                    vec![
+                        Line::new("", 22.0).with_icon(Glyph::Shield),
+                        Line::new("Log hate", 20.0),
+                        Line::new("Commander", 14.0),
+                    ],
+                    facing,
+                    EdgeAlign::Start,
+                );
+                start.action = true;
+                start.on_press = Some(());
+                start.padding = 12.0;
+                let mut end = chip_at(start.lines.clone(), facing, EdgeAlign::End);
+                end.action = true;
+                end.on_press = Some(());
+                end.padding = 12.0;
+                let mut counter = chip_at(vec![Line::new("40", 76.0)], facing, EdgeAlign::Center);
+                counter.hug_edge = false;
+                counter.padding = 26.0;
+                let rects = [
+                    identity.hit_rect(size),
+                    start.hit_rect(size),
+                    end.hit_rect(size),
+                    counter.hit_rect(size),
+                ];
+                for (i, rect) in rects.iter().enumerate() {
+                    assert!(rect.x >= 0.0 && rect.y >= 0.0);
+                    assert!(rect.x + rect.width <= size.width + 0.01);
+                    assert!(rect.y + rect.height <= size.height + 0.01);
+                    for other in &rects[i + 1..] {
+                        assert!(!overlaps(*rect, *other), "{facing:?} {size:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn menu_actions_fit_and_touch_the_correct_item_in_every_orientation() {
+        use iced::widget::canvas::Program;
+        for facing in ALL {
+            for size in [
+                Size::new(450.0, 560.0),
+                Size::new(300.0, 360.0),
+                Size::new(310.0, 1100.0),
+            ] {
+                let menu = Menu {
+                    items: (0..5)
+                        .map(|i| (Glyph::Heart, format!("Action {i}"), i))
+                        .collect(),
+                    facing,
+                };
+                let bounds = Rectangle::new(Point::new(100.0, 80.0), size);
+                let rects: Vec<_> = menu
+                    .layout(size)
+                    .into_iter()
+                    .map(|r| menu.screen_rect(size, r))
+                    .collect();
+                for (i, rect) in rects.iter().enumerate() {
+                    assert!(rect.x >= -0.01 && rect.y >= -0.01, "{facing:?}: {rect:?}");
+                    assert!(rect.x + rect.width <= size.width + 0.01);
+                    assert!(rect.y + rect.height <= size.height + 0.01);
+                    for other in &rects[i + 1..] {
+                        assert!(!overlaps(*rect, *other));
+                    }
+                    let center = rect.center();
+                    let event = canvas::Event::Touch(iced::touch::Event::FingerPressed {
+                        id: iced::touch::Finger(1),
+                        position: Point::new(bounds.x + center.x, bounds.y + center.y),
+                    });
+                    let (status, action) =
+                        menu.update(&mut (), event, bounds, iced::mouse::Cursor::Unavailable);
+                    assert_eq!(status, canvas::event::Status::Captured);
+                    assert_eq!(action, Some(i));
+                }
+            }
+        }
+    }
 
     const TILE: Size = Size {
         width: 600.0,
@@ -644,6 +1149,9 @@ mod tests {
     fn chip_at(lines: Vec<Line>, facing: SeatOrientation, align: EdgeAlign) -> Chip<()> {
         Chip {
             lines,
+            identity: false,
+            avoid: None,
+            action: false,
             facing,
             hug_edge: true,
             align,

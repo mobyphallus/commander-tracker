@@ -10,6 +10,7 @@ use crate::app::Message;
 use crate::art;
 use crate::cards;
 use crate::db;
+use crate::icon::Glyph;
 use crate::layout::{self, SeatOrientation, TableLayout};
 use crate::model::{
     Elimination, FinishedGame, HateKind, KillEvent, OutCause, Seat, WinReason,
@@ -35,9 +36,10 @@ pub struct GameState {
     /// Where in `turn_order` the current turn is.
     pub turn_index: usize,
     pub active_seat: usize,
-    /// The 1-indexed count of individual turns taken so far this game,
-    /// including the one in progress.
+    /// The active player's turn count, including the turn in progress.
+    /// Each player begins at one; ending a turn advances only the next player.
     pub turn_number: u32,
+    turns_taken: Vec<u32>,
     pub turn_seconds: u64,
     pub game_seconds: u64,
     pub paused: bool,
@@ -153,7 +155,12 @@ impl GameState {
             (0..seats.len()).collect()
         };
         let active_seat = turn_order.first().copied().unwrap_or(0);
+        let mut turns_taken = vec![0; seat_count];
+        if let Some(turns) = turns_taken.get_mut(active_seat) {
+            *turns = 1;
+        }
         Self {
+            turns_taken,
             seats,
             table_layout,
             started_at: Utc::now(),
@@ -330,7 +337,7 @@ pub fn update(
         }
         GameMessage::NextTurn => {
             let n = state.turn_order.len();
-            if n == 0 {
+            if n == 0 || state.seats.iter().all(|seat| seat.eliminated) {
                 return (iced::Task::none(), None);
             }
             // Walk the chosen order, skipping anyone already out. If
@@ -344,7 +351,8 @@ pub fn update(
             }
             state.active_seat = state.turn_order[state.turn_index];
             state.turn_seconds = 0;
-            state.turn_number += 1;
+            state.turns_taken[state.active_seat] += 1;
+            state.turn_number = state.turns_taken[state.active_seat];
             (iced::Task::none(), None)
         }
         GameMessage::SwitchTab(seat, tab) => {
@@ -654,8 +662,7 @@ fn format_duration(total_seconds: u64) -> String {
     format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
 }
 
-/// One line of the centre cluster's clock: a fixed-width label so the game
-/// and turn times line up under each other however wide the label gets.
+/// A clock in the center control, with a stable label width.
 fn clock_row<'a>(label: &str, value: String, size: u16) -> Element<'a, Message> {
     row![
         text(label.to_string())
@@ -760,20 +767,31 @@ pub fn view<'a>(
         return game_menu_view(state);
     }
 
-    // Only one compact control occupies the center: the timer/menu at rest,
-    // or Done during damage entry. Destructive actions stay off the board.
+    iced::widget::responsive(move |size| board_view(state, image_cache, size)).into()
+}
+
+fn board_view<'a>(
+    state: &'a GameState,
+    image_cache: &'a HashMap<String, image::Handle>,
+    size: iced::Size,
+) -> Element<'a, Message> {
+    let control_size = if state.damage_focus.is_some() {
+        iced::Size::new(240.0, 136.0)
+    } else {
+        iced::Size::new(200.0, 112.0)
+    };
     let controls: Element<Message> = if let Some(focus) = state.damage_focus {
         button(
             column![
+                text("Commander damage").size(style::T_LABEL),
                 row![
-                    crate::icon::view(crate::icon::Glyph::Check, 24., style::TEXT),
+                    crate::icon::view(Glyph::Check, 24., style::TEXT),
                     text("Done").size(style::T_ACTION)
                 ]
                 .spacing(style::GAP_SM)
                 .align_y(iced::Alignment::Center),
                 container(
-                    text(format!("Damage to {}", state.seats[focus].player.name))
-                        .size(style::T_CAPTION)
+                    text(format!("To {}", state.seats[focus].player.name)).size(style::T_CAPTION)
                 )
                 .height(24)
                 .clip(true),
@@ -782,7 +800,8 @@ pub fn view<'a>(
             .align_x(iced::Alignment::Center),
         )
         .padding(style::GAP)
-        .width(240)
+        .width(control_size.width)
+        .height(control_size.height)
         .style(style::primary)
         .on_press(Message::Game(GameMessage::EndDamageFocus))
         .into()
@@ -807,28 +826,34 @@ pub fn view<'a>(
             .align_x(iced::Alignment::Center),
         )
         .padding([style::GAP_SM, style::GAP])
+        .width(control_size.width)
+        .height(control_size.height)
         .style(style::score_button)
         .on_press(Message::Game(GameMessage::OpenGameMenu))
         .into()
     };
-
+    let board_size = iced::Size::new((size.width - 32.0).max(0.0), (size.height - 32.0).max(0.0));
     let board = layout::render_table(&state.table_layout, |idx| {
-        seat_panel(idx, state, image_cache)
+        let tile = state.table_layout.seat_bounds(idx, board_size);
+        // Caption canvases start inside the tile's 3px border padding.
+        let avoid = iced::Rectangle {
+            x: (board_size.width - control_size.width) / 2.0 - tile.x - 3.0,
+            y: (board_size.height - control_size.height) / 2.0 - tile.y - 3.0,
+            width: control_size.width,
+            height: control_size.height,
+        };
+        seat_panel(idx, state, image_cache, avoid)
     });
-
-    let board_with_timer = stack![
+    container(stack![
         board,
         container(controls)
-            .width(Length::Fill)
-            .height(Length::Fill)
             .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    ];
-
-    container(column![board_with_timer].padding(16))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+            .center_y(Length::Fill)
+    ])
+    .padding(16)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// A big number with the whole left half acting as a "-" zone and the whole
@@ -916,8 +941,7 @@ fn split_counter<'a>(
 }
 
 /// What a seat's counter currently shows: the value, what it edits, and a
-/// short subtitle for the caption (commander name / "Poison" / who the
-/// damage is being logged against).
+/// optional context for special counters (poison or commander damage).
 fn active_counter(index: usize, state: &GameState) -> (i32, CounterTarget, String) {
     if let Some(focus) = state.damage_focus {
         if focus != index {
@@ -938,7 +962,7 @@ fn active_counter(index: usize, state: &GameState) -> (i32, CounterTarget, Strin
     }
     let seat = &state.seats[index];
     match state.seat_tab[index] {
-        SeatTab::Life => (seat.life, CounterTarget::Life(index), seat.deck_name()),
+        SeatTab::Life => (seat.life, CounterTarget::Life(index), String::new()),
         SeatTab::Poison => (
             seat.poison,
             CounterTarget::Poison(index),
@@ -956,14 +980,21 @@ fn action_menu(index: usize, seat: &Seat, facing: SeatOrientation) -> Element<'_
     rotated::menu(
         vec![
             (
+                Glyph::Heart,
                 "Life".to_string(),
                 Message::Game(GameMessage::SwitchTab(index, SeatTab::Life)),
             ),
             (
+                Glyph::Poison,
                 "Poison".to_string(),
                 Message::Game(GameMessage::SwitchTab(index, SeatTab::Poison)),
             ),
             (
+                if seat.eliminated {
+                    Glyph::Play
+                } else {
+                    Glyph::Close
+                },
                 if seat.eliminated {
                     "Back In"
                 } else {
@@ -973,11 +1004,13 @@ fn action_menu(index: usize, seat: &Seat, facing: SeatOrientation) -> Element<'_
                 Message::Game(GameMessage::ToggleEliminated(index)),
             ),
             (
+                Glyph::Trophy,
                 "Declare Winner".to_string(),
                 Message::Game(GameMessage::StartDeclareWinner(index)),
             ),
             (
-                "Cancel".to_string(),
+                Glyph::Back,
+                "Back to game".to_string(),
                 Message::Game(GameMessage::CloseActionMenu),
             ),
         ],
@@ -989,6 +1022,7 @@ fn seat_panel<'a>(
     index: usize,
     state: &'a GameState,
     image_cache: &'a HashMap<String, image::Handle>,
+    avoid: iced::Rectangle,
 ) -> Element<'a, Message> {
     let seat = &state.seats[index];
     let is_active = state.active_seat == index;
@@ -1041,43 +1075,34 @@ fn seat_panel<'a>(
 
     let (value, target, subtitle) = active_counter(index, state);
 
-    let caption = rotated::edge_chip(
-        vec![
-            Line::new(seat.player.name.clone(), style::T_SUBHEAD as f32),
-            Line::new(subtitle, style::T_CAPTION as f32),
-        ],
-        facing,
-    );
+    let mut identity = seat.commander.color_identity.clone();
+    if let Some(partner) = &seat.partner {
+        identity.push_str(&partner.color_identity);
+    }
+    let mut caption_lines = vec![Line::new(seat.player.name.clone(), style::T_ACTION as f32)];
+    if !subtitle.is_empty() {
+        caption_lines.push(Line::new(subtitle, style::T_CAPTION as f32).secondary());
+    }
+    caption_lines.push(Line::mana(&identity));
+    let caption = rotated::identity_chip(caption_lines, facing, avoid);
 
-    // Commander hate sits at the player's own left hand, turned to face
-    // them. It used to be a plain button pinned to the tile's bottom-right
-    // in *screen* space, which both refused to rotate and landed straight on
-    // top of the name chip for every upright seat.
-    let hate_chip = rotated::edge_button(
-        vec![Line::new("COMMANDER HATE", style::T_CAPTION as f32)],
+    let hate_chip = rotated::action_button(
+        Glyph::Shield,
+        "Log hate",
+        "Commander",
         facing,
         rotated::EdgeAlign::Start,
-        style::glass_paint(),
+        false,
         Message::Game(GameMessage::StartHate(index)),
     );
-
-    // ...and the turn ends at their right hand, so whoever is on turn can
-    // end it from their own seat instead of reaching across the table. Only
-    // the active seat gets one: nothing rolls back a turn, so a live
-    // end-turn control on a seat whose turn it isn't is a mis-tap waiting
-    // to happen.
     let end_turn_chip: Option<Element<Message>> = is_active.then(|| {
-        rotated::edge_button(
-            vec![
-                Line::new("END TURN", style::T_LABEL as f32),
-                Line::new(
-                    format!("Turn {}", state.turn_number),
-                    style::T_CAPTION as f32,
-                ),
-            ],
+        rotated::action_button(
+            Glyph::Next,
+            "End turn",
+            &format!("Turn {}", state.turn_number),
             facing,
             rotated::EdgeAlign::End,
-            style::accent_chip_paint(),
+            true,
             Message::Game(GameMessage::NextTurn),
         )
     });
@@ -1248,198 +1273,275 @@ fn zero_life_check_view(state: &GameState, seat: usize) -> Element<'_, Message> 
     .into()
 }
 
-/// Two steps, and either can be skipped. A seat marked out by hand is asked
-/// why; a seat the board killed already knows. Both then ask who gets the
-/// kill - except lethal commander damage, which never gets this far.
+/// Shared touch card for a reason or player choice.
+fn decision_option<'a>(
+    glyph: Glyph,
+    title: String,
+    detail: String,
+    selected: bool,
+    message: GameMessage,
+) -> Element<'a, Message> {
+    button(
+        row![
+            crate::icon::view(
+                glyph,
+                32.0,
+                if selected {
+                    style::TEXT
+                } else {
+                    style::ACCENT_BRIGHT
+                }
+            ),
+            column![
+                text(title).size(style::T_ACTION),
+                text(detail).size(style::T_CAPTION).color(if selected {
+                    style::TEXT
+                } else {
+                    style::TEXT_MUTED
+                })
+            ]
+            .spacing(6)
+            .width(Length::Fill),
+            crate::icon::view(
+                if selected { Glyph::Check } else { Glyph::Next },
+                24.0,
+                if selected {
+                    style::TEXT
+                } else {
+                    style::ACCENT_BRIGHT
+                }
+            ),
+        ]
+        .spacing(style::GAP)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(24)
+    .width(Length::Fill)
+    .height(128)
+    .style(if selected {
+        style::primary
+    } else {
+        style::secondary
+    })
+    .on_press(Message::Game(message))
+    .into()
+}
+
+/// Bounded two-column choices, with the footer kept outside the scroll area.
+fn decision_page<'a>(
+    glyph: Glyph,
+    heading: String,
+    subtitle: String,
+    options: Vec<Element<'a, Message>>,
+    cancel: GameMessage,
+    confirm: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut iter = options.into_iter();
+    let mut rows = Vec::new();
+    while let Some(first) = iter.next() {
+        let mut pair = row![first].spacing(style::GAP);
+        pair = pair.push(
+            iter.next()
+                .unwrap_or_else(|| iced::widget::horizontal_space().into()),
+        );
+        rows.push(pair.into());
+    }
+    let footer = row![
+        style::icon_button(Glyph::Back, "Back to game", style::T_ACTION)
+            .width(220)
+            .style(style::secondary)
+            .on_press(Message::Game(cancel)),
+        iced::widget::horizontal_space(),
+        confirm.unwrap_or_else(|| iced::widget::Space::new(0, 0).into()),
+    ]
+    .align_y(iced::Alignment::Center);
+    container(
+        container(
+            column![
+                container(
+                    row![
+                        crate::icon::view(glyph, 40.0, style::ACCENT_BRIGHT),
+                        column![
+                            text(heading).size(style::T_TITLE),
+                            text(subtitle).size(style::T_BODY).color(style::TEXT_MUTED)
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(24)
+                    .align_y(iced::Alignment::Center)
+                )
+                .padding(24)
+                .width(Length::Fill)
+                .style(style::panel),
+                scrollable(column(rows).spacing(style::GAP)).height(Length::Fill),
+                footer,
+            ]
+            .spacing(24),
+        )
+        .max_width(1180)
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+    .padding(32)
+    .center_x(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 fn out_view(state: &GameState, flow: OutFlow) -> Element<'_, Message> {
     let seat = &state.seats[flow.seat];
-
-    let (heading, subtitle, options): (String, String, Vec<Element<Message>>) = match flow.cause {
+    let (heading, subtitle, options) = match flow.cause {
         None => (
-            format!("{} is out - what happened?", seat.player.name),
-            format!("Turn {}", state.turn_number),
+            format!("Mark {} out", seat.player.name),
+            format!("Turn {} · Choose what happened", state.turn_number),
             OutCause::CHOOSABLE
                 .iter()
                 .map(|cause| {
-                    style::cta_button(cause.label(), style::T_SUBHEAD)
-                        .width(Length::Fill)
-                        .style(style::secondary)
-                        .on_press(Message::Game(GameMessage::PickOutCause(*cause)))
-                        .into()
+                    decision_option(
+                        if *cause == OutCause::Concede {
+                            Glyph::Back
+                        } else {
+                            Glyph::Close
+                        },
+                        cause.label().to_string(),
+                        if *cause == OutCause::Concede {
+                            "This player chose to leave the game"
+                        } else {
+                            "An effect or another condition put them out"
+                        }
+                        .to_string(),
+                        false,
+                        GameMessage::PickOutCause(*cause),
+                    )
                 })
                 .collect(),
         ),
         Some(cause) => {
-            let mut who: Vec<Element<Message>> = state
+            let mut options: Vec<_> = state
                 .seats
                 .iter()
                 .enumerate()
                 .filter(|(j, _)| *j != flow.seat)
                 .map(|(j, other)| {
-                    let label = format!("{} ({})", other.player.name, other.commander.name);
-                    style::cta_button(label, style::T_SUBHEAD)
-                        .width(Length::Fill)
-                        .style(style::secondary)
-                        .on_press(Message::Game(GameMessage::ConfirmOutKiller(Some(j))))
-                        .into()
+                    decision_option(
+                        Glyph::Players,
+                        other.player.name.clone(),
+                        other.deck_name(),
+                        false,
+                        GameMessage::ConfirmOutKiller(Some(j)),
+                    )
                 })
                 .collect();
-            // Nobody is a real answer, not a way out of the prompt: plenty
-            // of deaths are a board state or the player's own doing.
-            who.push(
-                style::cta_button("Nobody", style::T_SUBHEAD)
-                    .width(Length::Fill)
-                    .style(style::ghost)
-                    .on_press(Message::Game(GameMessage::ConfirmOutKiller(None)))
-                    .into(),
-            );
+            options.push(decision_option(
+                Glyph::Close,
+                "Nobody".into(),
+                "No player gets credit for this elimination".into(),
+                false,
+                GameMessage::ConfirmOutKiller(None),
+            ));
             (
-                format!("Who killed {}?", seat.player.name),
-                format!("{} \u{00b7} turn {}", cause.label(), state.turn_number),
-                who,
+                format!("Who eliminated {}?", seat.player.name),
+                format!("{} · Turn {}", cause.label(), state.turn_number),
+                options,
             )
         }
     };
-
-    container(
-        column![
-            text(heading).size(style::T_TITLE),
-            text(subtitle).size(style::T_LABEL),
-            scrollable(column(options).spacing(16)).height(Length::Fill),
-            style::cta_button("Cancel", style::T_SUBHEAD)
-                .width(Length::Fixed(300.0))
-                .style(style::secondary)
-                .on_press(Message::Game(GameMessage::CancelOut)),
-        ]
-        .spacing(22)
-        .align_x(iced::Alignment::Center)
-        .padding(30),
+    decision_page(
+        Glyph::Close,
+        heading,
+        subtitle,
+        options,
+        GameMessage::CancelOut,
+        None,
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
 }
 
 /// Two steps: what kind of hate landed on this seat, then who's responsible.
 fn hate_view(state: &GameState, flow: HateFlow) -> Element<'_, Message> {
-    let victim_seat = &state.seats[flow.victim];
-
-    let (heading, options): (String, Vec<Element<Message>>) = match flow.kind {
+    let victim = &state.seats[flow.victim];
+    let (heading, options) = match flow.kind {
         None => (
-            format!("What happened to {}?", victim_seat.player.name),
+            format!("What happened to {}?", victim.player.name),
             HateKind::ALL
                 .iter()
-                .map(|k| {
-                    style::cta_button(k.label(), 28)
-                        .width(Length::Fill)
-                        .style(style::secondary)
-                        .on_press(Message::Game(GameMessage::PickHateKind(*k)))
-                        .into()
+                .map(|kind| {
+                    decision_option(
+                        Glyph::Shield,
+                        kind.label().into(),
+                        "Log a commander event".into(),
+                        false,
+                        GameMessage::PickHateKind(*kind),
+                    )
                 })
                 .collect(),
         ),
-        Some(kind) => {
-            let who: Vec<Element<Message>> = state
+        Some(kind) => (
+            format!("{} · Who did it?", kind.label()),
+            state
                 .seats
                 .iter()
                 .enumerate()
                 .filter(|(j, _)| *j != flow.victim)
                 .map(|(j, other)| {
-                    let label = format!("{} ({})", other.player.name, other.commander.name);
-                    button(
-                        container(text(label).size(style::T_SUBHEAD))
-                            .padding([0, 24])
-                            .center_y(Length::Fill),
+                    decision_option(
+                        Glyph::Players,
+                        other.player.name.clone(),
+                        other.deck_name(),
+                        false,
+                        GameMessage::ConfirmHate(Some(j)),
                     )
-                    .padding(0)
-                    .height(Length::Fixed(style::TOUCH_H_LG))
-                    .width(Length::Fill)
-                    .style(style::secondary)
-                    .on_press(Message::Game(GameMessage::ConfirmHate(Some(j))))
-                    .into()
                 })
-                .collect();
-            (format!("{} - who did it?", kind.label()), who)
-        }
+                .collect(),
+        ),
     };
-
-    container(
-        column![
-            text(heading).size(style::T_TITLE),
-            text(format!(
-                "{} playing {}",
-                victim_seat.player.name, victim_seat.commander.name
-            ))
-            .size(style::T_LABEL),
-            scrollable(column(options).spacing(16)).height(Length::Fill),
-            style::cta_button("Cancel", style::T_SUBHEAD)
-                .width(Length::Fixed(300.0))
-                .style(style::secondary)
-                .on_press(Message::Game(GameMessage::CancelHate)),
-        ]
-        .spacing(22)
-        .align_x(iced::Alignment::Center)
-        .padding(30),
+    decision_page(
+        Glyph::Shield,
+        heading,
+        victim.deck_name(),
+        options,
+        GameMessage::CancelHate,
+        None,
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
 }
 
 fn declare_winner_view(state: &GameState, winner: usize) -> Element<'_, Message> {
-    let winner_seat = &state.seats[winner];
-    let reasons = column(
-        WinReason::ALL
-            .iter()
-            .map(|r| {
-                let selected = state.pending_reason == Some(*r);
-                style::touch_button(r.label(), 24)
-                    .width(Length::Fill)
-                    .style(if selected {
-                        style::primary
-                    } else {
-                        style::secondary
-                    })
-                    .on_press(Message::Game(GameMessage::PickWinReason(*r)))
-                    .into()
-            })
-            .collect::<Vec<Element<Message>>>(),
-    )
-    .spacing(12);
-
-    let mut confirm =
-        style::cta_button("Confirm & Save", style::T_SUBHEAD).width(Length::Fixed(420.0));
+    let seat = &state.seats[winner];
+    let reasons = WinReason::ALL
+        .iter()
+        .map(|reason| {
+            let (glyph, detail) = match reason {
+                WinReason::CommanderDamage => (Glyph::Shield, "Lethal damage from a commander"),
+                WinReason::Poison => (Glyph::Poison, "Opponents reached lethal poison"),
+                WinReason::CombatDamage => (Glyph::Heart, "Combat damage closed out the game"),
+                WinReason::InfiniteCombo => {
+                    (Glyph::Rotate(true), "A repeating combo secured the win")
+                }
+                WinReason::Concede => (Glyph::Back, "The remaining opponents conceded"),
+                WinReason::Other => (Glyph::Trophy, "Another effect or win condition"),
+            };
+            decision_option(
+                glyph,
+                reason.label().into(),
+                detail.into(),
+                state.pending_reason == Some(*reason),
+                GameMessage::PickWinReason(*reason),
+            )
+        })
+        .collect();
+    let mut confirm = style::icon_button(Glyph::Check, "Confirm & save", style::T_ACTION)
+        .width(260)
+        .style(style::primary);
     if state.pending_reason.is_some() {
-        confirm = confirm
-            .style(style::success)
-            .on_press(Message::Game(GameMessage::ConfirmEndGame));
+        confirm = confirm.on_press(Message::Game(GameMessage::ConfirmEndGame));
     }
-
-    container(
-        column![
-            text(format!(
-                "{} wins with {}!",
-                winner_seat.player.name, winner_seat.commander.name
-            ))
-            .size(style::T_TITLE),
-            text("How did they win?").size(style::T_SUBHEAD),
-            scrollable(reasons).height(Length::Fill),
-            row![
-                confirm,
-                style::cta_button("Cancel", style::T_SUBHEAD)
-                    .width(Length::Fixed(280.0))
-                    .style(style::secondary)
-                    .on_press(Message::Game(GameMessage::CancelDeclareWinner)),
-            ]
-            .spacing(20),
-        ]
-        .spacing(22)
-        .align_x(iced::Alignment::Center)
-        .padding(30),
+    decision_page(
+        Glyph::Trophy,
+        format!("{} wins", seat.player.name),
+        format!("{} · Choose how the game ended", seat.deck_name()),
+        reasons,
+        GameMessage::CancelDeclareWinner,
+        Some(confirm.into()),
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
 }
 
 #[cfg(test)]
@@ -1478,6 +1580,45 @@ mod elimination_tests {
         let seats = vec![seat(1, "Ada"), seat(2, "Bo"), seat(3, "Cy"), seat(4, "Di")];
         let layout = layout::options_for(4).into_iter().next().unwrap();
         GameState::new(seats, layout, vec![0, 1, 2, 3])
+    }
+
+    #[test]
+    fn turn_count_follows_each_player_and_timer_resets_each_handoff() {
+        let base = game();
+        let order = vec![2, 0, 3, 1];
+        let mut state = GameState::new(base.seats, base.table_layout, order.clone());
+        state.game_seconds = 500;
+        for turn in 1..=3 {
+            for &seat in &order {
+                assert_eq!(state.active_seat, seat);
+                assert_eq!(state.turn_number, turn);
+                state.turn_seconds = 45;
+                update_for_test(&mut state, GameMessage::NextTurn);
+                assert_eq!(state.turn_seconds, 0);
+                assert_eq!(state.game_seconds, 500);
+            }
+        }
+        assert_eq!(state.turn_number, 4);
+    }
+
+    #[test]
+    fn eliminating_the_first_player_does_not_stop_turn_counting() {
+        let mut state = game();
+        state.seats[0].eliminated = true;
+        for turn in 1..=3 {
+            for seat in 1..4 {
+                update_for_test(&mut state, GameMessage::NextTurn);
+                assert_eq!(state.active_seat, seat);
+                assert_eq!(state.turn_number, turn);
+            }
+        }
+        state.seats[0].eliminated = false;
+        update_for_test(&mut state, GameMessage::NextTurn);
+        assert_eq!(state.active_seat, 0);
+        assert_eq!(
+            state.turn_number, 2,
+            "returning player resumes their own count"
+        );
     }
 
     #[test]

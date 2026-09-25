@@ -85,11 +85,19 @@ pub enum Glyph {
     Search,
     Add,
     Edit,
+    Image,
+    Frame,
     Delete,
     Check,
     Pause,
     Play,
     Close,
+    Heart,
+    Poison,
+    Shield,
+    Trophy,
+    Rotate(bool),
+    Shuffle,
     Mana(char),
 }
 
@@ -147,99 +155,234 @@ impl<Msg> canvas::Program<Msg> for Symbol {
     ) -> Vec<Geometry> {
         let mut f = Frame::new(renderer, bounds.size());
         f.scale(bounds.width.min(bounds.height) / 24.0);
-        let c = self.ink;
-        match self.glyph {
-            Glyph::Back => {
-                line(&mut f, &[(14., 5.), (7., 12.), (14., 19.)], c);
-                line(&mut f, &[(7., 12.), (21., 12.)], c);
+        draw(&mut f, self.glyph, self.ink);
+        vec![f.into_geometry()]
+    }
+}
+
+/// Draw into an existing canvas, including player-facing controls.
+pub fn draw(f: &mut Frame, glyph: Glyph, c: Color) {
+    match glyph {
+        Glyph::Back => {
+            line(f, &[(14., 5.), (7., 12.), (14., 19.)], c);
+            line(f, &[(7., 12.), (21., 12.)], c);
+        }
+        Glyph::Next => {
+            line(f, &[(10., 5.), (17., 12.), (10., 19.)], c);
+            line(f, &[(3., 12.), (17., 12.)], c);
+        }
+        Glyph::Add => {
+            line(f, &[(12., 5.), (12., 19.)], c);
+            line(f, &[(5., 12.), (19., 12.)], c);
+        }
+        Glyph::Close => {
+            line(f, &[(6., 6.), (18., 18.)], c);
+            line(f, &[(18., 6.), (6., 18.)], c);
+        }
+        Glyph::Check => line(f, &[(4., 12.), (9., 17.), (20., 6.)], c),
+        Glyph::Pause => {
+            line(f, &[(8., 5.), (8., 19.)], c);
+            line(f, &[(16., 5.), (16., 19.)], c);
+        }
+        Glyph::Play => line(f, &[(7., 4.), (20., 12.), (7., 20.), (7., 4.)], c),
+        Glyph::Search => {
+            circle(f, 10., 10., 6., c);
+            line(f, &[(15., 15.), (21., 21.)], c);
+        }
+        Glyph::History => {
+            circle(f, 12., 12., 8.5, c);
+            line(f, &[(12., 7.), (12., 12.), (16., 14.)], c);
+        }
+        Glyph::Stats => {
+            line(f, &[(4., 4.), (4., 20.), (21., 20.)], c);
+            for (x, y) in [(8., 13.), (13., 9.), (18., 4.)] {
+                line(f, &[(x, y), (x, 16.)], c);
             }
-            Glyph::Next => {
-                line(&mut f, &[(10., 5.), (17., 12.), (10., 19.)], c);
-                line(&mut f, &[(3., 12.), (17., 12.)], c);
+        }
+        Glyph::Players => {
+            circle(f, 9., 7., 3., c);
+            circle(f, 18., 8., 2., c);
+            let p = Path::new(|p| {
+                p.move_to(Point::new(3., 20.));
+                p.line_to(Point::new(3., 18.));
+                p.bezier_curve_to(
+                    Point::new(3., 11.),
+                    Point::new(15., 11.),
+                    Point::new(15., 18.),
+                );
+                p.line_to(Point::new(15., 20.));
+            });
+            f.stroke(&p, Stroke::default().with_color(c).with_width(1.8));
+            line(f, &[(18., 14.), (21., 16.), (21., 20.)], c);
+        }
+        Glyph::Decks => {
+            line(
+                f,
+                &[(8., 7.), (20., 7.), (20., 21.), (8., 21.), (8., 7.)],
+                c,
+            );
+            line(f, &[(4., 17.), (3., 3.), (15., 2.), (15., 4.)], c);
+            line(
+                f,
+                &[(12., 14.), (14., 11.), (17., 14.), (14., 17.), (12., 14.)],
+                c,
+            );
+        }
+        Glyph::Image => {
+            line(
+                f,
+                &[(3., 3.), (21., 3.), (21., 21.), (3., 21.), (3., 3.)],
+                c,
+            );
+            circle(f, 8., 8., 2., c);
+            line(
+                f,
+                &[(3., 18.), (10., 12.), (14., 16.), (17., 13.), (21., 17.)],
+                c,
+            );
+        }
+        Glyph::Frame => {
+            for points in [
+                [(3., 9.), (3., 3.), (9., 3.)],
+                [(15., 3.), (21., 3.), (21., 9.)],
+                [(21., 15.), (21., 21.), (15., 21.)],
+                [(9., 21.), (3., 21.), (3., 15.)],
+            ] {
+                line(f, &points, c);
             }
-            Glyph::Add => {
-                line(&mut f, &[(12., 5.), (12., 19.)], c);
-                line(&mut f, &[(5., 12.), (19., 12.)], c);
-            }
-            Glyph::Close => {
-                line(&mut f, &[(6., 6.), (18., 18.)], c);
-                line(&mut f, &[(18., 6.), (6., 18.)], c);
-            }
-            Glyph::Check => line(&mut f, &[(4., 12.), (9., 17.), (20., 6.)], c),
-            Glyph::Pause => {
-                line(&mut f, &[(8., 5.), (8., 19.)], c);
-                line(&mut f, &[(16., 5.), (16., 19.)], c);
-            }
-            Glyph::Play => line(&mut f, &[(7., 4.), (20., 12.), (7., 20.), (7., 4.)], c),
-            Glyph::Search => {
-                circle(&mut f, 10., 10., 6., c);
-                line(&mut f, &[(15., 15.), (21., 21.)], c);
-            }
-            Glyph::History => {
-                circle(&mut f, 12., 12., 8.5, c);
-                line(&mut f, &[(12., 7.), (12., 12.), (16., 14.)], c);
-            }
-            Glyph::Stats => {
-                line(&mut f, &[(4., 4.), (4., 20.), (21., 20.)], c);
-                for (x, y) in [(8., 13.), (13., 9.), (18., 4.)] {
-                    line(&mut f, &[(x, y), (x, 16.)], c);
+            circle(f, 12., 12., 2., c);
+        }
+        Glyph::Edit => {
+            line(
+                f,
+                &[
+                    (4., 16.),
+                    (16., 4.),
+                    (20., 8.),
+                    (8., 20.),
+                    (3., 21.),
+                    (4., 16.),
+                    (8., 20.),
+                ],
+                c,
+            );
+            line(f, &[(13., 7.), (17., 11.)], c);
+        }
+        Glyph::Delete => {
+            line(f, &[(4., 6.), (20., 6.)], c);
+            line(f, &[(9., 6.), (9., 3.), (15., 3.), (15., 6.)], c);
+            line(f, &[(6., 6.), (7., 21.), (17., 21.), (18., 6.)], c);
+            line(f, &[(10., 10.), (10., 17.)], c);
+            line(f, &[(14., 10.), (14., 17.)], c);
+        }
+        Glyph::Heart => {
+            let p = Path::new(|p| {
+                p.move_to(Point::new(12., 21.));
+                p.bezier_curve_to(
+                    Point::new(-5., 10.),
+                    Point::new(6., -3.),
+                    Point::new(12., 7.),
+                );
+                p.bezier_curve_to(
+                    Point::new(18., -3.),
+                    Point::new(29., 10.),
+                    Point::new(12., 21.),
+                );
+            });
+            f.stroke(&p, Stroke::default().with_color(c).with_width(1.8));
+        }
+        Glyph::Poison => {
+            line(
+                f,
+                &[
+                    (9., 3.),
+                    (15., 3.),
+                    (15., 9.),
+                    (21., 19.),
+                    (20., 21.),
+                    (4., 21.),
+                    (3., 19.),
+                    (9., 9.),
+                    (9., 3.),
+                ],
+                c,
+            );
+            line(f, &[(7., 15.), (17., 15.)], c);
+            circle(f, 12., 18., 0.7, c);
+        }
+        Glyph::Shield => {
+            line(
+                f,
+                &[
+                    (12., 2.),
+                    (21., 6.),
+                    (20., 15.),
+                    (12., 22.),
+                    (4., 15.),
+                    (3., 6.),
+                    (12., 2.),
+                ],
+                c,
+            );
+            line(f, &[(12., 7.), (12., 13.)], c);
+            circle(f, 12., 17., 0.6, c);
+        }
+        Glyph::Trophy => {
+            line(
+                f,
+                &[
+                    (7., 3.),
+                    (17., 3.),
+                    (17., 11.),
+                    (14., 15.),
+                    (10., 15.),
+                    (7., 11.),
+                    (7., 3.),
+                ],
+                c,
+            );
+            line(f, &[(7., 5.), (3., 5.), (3., 10.), (7., 12.)], c);
+            line(f, &[(17., 5.), (21., 5.), (21., 10.), (17., 12.)], c);
+            line(f, &[(12., 15.), (12., 21.), (7., 21.), (17., 21.)], c);
+        }
+        Glyph::Rotate(clockwise) => {
+            f.with_save(|f| {
+                if !clockwise {
+                    f.translate(iced::Vector::new(24., 0.));
+                    f.scale_nonuniform(iced::Vector::new(-1., 1.));
                 }
-            }
-            Glyph::Players => {
-                circle(&mut f, 9., 7., 3., c);
-                circle(&mut f, 18., 8., 2., c);
                 let p = Path::new(|p| {
-                    p.move_to(Point::new(3., 20.));
-                    p.line_to(Point::new(3., 18.));
+                    p.move_to(Point::new(19., 8.));
                     p.bezier_curve_to(
-                        Point::new(3., 11.),
-                        Point::new(15., 11.),
-                        Point::new(15., 18.),
+                        Point::new(12., -3.),
+                        Point::new(-1., 7.),
+                        Point::new(5., 17.),
                     );
-                    p.line_to(Point::new(15., 20.));
+                    p.bezier_curve_to(
+                        Point::new(9., 23.),
+                        Point::new(19., 21.),
+                        Point::new(20., 14.),
+                    );
                 });
                 f.stroke(&p, Stroke::default().with_color(c).with_width(1.8));
-                line(&mut f, &[(18., 14.), (21., 16.), (21., 20.)], c);
-            }
-            Glyph::Decks => {
-                line(
-                    &mut f,
-                    &[(8., 7.), (20., 7.), (20., 21.), (8., 21.), (8., 7.)],
-                    c,
-                );
-                line(&mut f, &[(4., 17.), (3., 3.), (15., 2.), (15., 4.)], c);
-                line(
-                    &mut f,
-                    &[(12., 14.), (14., 11.), (17., 14.), (14., 17.), (12., 14.)],
-                    c,
-                );
-            }
-            Glyph::Edit => {
-                line(
-                    &mut f,
-                    &[
-                        (4., 16.),
-                        (16., 4.),
-                        (20., 8.),
-                        (8., 20.),
-                        (3., 21.),
-                        (4., 16.),
-                        (8., 20.),
-                    ],
-                    c,
-                );
-                line(&mut f, &[(13., 7.), (17., 11.)], c);
-            }
-            Glyph::Delete => {
-                line(&mut f, &[(4., 6.), (20., 6.)], c);
-                line(&mut f, &[(9., 6.), (9., 3.), (15., 3.), (15., 6.)], c);
-                line(&mut f, &[(6., 6.), (7., 21.), (17., 21.), (18., 6.)], c);
-                line(&mut f, &[(10., 10.), (10., 17.)], c);
-                line(&mut f, &[(14., 10.), (14., 17.)], c);
-            }
-            Glyph::Mana(symbol) => draw_mana(&mut f, symbol, c),
+                line(f, &[(19., 2.), (19., 8.), (13., 8.)], c);
+            });
         }
-        vec![f.into_geometry()]
+        Glyph::Shuffle => {
+            line(
+                f,
+                &[(3., 6.), (7., 6.), (17., 18.), (21., 18.), (18., 15.)],
+                c,
+            );
+            line(f, &[(18., 21.), (21., 18.)], c);
+            line(
+                f,
+                &[(3., 18.), (7., 18.), (17., 6.), (21., 6.), (18., 3.)],
+                c,
+            );
+            line(f, &[(18., 9.), (21., 6.)], c);
+        }
+        Glyph::Mana(symbol) => draw_mana(f, symbol, c),
     }
 }
 

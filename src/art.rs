@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{container, image, responsive, stack, Space};
+use iced::widget::{column, container, image, responsive, row, Space};
 use iced::{Element, Length, Rectangle, Size};
 
 use crate::model::{ArtFraming, Commander};
@@ -71,13 +71,34 @@ pub fn framed<'a, Msg: 'a>(
     panned_image::display(handle, commander.framing, rotation)
 }
 
-/// Maximum partner inset size; smaller seats constrain it proportionally.
-const INSET_W: f32 = 168.0;
-const INSET_H: f32 = 120.0;
+/// Split along the player's longer dimension, keeping both portraits useful
+/// even in tall seats. The primary stays first from that player's viewpoint.
+fn pair_layout(size: Size, rotation: f32) -> (bool, bool) {
+    let (sin, cos) = rotation.sin_cos();
+    let sideways = sin.abs() > 0.5;
+    let facing = if sideways {
+        Size::new(size.height, size.width)
+    } else {
+        size
+    };
+    let across = facing.width > facing.height * 1.35;
+    let horizontal = across != sideways;
+    let reverse = if across {
+        if sideways {
+            sin < 0.0
+        } else {
+            cos < 0.0
+        }
+    } else if sideways {
+        sin > 0.0
+    } else {
+        cos < 0.0
+    };
+    (horizontal, reverse)
+}
 
-/// A seat's art: the primary commander filling the tile, with the partner
-/// (when there is one) inset away from the edge controls. Falls back to the
-/// plain single-commander art when the deck has no partner.
+/// Partner commanders share equal, edge-to-edge panels with a quiet divider.
+/// Each portrait retains its own framing and faces the seat's player.
 pub fn framed_pair<'a, Msg: 'a>(
     commander: &Commander,
     partner: Option<&Commander>,
@@ -85,43 +106,47 @@ pub fn framed_pair<'a, Msg: 'a>(
     placeholder_size: u16,
     rotation: f32,
 ) -> Element<'a, Msg> {
-    let primary = framed(commander, image_cache, placeholder_size, rotation);
-
     let Some(partner) = partner else {
-        return primary;
+        return framed(commander, image_cache, placeholder_size, rotation);
     };
-
-    let partner_handle = partner
-        .portrait_url()
-        .and_then(|url| image_cache.get(url))
-        .cloned();
-    let framing = partner.framing;
-    let inset = responsive(move |size| {
-        let width = INSET_W.min(size.width * 0.24);
-        let height = INSET_H.min(size.height * 0.22);
-        let art: Element<Msg> = match &partner_handle {
-            Some(handle) => panned_image::display(handle.clone(), framing, rotation),
-            None => Space::new(Length::Fill, Length::Fill).into(),
-        };
-        container(
-            container(art)
-                .width(width)
-                .height(height)
-                .clip(true)
-                .style(crate::style::art_inset),
+    let portraits = [commander, partner].map(|c| {
+        (
+            c.portrait_url()
+                .and_then(|url| image_cache.get(url))
+                .cloned(),
+            c.framing,
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(iced::alignment::Horizontal::Right)
-        .align_y(iced::alignment::Vertical::Top)
-        .padding(iced::Padding::ZERO.top(size.height * 0.23).right(14))
-        .into()
     });
-
-    stack![primary, inset]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    responsive(move |size| {
+        let (horizontal, reverse) = pair_layout(size, rotation);
+        let panel = |index: usize| -> Element<'a, Msg> {
+            let (handle, framing) = &portraits[index];
+            let art = match handle {
+                Some(handle) => panned_image::display(handle.clone(), *framing, rotation),
+                None => Space::new(Length::Fill, Length::Fill).into(),
+            };
+            container(art)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .clip(true)
+                .into()
+        };
+        let (first, second) = if reverse { (1, 0) } else { (0, 1) };
+        if horizontal {
+            row![panel(first), panel(second)]
+                .spacing(3)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            column![panel(first), panel(second)]
+                .spacing(3)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
+    })
+    .into()
 }
 
 #[cfg(test)]
@@ -136,6 +161,19 @@ mod tests {
         width: 626.0,
         height: 457.0,
     };
+
+    #[test]
+    fn partner_panels_follow_the_players_orientation() {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let tall = Size::new(400.0, 600.0);
+        let wide = Size::new(600.0, 400.0);
+        assert_eq!(pair_layout(tall, 0.0), (false, false));
+        assert_eq!(pair_layout(tall, PI), (false, true));
+        assert_eq!(pair_layout(wide, FRAC_PI_2), (true, true));
+        assert_eq!(pair_layout(wide, -FRAC_PI_2), (true, false));
+        assert_eq!(pair_layout(wide, 0.0), (true, false));
+        assert_eq!(pair_layout(tall, FRAC_PI_2), (false, false));
+    }
 
     /// At rest the art must cover the tile exactly, with no gap on any edge.
     #[test]

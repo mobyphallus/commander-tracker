@@ -319,15 +319,27 @@ pub struct Category {
 pub struct ComboLine {
     pub cards: Vec<String>,
     pub produces: Vec<String>,
-    /// Total mana to assemble it, when Spellbook knows. The early-infinite
-    /// criterion is this being seven or less.
+    /// Starting mana with Spellbook prerequisites already satisfied, not
+    /// the total cost of casting all pieces. Kept under its original JSON key.
     pub mana_value: Option<u32>,
+    #[serde(default)]
+    pub mana_needed: String,
+    #[serde(default)]
+    pub prerequisites: String,
     pub two_card: bool,
     pub early: bool,
     pub lock: bool,
 }
 
 impl ComboLine {
+    pub fn mana_label(&self) -> String {
+        match self.mana_value {
+            Some(0) => "No extra mana after setup".into(),
+            Some(mana) => format!("{mana} mana to start after setup"),
+            None => "Starting mana unknown".into(),
+        }
+    }
+
     pub fn label(&self) -> String {
         self.cards.join(" + ")
     }
@@ -392,7 +404,7 @@ impl Analysis {
 
     /// A word for the total, for people who don't want a number.
     pub fn salt_band(&self) -> &'static str {
-        match self.salt_total {
+        match self.salt_percent() {
             t if t < 5.0 => "Mild",
             t if t < 15.0 => "Moderate",
             t if t < 30.0 => "Salty",
@@ -652,6 +664,12 @@ struct Variant {
     /// analysis.
     #[serde(rename = "manaValueNeeded", default)]
     mana_value_needed: Option<serde_json::Value>,
+    #[serde(rename = "manaNeeded", default)]
+    mana_needed: String,
+    #[serde(rename = "easyPrerequisites", default)]
+    easy_prerequisites: String,
+    #[serde(rename = "notablePrerequisites", default)]
+    notable_prerequisites: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -671,7 +689,10 @@ struct Feature {
 
 fn mana_value(raw: &Option<serde_json::Value>) -> Option<u32> {
     match raw {
-        Some(serde_json::Value::Number(n)) => n.as_f64().map(|v| v.round().max(0.0) as u32),
+        Some(serde_json::Value::Number(n)) => n.as_f64().and_then(|v| {
+            (v.is_finite() && v >= 0.0 && v <= u32::MAX as f64 && v.fract() == 0.0)
+                .then_some(v as u32)
+        }),
         Some(serde_json::Value::String(s)) => s.parse().ok(),
         _ => None,
     }
@@ -902,6 +923,16 @@ fn score(
                 .map(|p| p.feature.name.clone())
                 .collect(),
             mana_value: mana,
+            mana_needed: variant.combo.mana_needed.clone(),
+            prerequisites: [
+                &variant.combo.easy_prerequisites,
+                &variant.combo.notable_prerequisites,
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n"),
             two_card: variant.definitely_two_card,
             early: variant.definitely_two_card && mana.is_some_and(|m| m <= 7),
             lock: variant.lock,
@@ -1216,7 +1247,10 @@ mod tests {
                     "uses": [{"card": {"name": "Demonic Consultation"}},
                              {"card": {"name": "Thassa's Oracle"}}],
                     "produces": [{"feature": {"name": "Win the game"}}],
-                    "manaValueNeeded": 3
+                    "manaValueNeeded": 3,
+                    "manaNeeded": "{U}{U}{B}",
+                    "easyPrerequisites": "Both cards in hand.",
+                    "notablePrerequisites": "Your library can be exiled."
                 },
                 "relevant": true,
                 "definitelyTwoCard": true,
@@ -1230,6 +1264,13 @@ mod tests {
         assert_eq!(a.bracket, 4, "three mana to win off two cards is optimized");
         assert_eq!(a.combos.len(), 1);
         assert!(a.combos[0].early);
+        assert_eq!(a.combos[0].mana_needed, "{U}{U}{B}");
+        assert_eq!(
+            a.combos[0].prerequisites,
+            "Both cards in hand.\nYour library can be exiled."
+        );
+        let saved = serde_json::to_string(&a).unwrap();
+        assert_eq!(serde_json::from_str::<Analysis>(&saved).unwrap(), a);
         // The owner says bracket 2. This is exactly the disagreement the
         // screen exists to surface.
         assert!(a.understated());
@@ -1279,6 +1320,34 @@ mod tests {
         assert_eq!(mana_value(&Some(serde_json::json!("7"))), Some(7));
         assert_eq!(mana_value(&Some(serde_json::json!(null))), None);
         assert_eq!(mana_value(&None), None);
+    }
+
+    #[test]
+    fn cached_combo_costs_remain_readable_without_refresh() {
+        let old = serde_json::json!({
+            "cards": ["Exquisite Blood", "Enduring Tenacity"],
+            "produces": ["Infinite life loss"], "mana_value": 0,
+            "two_card": true, "early": true, "lock": false
+        });
+        let mut combo: ComboLine = serde_json::from_value(old).unwrap();
+        assert_eq!(combo.mana_label(), "No extra mana after setup");
+        assert!(combo.prerequisites.is_empty());
+        combo.mana_value = None;
+        assert_eq!(combo.mana_label(), "Starting mana unknown");
+        combo.mana_value = Some(3);
+        assert_eq!(combo.mana_label(), "3 mana to start after setup");
+    }
+
+    #[test]
+    fn invalid_mana_is_unknown_instead_of_free() {
+        for raw in [
+            serde_json::json!(-1),
+            serde_json::json!(2.5),
+            serde_json::json!(4294967296u64),
+        ] {
+            assert_eq!(mana_value(&Some(raw)), None);
+        }
+        assert_eq!(mana_value(&Some(serde_json::json!(0))), Some(0));
     }
 
     /// The whole pipeline against the real Moxfield, Spellbook and EDHREC.
@@ -1381,12 +1450,27 @@ mod tests {
 
         // A typical casual deck: the ~29 I measured on a real list.
         a.salt_total = 29.07;
-        assert_eq!(a.salt_band(), "Salty");
+        assert_eq!(a.salt_band(), "Moderate");
 
         // A cEDH list around 198 sits near the top of the scale.
         a.salt_total = 198.17;
         assert_eq!(a.salt_grade(), "B+");
         assert_eq!(a.salt_band(), "Extreme");
+
+        for (score, band) in [
+            (14.99, "Mild"),
+            (15.0, "Moderate"),
+            (44.99, "Moderate"),
+            (45.0, "Salty"),
+            (75.44, "Salty"),
+            (89.99, "Salty"),
+            (90.0, "High"),
+            (179.99, "High"),
+            (180.0, "Extreme"),
+        ] {
+            a.salt_total = score;
+            assert_eq!(a.salt_band(), band, "score {score}");
+        }
 
         // Nothing runs off the end of the meter.
         a.salt_total = 5_000.0;

@@ -553,17 +553,6 @@ pub fn panel_active(theme: &Theme) -> container::Style {
     }
 }
 
-/// The chosen one of several options. [`panel_active`] rings a panel without
-/// changing what's inside it, which is right for "this seat is on turn" but
-/// too quiet for "this is the layout you picked" - a choice should read as a
-/// lit surface, not just a bordered one.
-pub fn panel_selected(theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(ACCENT_DEEP.into()),
-        ..panel_active(theme)
-    }
-}
-
 /// A small inline label - a count, a colour identity, a status word. Sits on
 /// a surface rather than on art, which is what separates it from [`glass`].
 // ---------------------------------------------------------------------------

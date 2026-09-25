@@ -153,6 +153,24 @@ impl TableLayout {
         }
     }
 
+    /// Actual tile bounds, matching `render_table`'s equal fills and 12px gaps.
+    pub fn seat_bounds(&self, seat: usize, size: iced::Size) -> iced::Rectangle {
+        let count = self.columns.len();
+        let width = (size.width - 12.0 * count.saturating_sub(1) as f32) / count as f32;
+        for (col, seats) in self.columns.iter().enumerate() {
+            if let Some(row) = seats.iter().position(|&id| id == seat) {
+                let height = (size.height - 12.0 * (seats.len() - 1) as f32) / seats.len() as f32;
+                return iced::Rectangle {
+                    x: col as f32 * (width + 12.0),
+                    y: row as f32 * (height + 12.0),
+                    width,
+                    height,
+                };
+            }
+        }
+        iced::Rectangle::default()
+    }
+
     /// Seat indices in physical clockwise order around the table.
     ///
     /// Seat *index* order is not table order. In a "Two Sides" four-pod the

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, mouse_area, row, text, text_input};
+use iced::widget::{
+    button, column, container, image, mouse_area, row, scrollable, text, text_input,
+};
 use iced::{Element, Length, Task};
 use rusqlite::Connection;
 
@@ -45,6 +47,8 @@ impl Field {
 pub enum SearchFor {
     /// A new deck for this player.
     Deck,
+    /// Replace the primary commander of the selected saved deck.
+    Replace(Commander),
     /// The second half of a partner pair, for a deck they already have.
     Partner(Commander),
 }
@@ -52,6 +56,8 @@ pub enum SearchFor {
 pub struct PlayersState {
     pub players: Vec<Player>,
     pub profile: Option<i64>,
+    pub pictures: HashMap<i64, image::Handle>,
+    pub choosing_picture: bool,
     pub new_player_name: String,
     pub editing: Option<(i64, String)>,
     /// Seat of a pending delete, so it takes two taps to remove someone.
@@ -66,6 +72,62 @@ pub struct PlayersState {
     /// The app's own keyboard, and the field it's typing into.
     pub kb: Keyboard<Field>,
     pub error: Option<String>,
+}
+
+pub fn load_pictures(conn: &Connection) -> HashMap<i64, image::Handle> {
+    db::player_pictures(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, bytes)| (id, image::Handle::from_bytes(bytes)))
+        .collect()
+}
+
+fn normalize_picture(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let photo = ::image::load_from_memory(bytes)
+        .map_err(|_| "Choose a valid PNG or JPEG image.".to_string())?;
+    let side = photo.width().min(photo.height());
+    let square = photo
+        .crop_imm(
+            (photo.width() - side) / 2,
+            (photo.height() - side) / 2,
+            side,
+            side,
+        )
+        .resize_exact(512, 512, ::image::imageops::FilterType::Lanczos3);
+    let mut png = std::io::Cursor::new(Vec::new());
+    square
+        .write_to(&mut png, ::image::ImageOutputFormat::Png)
+        .map_err(|e| format!("Couldn't prepare the picture: {e}"))?;
+    Ok(png.into_inner())
+}
+
+async fn choose_picture() -> Result<Option<Vec<u8>>, String> {
+    tokio::task::spawn_blocking(|| {
+        let result = std::process::Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--title=Choose profile picture",
+                "--file-filter=Images | *.png *.jpg *.jpeg *.PNG *.JPG *.JPEG",
+            ])
+            .output()
+            .map_err(|e| format!("Couldn't open the image picker: {e}"))?;
+        if result.status.code() == Some(1) {
+            return Ok(None);
+        }
+        if !result.status.success() {
+            return Err("Couldn't open the image picker.".to_string());
+        }
+        let path = String::from_utf8(result.stdout)
+            .map_err(|_| "Couldn't read that filename.".to_string())?;
+        let path = path.trim_end_matches(['\n', '\r']);
+        if std::fs::metadata(path).map_err(|e| e.to_string())?.len() > 20 * 1024 * 1024 {
+            return Err("Choose an image smaller than 20 MB.".to_string());
+        }
+        let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read the picture: {e}"))?;
+        normalize_picture(&bytes).map(Some)
+    })
+    .await
+    .map_err(|e| format!("Couldn't load the picture: {e}"))?
 }
 
 pub struct ManagedPlayer {
@@ -122,6 +184,8 @@ impl PlayersState {
         Self {
             players: db::list_players(conn).unwrap_or_default(),
             profile: None,
+            pictures: load_pictures(conn),
+            choosing_picture: false,
             new_player_name: String::new(),
             editing: None,
             confirming_delete: None,
@@ -140,6 +204,8 @@ impl PlayersState {
 #[derive(Debug, Clone)]
 pub enum PlayersMessage {
     OpenProfile(i64),
+    ChoosePicture(i64),
+    PictureChosen(i64, Result<Option<Vec<u8>>, String>),
     CloseProfile,
     NewNameChanged(String),
     CreatePlayer,
@@ -195,6 +261,28 @@ pub fn update(
 ) -> Task<Message> {
     state.error = None;
     match message {
+        PlayersMessage::ChoosePicture(id) => {
+            if state.choosing_picture {
+                return Task::none();
+            }
+            state.choosing_picture = true;
+            return Task::perform(choose_picture(), move |result| {
+                Message::Players(PlayersMessage::PictureChosen(id, result))
+            });
+        }
+        PlayersMessage::PictureChosen(id, result) => {
+            state.choosing_picture = false;
+            match result {
+                Ok(Some(bytes)) => match db::set_player_picture(conn, id, &bytes) {
+                    Ok(()) => {
+                        state.pictures.insert(id, image::Handle::from_bytes(bytes));
+                    }
+                    Err(e) => state.error = Some(format!("Couldn't save the picture: {e}")),
+                },
+                Ok(None) => {}
+                Err(e) => state.error = Some(e),
+            }
+        }
         PlayersMessage::OpenProfile(id) => {
             state.profile = Some(id);
             state.kb.close();
@@ -322,7 +410,9 @@ pub fn update(
         }
         PlayersMessage::CloseSearch => {
             if let Some(m) = &mut state.managing {
-                m.search_for = None;
+                if let Some(SearchFor::Replace(previous)) = m.search_for.take() {
+                    m.selected = Some(previous.id);
+                }
                 m.query.clear();
                 m.results.clear();
             }
@@ -525,18 +615,37 @@ pub fn update(
                 &card.color_identity,
             ) {
                 Ok(commander) => {
-                    // A partner needs a row of its own before it can be
-                    // paired - the pairing is an update to both halves.
-                    let _ = db::record_player_commander_use(conn, m.player.id, commander.id);
-                    if let Some(SearchFor::Partner(primary)) = &m.search_for {
-                        if primary.id != commander.id {
-                            let _ = db::set_player_partner(
-                                conn,
-                                m.player.id,
-                                primary.id,
-                                Some(commander.id),
-                            );
+                    let saved = if let Some(SearchFor::Replace(previous)) = &m.search_for {
+                        if commander.id != previous.id
+                            && m.commanders.iter().any(|deck| {
+                                deck.commander.id == commander.id
+                                    || deck.partner.as_ref().is_some_and(|p| p.id == commander.id)
+                            })
+                        {
+                            state.error = Some("That commander is already in this player's collection. Choose another commander.".into());
+                            return Task::none();
                         }
+                        db::replace_player_commander(conn, m.player.id, previous.id, commander.id)
+                    } else {
+                        db::record_player_commander_use(conn, m.player.id, commander.id).and_then(
+                            |()| {
+                                if let Some(SearchFor::Partner(primary)) = &m.search_for {
+                                    if primary.id != commander.id {
+                                        return db::set_player_partner(
+                                            conn,
+                                            m.player.id,
+                                            primary.id,
+                                            Some(commander.id),
+                                        );
+                                    }
+                                }
+                                Ok(())
+                            },
+                        )
+                    };
+                    if let Err(error) = saved {
+                        state.error = Some(format!("Couldn't save commander: {error}"));
+                        return Task::none();
                     }
                     m.selected = match &m.search_for {
                         Some(SearchFor::Partner(primary)) => Some(primary.id),
@@ -944,33 +1053,86 @@ pub fn view<'a>(
     {
         let mut content = column![
             screen_header(
-                player.name.clone(),
+                "Player profile".to_string(),
                 style::T_TITLE,
                 Message::Players(PlayersMessage::CloseProfile)
             ),
-            text("Player profile")
-                .size(style::T_LABEL)
-                .color(style::TEXT_MUTED),
+            container(
+                row![
+                    avatar(player, state.pictures.get(&player.id), 112.0),
+                    column![
+                        text(&player.name).size(style::T_DISPLAY),
+                        text("Player profile")
+                            .size(style::T_LABEL)
+                            .color(style::TEXT_MUTED)
+                    ]
+                    .spacing(8)
+                ]
+                .spacing(24)
+                .align_y(iced::Alignment::Center)
+            )
+            .padding(24)
+            .width(Length::Fill)
+            .style(style::panel),
             if state.editing.is_some() || state.confirming_delete.is_some() {
                 player_row(state, player)
             } else {
-                cards::grid(vec![
-                    profile_action(
-                        "Commanders",
-                        "Browse and manage decks",
-                        PlayersMessage::ManageCommanders(player.clone()),
-                    ),
-                    profile_action(
-                        "Rename",
-                        "Change this player's name",
-                        PlayersMessage::StartEdit(player.id, player.name.clone()),
-                    ),
-                    profile_action(
-                        "Delete",
-                        "Remove an unused profile",
-                        PlayersMessage::AskDelete(player.id),
-                    ),
-                ])
+                iced::widget::responsive(move |size| {
+                    let height = ((size.height - 16.0) / 2.0).clamp(180.0, 320.0);
+                    scrollable(
+                        column![
+                            row![
+                                profile_action(
+                                    crate::icon::Glyph::Decks,
+                                    "Commanders",
+                                    "Browse and manage decks",
+                                    PlayersMessage::ManageCommanders(player.clone()),
+                                    height,
+                                    false
+                                ),
+                                profile_action(
+                                    crate::icon::Glyph::Edit,
+                                    "Rename",
+                                    "Change this player's name",
+                                    PlayersMessage::StartEdit(player.id, player.name.clone()),
+                                    height,
+                                    false
+                                ),
+                            ]
+                            .spacing(16),
+                            row![
+                                profile_action(
+                                    crate::icon::Glyph::Delete,
+                                    "Delete",
+                                    "Remove an unused profile",
+                                    PlayersMessage::AskDelete(player.id),
+                                    height,
+                                    true
+                                ),
+                                profile_action(
+                                    crate::icon::Glyph::Image,
+                                    if state.pictures.contains_key(&player.id) {
+                                        "Change profile picture"
+                                    } else {
+                                        "Add profile picture"
+                                    },
+                                    if state.choosing_picture {
+                                        "Choose an image in the file picker"
+                                    } else {
+                                        "Choose a photo from this laptop"
+                                    },
+                                    PlayersMessage::ChoosePicture(player.id),
+                                    height,
+                                    false
+                                ),
+                            ]
+                            .spacing(16),
+                        ]
+                        .spacing(16),
+                    )
+                    .into()
+                })
+                .into()
             },
         ]
         .spacing(style::GAP);
@@ -992,9 +1154,12 @@ pub fn view<'a>(
             "Add everyone who sits at this table - they'll keep their commanders and their record.",
         )
     } else {
-        cards::adaptive_grid(state.players.len(), move |i, width| {
-            player_tile(&state.players[i], width)
-        })
+        player_grid(
+            state.players.iter().collect(),
+            &state.pictures,
+            "View profile",
+            |p| Message::Players(PlayersMessage::OpenProfile(p.id)),
+        )
     };
 
     let mut add_button = style::icon_button(crate::icon::Glyph::Add, "Add Player", style::T_ACTION)
@@ -1035,76 +1200,141 @@ pub fn view<'a>(
 }
 
 fn profile_action(
-    title: &'static str,
-    caption: &'static str,
+    glyph: crate::icon::Glyph,
+    title: &str,
+    caption: &str,
     action: PlayersMessage,
+    height: f32,
+    danger: bool,
 ) -> Element<'static, Message> {
+    let compact = height < 220.0;
     button(
         container(
             column![
-                crate::icon::view(
-                    match title {
-                        "Commanders" => crate::icon::Glyph::Decks,
-                        "Rename" => crate::icon::Glyph::Edit,
-                        _ => crate::icon::Glyph::Delete,
-                    },
-                    32.,
-                    if title == "Delete" {
-                        style::DANGER
+                row![
+                    crate::icon::view(
+                        glyph,
+                        if compact { 28.0 } else { 36.0 },
+                        if danger {
+                            style::DANGER
+                        } else {
+                            style::ACCENT_BRIGHT
+                        }
+                    ),
+                    iced::widget::horizontal_space(),
+                    crate::icon::view(crate::icon::Glyph::Next, 24.0, style::TEXT_MUTED)
+                ],
+                iced::widget::vertical_space(),
+                text(title.to_string()).size(if compact {
+                    style::T_SUBHEAD
+                } else {
+                    style::T_HEADING
+                }),
+                text(caption.to_string())
+                    .size(if compact {
+                        style::T_CAPTION
                     } else {
-                        style::ACCENT_BRIGHT
-                    }
-                ),
-                text(title).size(style::T_HEADING),
-                text(caption).size(style::T_BODY).color(style::TEXT_MUTED),
+                        style::T_BODY
+                    })
+                    .color(style::TEXT_MUTED),
             ]
-            .spacing(style::GAP_SM)
-            .align_x(iced::Alignment::Center),
+            .spacing(if compact { 8 } else { 12 }),
         )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill),
+        .padding(if compact { 16 } else { 24 }),
     )
-    .padding(style::GAP)
-    .width(Length::Fixed(280.0))
-    .height(Length::Fixed(208.0))
+    .padding(0)
+    .width(Length::Fill)
+    .height(height)
     .style(style::row_button)
     .on_press(Message::Players(action))
     .into()
 }
 
-fn player_tile(player: &Player, width: f32) -> Element<'_, Message> {
-    let initials: String = player
-        .name
-        .split_whitespace()
-        .take(2)
-        .filter_map(|word| word.chars().next())
-        .flat_map(char::to_uppercase)
-        .collect();
-    button(
-        container(
-            column![
-                container(
-                    text(initials)
-                        .size(style::T_DISPLAY)
-                        .color(style::ACCENT_BRIGHT)
-                )
-                .center_x(96)
-                .center_y(96)
-                .style(style::badge),
-                text(&player.name).size(style::T_SUBHEAD),
-                text("View profile")
-                    .size(style::T_CAPTION)
-                    .color(style::TEXT_MUTED),
-            ]
-            .spacing(style::GAP_SM),
-        )
-        .padding(style::GAP),
-    )
-    .padding(style::GAP_SM)
-    .width(Length::Fixed(width))
-    .height(Length::Fixed(240.0))
-    .style(style::row_button)
-    .on_press(Message::Players(PlayersMessage::OpenProfile(player.id)))
+pub fn avatar<'a>(
+    player: &'a Player,
+    picture: Option<&'a image::Handle>,
+    size: f32,
+) -> Element<'a, Message> {
+    let content: Element<Message> = if let Some(handle) = picture {
+        image(handle.clone())
+            .width(size)
+            .height(size)
+            .content_fit(iced::ContentFit::Cover)
+            .into()
+    } else {
+        let initials: String = player
+            .name
+            .split_whitespace()
+            .take(2)
+            .filter_map(|w| w.chars().next())
+            .flat_map(char::to_uppercase)
+            .collect();
+        container(text(initials).size(size * 0.4).color(style::ACCENT_BRIGHT))
+            .center_x(size)
+            .center_y(size)
+            .into()
+    };
+    container(content)
+        .width(size)
+        .height(size)
+        .style(style::badge)
+        .clip(true)
+        .into()
+}
+
+pub fn player_grid<'a>(
+    players: Vec<&'a Player>,
+    pictures: &'a HashMap<i64, image::Handle>,
+    caption: &'static str,
+    action: impl Fn(Player) -> Message + 'a,
+) -> Element<'a, Message> {
+    iced::widget::responsive(move |size| {
+        let columns = if size.width >= 1100.0 { 3 } else { 2 };
+        let width = (size.width - 16.0 * columns as f32) / columns as f32;
+        let height = ((size.height - 16.0) / players.len().div_ceil(columns).max(1) as f32)
+            .clamp(240.0, 300.0);
+        let rows = players
+            .chunks(columns)
+            .map(|group| {
+                row(group
+                    .iter()
+                    .map(|player| {
+                        button(
+                            container(
+                                column![
+                                    row![
+                                        avatar(player, pictures.get(&player.id), 96.0),
+                                        iced::widget::horizontal_space(),
+                                        crate::icon::view(
+                                            crate::icon::Glyph::Next,
+                                            24.0,
+                                            style::ACCENT_BRIGHT
+                                        )
+                                    ],
+                                    iced::widget::vertical_space(),
+                                    text(&player.name).size(style::T_HEADING),
+                                    text(caption)
+                                        .size(style::T_CAPTION)
+                                        .color(style::TEXT_MUTED),
+                                ]
+                                .spacing(8),
+                            )
+                            .padding(24),
+                        )
+                        .padding(0)
+                        .width(width)
+                        .height(height)
+                        .style(style::row_button)
+                        .on_press(action((*player).clone()))
+                        .into()
+                    })
+                    .collect::<Vec<Element<Message>>>())
+                .spacing(16)
+                .into()
+            })
+            .collect::<Vec<Element<Message>>>();
+        scrollable(column(rows).spacing(16)).into()
+    })
     .into()
 }
 
@@ -1221,6 +1451,9 @@ fn manage_view<'a>(
     managed: &'a ManagedPlayer,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
+    if let Some(deck) = managed.selected.and_then(|id| managed.deck(id)) {
+        return selected_deck_view(state, managed, deck, image_cache);
+    }
     let grid: Element<Message> = if managed.commanders.is_empty() {
         empty_fill(
             "No decks yet",
@@ -1255,7 +1488,7 @@ fn manage_view<'a>(
         ),
         section_label(caption),
         grid,
-        deck_bar(managed),
+        deck_bar(),
     ]
     .spacing(style::GAP);
 
@@ -1269,123 +1502,158 @@ fn manage_view<'a>(
         .into()
 }
 
-/// What can be done to the deck that's currently picked, plus the one way
-/// to add another. Always on screen, so the grid above it never changes
-/// height when a deck is tapped.
-fn deck_bar<'a>(managed: &'a ManagedPlayer) -> Element<'a, Message> {
-    let add = style::icon_button(crate::icon::Glyph::Add, "Add a Deck", style::T_ACTION)
-        .width(Length::Fixed(W_WIDE))
-        .style(style::primary)
-        .on_press(Message::Players(PlayersMessage::OpenSearch(
-            SearchFor::Deck,
-        )));
-
-    let body: Element<Message> = match managed.selected.and_then(|id| managed.deck(id)) {
-        Some(deck) => {
-            let paired = deck.partner.is_some();
-            let mut arts = row![art_button(&deck.commander, paired)].spacing(style::GAP_SM);
-            if let Some(partner) = &deck.partner {
-                arts = arts.push(art_button(partner, true));
-            }
-
-            let pairing = match &deck.partner {
-                Some(_) => style::touch_button("Unpair", style::T_LABEL)
-                    .width(Length::Fixed(W_NARROW))
-                    .style(style::ghost)
-                    .on_press(Message::Players(PlayersMessage::Unpair(
-                        deck.commander.clone(),
-                    ))),
-                None => style::touch_button("Set Partner", style::T_LABEL)
-                    .width(Length::Fixed(W_ACTION))
-                    .style(style::secondary)
-                    .on_press(Message::Players(PlayersMessage::OpenSearch(
-                        SearchFor::Partner(deck.commander.clone()),
-                    ))),
-            };
-
-            column![
-                text(deck.label()).size(style::T_LABEL).color(style::TEXT),
-                row![
-                    salt_button(managed, deck.commander.id),
-                    arts,
-                    pairing,
-                    style::touch_button("Remove", style::T_LABEL)
-                        .width(Length::Fixed(W_NARROW))
-                        .style(style::danger_ghost)
-                        .on_press(Message::Players(PlayersMessage::RemoveCommander(
-                            deck.commander.id
-                        ))),
-                    add,
-                ]
-                .spacing(style::GAP_SM)
-                .wrap(),
-            ]
-            .spacing(style::GAP_SM)
-            .into()
-        }
-        None => row![
-            text("Tap a deck for its salt score, art, partner or to remove it")
+fn deck_bar() -> Element<'static, Message> {
+    container(
+        row![
+            text("Choose a deck to view its scores and options")
                 .size(style::T_BODY)
                 .color(style::TEXT_MUTED)
                 .width(Length::Fill),
-            add,
+            style::icon_button(crate::icon::Glyph::Add, "Add a deck", style::T_ACTION)
+                .width(W_WIDE)
+                .style(style::primary)
+                .on_press(Message::Players(PlayersMessage::OpenSearch(
+                    SearchFor::Deck
+                ))),
         ]
-        .spacing(style::GAP)
-        .align_y(iced::Alignment::Center)
-        .into(),
-    };
-
-    container(body)
-        .padding(ROW_PAD)
-        .width(Length::Fill)
-        .style(style::panel)
-        .into()
+        .spacing(16)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(16)
+    .style(style::panel)
+    .into()
 }
 
-/// "Art" when a deck has one commander; the commander's own name when it
-/// has two, because then there are two arts to choose between.
-fn art_button<'a>(commander: &'a Commander, paired: bool) -> Element<'a, Message> {
-    let (label, width) = if paired {
-        (cards::first_word(&commander.name), W_ACTION)
-    } else {
-        ("Art".to_string(), W_NARROW)
-    };
-    style::touch_button(label, style::T_LABEL)
-        .width(Length::Fixed(width))
-        .style(style::secondary)
-        .on_press(Message::Players(PlayersMessage::ChangeArt(
-            commander.clone(),
-        )))
-        .into()
-}
-
-/// The way into a deck's own page, labelled with what's already known about
-/// it: the bracket and salt score if we have them, an invitation if not.
-/// Reading the numbers off the button means the common case - checking
-/// whether a deck is table-legal - doesn't need the page opened at all.
-fn salt_button<'a>(managed: &'a ManagedPlayer, commander_id: i64) -> Element<'a, Message> {
-    let (label, width, paint): (
-        String,
-        f32,
-        fn(&iced::Theme, button::Status) -> button::Style,
-    ) = match managed.links.get(&commander_id) {
-        Some(link) => match (link.bracket, link.salt_total) {
-            (Some(bracket), Some(salt)) => (
-                format!("B{bracket}  -  {salt:.0} salt"),
-                W_WIDE,
-                style::primary,
+fn selected_deck_view<'a>(
+    state: &'a PlayersState,
+    managed: &'a ManagedPlayer,
+    deck: &'a SavedDeck,
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    let body = iced::widget::responsive(move |size| {
+        use crate::icon::Glyph;
+        let height = (size.height / 3.0 - 12.0).clamp(180.0, 260.0);
+        let meta = deck_meta(managed, deck);
+        let scores = match (meta.bracket, meta.salt) {
+            (Some(b), Some(s)) => format!("Bracket {b} · {s:.0} salt"),
+            _ => "Link a deck or view its analysis".to_string(),
+        };
+        let mut options = vec![
+            profile_action(
+                Glyph::Stats,
+                "Salt & bracket",
+                &scores,
+                PlayersMessage::OpenDeckPage(deck.commander.id),
+                height,
+                false,
             ),
-            // Linked, but the analysis hasn't landed - it was saved
-            // offline, or it failed.
-            _ => ("Check deck".to_string(), W_ACTION, style::secondary),
-        },
-        None => ("Moxfield".to_string(), W_NARROW, style::ghost),
-    };
-
-    style::touch_button(label, style::T_LABEL)
-        .width(Length::Fixed(width))
-        .style(paint)
-        .on_press(Message::Players(PlayersMessage::OpenDeckPage(commander_id)))
+            profile_action(
+                Glyph::Image,
+                "Commander art",
+                &deck.commander.name,
+                PlayersMessage::ChangeArt(deck.commander.clone()),
+                height,
+                false,
+            ),
+            profile_action(
+                Glyph::Players,
+                if deck.partner.is_some() {
+                    "Unpair commanders"
+                } else {
+                    "Set partner"
+                },
+                "Manage this deck's partner",
+                if deck.partner.is_some() {
+                    PlayersMessage::Unpair(deck.commander.clone())
+                } else {
+                    PlayersMessage::OpenSearch(SearchFor::Partner(deck.commander.clone()))
+                },
+                height,
+                false,
+            ),
+        ];
+        if let Some(partner) = &deck.partner {
+            options.push(profile_action(
+                Glyph::Image,
+                "Partner art",
+                &partner.name,
+                PlayersMessage::ChangeArt(partner.clone()),
+                height,
+                false,
+            ));
+        }
+        options.push(profile_action(
+            Glyph::Delete,
+            "Remove deck",
+            "Remove from this player's collection",
+            PlayersMessage::RemoveCommander(deck.commander.id),
+            height,
+            true,
+        ));
+        options.push(profile_action(
+            Glyph::Edit,
+            "Change commander",
+            "Choose a replacement for this deck",
+            PlayersMessage::OpenSearch(SearchFor::Replace(deck.commander.clone())),
+            height,
+            false,
+        ));
+        let mut iter = options.into_iter();
+        let mut rows = Vec::new();
+        while let Some(first) = iter.next() {
+            rows.push(
+                row![
+                    first,
+                    iter.next()
+                        .unwrap_or_else(|| iced::widget::horizontal_space().into())
+                ]
+                .spacing(16)
+                .into(),
+            );
+        }
+        let preview = container(crate::art::framed_pair(
+            &deck.commander,
+            deck.partner.as_ref(),
+            image_cache,
+            style::T_LABEL,
+            0.0,
+        ))
+        .padding(3)
+        .style(style::panel)
+        .clip(true);
+        row![
+            preview.width(Length::FillPortion(2)).height(Length::Fill),
+            scrollable(column(rows).spacing(16))
+                .width(Length::FillPortion(3))
+                .height(Length::Fill)
+        ]
+        .spacing(24)
+        .into()
+    });
+    let mut content = column![
+        screen_header(
+            deck.label(),
+            style::T_HEADING,
+            Message::Players(PlayersMessage::SelectDeck(deck.commander.id))
+        ),
+        row![
+            text(format!("{}'s deck", managed.player.name))
+                .size(style::T_LABEL)
+                .color(style::TEXT_MUTED),
+            cards::mana_row(&cards::identity(deck))
+        ]
+        .spacing(16)
+        .align_y(iced::Alignment::Center),
+        body,
+    ]
+    .spacing(16);
+    if let Some(error) = &state.error {
+        content = content.push(error_banner(error));
+    }
+    container(content)
+        .padding(16)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
 }
 
@@ -1567,6 +1835,7 @@ fn search_view<'a>(
     let looking_for = managed.search_for.as_ref();
     let title = match looking_for {
         Some(SearchFor::Partner(primary)) => format!("A partner for {}", primary.name),
+        Some(SearchFor::Replace(previous)) => format!("Replace {}", previous.name),
         _ => format!("A deck for {}", managed.player.name),
     };
 
@@ -1750,4 +2019,45 @@ fn with_keyboard<'a>(state: &PlayersState, body: Element<'a, Message>) -> Elemen
         ),
     ]
     .into()
+}
+
+#[cfg(test)]
+mod picture_tests {
+    use super::*;
+
+    #[test]
+    fn pictures_are_cropped_and_stored_as_portable_png() {
+        let photo = ::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(
+            100,
+            60,
+            ::image::Rgba([40, 80, 120, 255]),
+        ));
+        let mut source = std::io::Cursor::new(Vec::new());
+        photo
+            .write_to(&mut source, ::image::ImageOutputFormat::Png)
+            .unwrap();
+        let saved = normalize_picture(&source.into_inner()).unwrap();
+        let decoded = ::image::load_from_memory(&saved).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (512, 512));
+        assert_eq!(decoded.to_rgba8().get_pixel(256, 256).0, [40, 80, 120, 255]);
+        assert!(normalize_picture(b"not an image").is_err());
+    }
+
+    #[test]
+    fn cancelling_a_picture_preserves_the_previous_picture() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut state = PlayersState::load(&conn);
+        state
+            .pictures
+            .insert(1, image::Handle::from_rgba(1, 1, vec![1, 2, 3, 255]));
+        state.choosing_picture = true;
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::PictureChosen(1, Ok(None)),
+        );
+        assert!(state.pictures.contains_key(&1));
+        assert!(!state.choosing_picture);
+        assert!(state.error.is_none());
+    }
 }

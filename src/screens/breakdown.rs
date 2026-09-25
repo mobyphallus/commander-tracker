@@ -234,13 +234,10 @@ fn combos_section<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
                 tags.push("two-card".to_string());
             }
             if combo.early {
-                tags.push("early".to_string());
+                tags.push("low starting mana".to_string());
             }
             if combo.lock {
                 tags.push("lock".to_string());
-            }
-            if let Some(mana) = combo.mana_value {
-                tags.push(format!("{mana} mana"));
             }
 
             let produces = if combo.produces.is_empty() {
@@ -255,31 +252,45 @@ fn combos_section<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
                 style::TEXT_MUTED
             };
 
-            container(
-                row![
-                    column![
-                        text(combo.label()).size(style::T_LABEL).color(style::TEXT),
-                        text(produces)
-                            .size(style::T_CAPTION)
-                            .color(style::TEXT_MUTED),
-                    ]
-                    .spacing(style::GAP_XS)
-                    .width(Length::Fill),
-                    text(tags.join(" - ")).size(style::T_CAPTION).color(tone),
-                ]
-                .spacing(style::GAP)
-                .align_y(Alignment::Center),
-            )
-            .padding(style::GAP_SM)
-            .width(Length::Fill)
-            .style(style::table_row)
-            .into()
+            let mut details = column![
+                text(combo.label()).size(style::T_LABEL).color(style::TEXT),
+                text(produces)
+                    .size(style::T_CAPTION)
+                    .color(style::TEXT_MUTED),
+                text(combo.mana_label())
+                    .size(style::T_CAPTION)
+                    .color(style::TEXT),
+            ]
+            .spacing(style::GAP_XS)
+            .width(Length::Fill);
+            if !tags.is_empty() {
+                details = details.push(text(tags.join(" · ")).size(style::T_CAPTION).color(tone));
+            }
+            if !combo.mana_needed.is_empty() {
+                details = details.push(
+                    text(format!("Mana requirement: {}", combo.mana_needed))
+                        .size(style::T_CAPTION)
+                        .color(style::TEXT_MUTED),
+                );
+            }
+            if !combo.prerequisites.is_empty() {
+                details = details.push(
+                    text(format!("Prerequisites: {}", combo.prerequisites))
+                        .size(style::T_CAPTION)
+                        .color(style::TEXT_MUTED),
+                );
+            }
+            container(details)
+                .padding(style::GAP_SM)
+                .width(Length::Fill)
+                .style(style::table_row)
+                .into()
         })
         .collect::<Vec<_>>();
 
     section(
         &format!("Combo lines ({})", analysis.combos.len()),
-        Some("Every line Commander Spellbook can find in this list. Two-card lines that win for seven mana or less are what force bracket 4."),
+        Some("Starting mana assumes the combo is already set up; it excludes the cost of pieces already in play. Zero means no extra mana after setup, not free cards. The local bracket estimate flags two-card lines needing seven or less starting mana."),
         rows,
     )
 }

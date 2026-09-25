@@ -4,9 +4,20 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::model::{
     ArtFraming, Commander, FinishedGame, GameDetail, GameDetailKill, GameDetailOut, GameDetailSeat,
-    GameSummary, GrudgeStat, HateKind, HatedCommanderStat, HaterStat, MatchupStat, OutCause,
-    Player, PlayerStat, SavedDeck, WinReason, WinReasonStat,
+    GameSummary, HateKind, OutCause, Player, SavedDeck, WinReason,
 };
+
+/// Pictures are copied into the database, so moving the source file is safe.
+pub fn player_pictures(conn: &Connection) -> rusqlite::Result<Vec<(i64, Vec<u8>)>> {
+    let mut stmt = conn.prepare("SELECT player_id, png FROM player_pictures")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+pub fn set_player_picture(conn: &Connection, player_id: i64, png: &[u8]) -> rusqlite::Result<()> {
+    conn.execute("INSERT INTO player_pictures (player_id, png) VALUES (?1, ?2) ON CONFLICT(player_id) DO UPDATE SET png = excluded.png", params![player_id, png])?;
+    Ok(())
+}
 
 pub fn data_dir() -> PathBuf {
     let mut dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -30,6 +41,11 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS players (
             id   INTEGER PRIMARY KEY,
             name TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS player_pictures (
+            player_id INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
+            png BLOB NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS commanders (
@@ -307,6 +323,36 @@ pub fn remove_player_commander(
         params![player_id, commander_id],
     )?;
     Ok(())
+}
+
+/// Replace a saved commander without changing historical games or other decks.
+/// The unique key rejects replacements already in the player's collection.
+pub fn replace_player_commander(
+    conn: &Connection,
+    player_id: i64,
+    previous_id: i64,
+    replacement_id: i64,
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
+        "UPDATE player_commanders SET commander_id = ?3, last_used_at = ?4
+         WHERE player_id = ?1 AND commander_id = ?2",
+        params![
+            player_id,
+            previous_id,
+            replacement_id,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    tx.execute(
+        "UPDATE player_commanders SET partner_commander_id = ?3
+         WHERE player_id = ?1 AND partner_commander_id = ?2",
+        params![player_id, previous_id, replacement_id],
+    )?;
+    tx.commit()
 }
 
 fn commander_from_row(row: &rusqlite::Row) -> rusqlite::Result<Commander> {
@@ -615,165 +661,6 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
     }
 
     tx.commit()
-}
-
-pub fn commander_matchup_stats(conn: &Connection) -> rusqlite::Result<Vec<MatchupStat>> {
-    // For every pair of commanders that shared a game, tally how often each side won.
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT ca.name, cb.name,
-               SUM(CASE WHEN gpa.won = 1 THEN 1 ELSE 0 END) AS a_wins,
-               SUM(CASE WHEN gpb.won = 1 THEN 1 ELSE 0 END) AS b_wins,
-               COUNT(*) AS games
-        FROM game_players gpa
-        JOIN game_players gpb
-            ON gpa.game_id = gpb.game_id AND gpa.id < gpb.id
-        JOIN commanders ca ON ca.id = gpa.commander_id
-        JOIN commanders cb ON cb.id = gpb.commander_id
-        GROUP BY ca.name, cb.name
-        ORDER BY games DESC, ca.name, cb.name
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(MatchupStat {
-            commander_a: row.get(0)?,
-            commander_b: row.get(1)?,
-            a_wins: row.get(2)?,
-            b_wins: row.get(3)?,
-            games: row.get(4)?,
-        })
-    })?;
-    rows.collect()
-}
-
-pub fn player_stats(conn: &Connection) -> rusqlite::Result<Vec<PlayerStat>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT p.name, COUNT(*) AS games, SUM(gp.won) AS wins
-        FROM game_players gp
-        JOIN players p ON p.id = gp.player_id
-        GROUP BY p.name
-        ORDER BY wins DESC, games DESC
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(PlayerStat {
-            player_name: row.get(0)?,
-            games: row.get(1)?,
-            wins: row.get(2)?,
-        })
-    })?;
-    rows.collect()
-}
-
-/// Who dishes out the most commander hate, with a breakdown by kind and a
-/// per-game rate so someone with one brutal night doesn't outrank a repeat
-/// offender.
-pub fn hater_stats(conn: &Connection) -> rusqlite::Result<Vec<HaterStat>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT p.name,
-               COUNT(*) AS total,
-               SUM(CASE WHEN ck.kind = 'commander_kill' THEN 1 ELSE 0 END) AS kills,
-               SUM(CASE WHEN ck.kind = 'board_wipe' THEN 1 ELSE 0 END) AS wipes,
-               SUM(CASE WHEN ck.kind = 'counterspell' THEN 1 ELSE 0 END) AS counters,
-               (SELECT COUNT(*) FROM game_players gp WHERE gp.player_id = p.id) AS games
-        FROM commander_kills ck
-        JOIN game_players kp ON kp.id = ck.killer_game_player_id
-        JOIN players p ON p.id = kp.player_id
-        GROUP BY p.id, p.name
-        ORDER BY total DESC, p.name
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(HaterStat {
-            player_name: row.get(0)?,
-            total: row.get(1)?,
-            kills: row.get(2)?,
-            wipes: row.get(3)?,
-            counters: row.get(4)?,
-            games: row.get(5)?,
-        })
-    })?;
-    rows.collect()
-}
-
-/// Which commanders draw the most heat.
-pub fn hated_commander_stats(conn: &Connection) -> rusqlite::Result<Vec<HatedCommanderStat>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT c.name,
-               COUNT(*) AS total,
-               SUM(CASE WHEN ck.kind = 'commander_kill' THEN 1 ELSE 0 END) AS kills,
-               SUM(CASE WHEN ck.kind = 'board_wipe' THEN 1 ELSE 0 END) AS wipes,
-               SUM(CASE WHEN ck.kind = 'counterspell' THEN 1 ELSE 0 END) AS counters,
-               (SELECT COUNT(*) FROM game_players gp WHERE gp.commander_id = c.id) AS appearances
-        FROM commander_kills ck
-        JOIN game_players vp ON vp.id = ck.victim_game_player_id
-        JOIN commanders c ON c.id = vp.commander_id
-        GROUP BY c.id, c.name
-        ORDER BY total DESC, c.name
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(HatedCommanderStat {
-            commander_name: row.get(0)?,
-            total: row.get(1)?,
-            kills: row.get(2)?,
-            wipes: row.get(3)?,
-            counters: row.get(4)?,
-            appearances: row.get(5)?,
-        })
-    })?;
-    rows.collect()
-}
-
-/// Specific grudges: this player keeps targeting this commander.
-pub fn grudge_stats(conn: &Connection) -> rusqlite::Result<Vec<GrudgeStat>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT hater.name, c.name, victim.name, COUNT(*) AS total
-        FROM commander_kills ck
-        JOIN game_players kp ON kp.id = ck.killer_game_player_id
-        JOIN players hater ON hater.id = kp.player_id
-        JOIN game_players vp ON vp.id = ck.victim_game_player_id
-        JOIN players victim ON victim.id = vp.player_id
-        JOIN commanders c ON c.id = vp.commander_id
-        GROUP BY hater.id, c.id, victim.id
-        ORDER BY total DESC, hater.name
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(GrudgeStat {
-            hater_name: row.get(0)?,
-            commander_name: row.get(1)?,
-            victim_name: row.get(2)?,
-            total: row.get(3)?,
-        })
-    })?;
-    rows.collect()
-}
-
-/// How games in this pod actually end.
-pub fn win_reason_stats(conn: &Connection) -> rusqlite::Result<Vec<WinReasonStat>> {
-    let mut stmt = conn.prepare(
-        "SELECT win_reason, COUNT(*) FROM games
-         WHERE win_reason IS NOT NULL
-         GROUP BY win_reason ORDER BY COUNT(*) DESC",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let reason: String = row.get(0)?;
-        Ok(WinReasonStat {
-            reason: WinReason::from_db_str(&reason),
-            games: row.get(1)?,
-        })
-    })?;
-    rows.collect()
-}
-
-/// Average number of turns a finished game runs to.
-pub fn average_game_turns(conn: &Connection) -> rusqlite::Result<Option<f64>> {
-    conn.query_row("SELECT AVG(ending_turn) FROM games", [], |row| row.get(0))
 }
 
 fn parse_dt(s: &str) -> chrono::DateTime<chrono::Utc> {
@@ -1122,6 +1009,45 @@ mod tests {
     use super::*;
     use crate::salt::Analysis;
 
+    #[test]
+    fn stats_load_existing_schema_without_writing_or_inventing_losses() {
+        let conn = memory_db();
+        let (player, commander) = player_with_deck(&conn, "Stats player");
+        conn.execute("INSERT INTO games (id, started_at, ended_at, pod_size) VALUES (1, '2026-09-25T10:00:00Z', '2026-09-25T11:00:00Z', 2)", []).unwrap();
+        conn.execute("INSERT INTO game_players (game_id, player_id, commander_id, seat, final_life, final_poison, won) VALUES (1, ?1, ?2, 0, 40, 0, 0)", params![player, commander]).unwrap();
+        conn.pragma_update(None, "query_only", true).unwrap();
+        let data = crate::screens::stats::data::Data::load(&conn).unwrap();
+        assert_eq!(data.games.len(), 1);
+        assert!((data.games[0].minutes - 60.0).abs() < 0.001);
+        let record = &data
+            .summary(crate::screens::stats::data::Scope::Players)
+            .records[0];
+        assert_eq!(
+            (record.appearances, record.losses, record.unresolved),
+            (1, 0, 1)
+        );
+    }
+
+    #[test]
+    fn profile_picture_survives_schema_reopen_and_preserves_existing_players() {
+        let conn = memory_db();
+        let player = create_player(&conn, "Photo player").unwrap();
+        set_player_picture(&conn, player.id, b"first picture").unwrap();
+        init(&conn).unwrap();
+        assert_eq!(list_players(&conn).unwrap(), vec![player.clone()]);
+        assert_eq!(
+            player_pictures(&conn).unwrap(),
+            vec![(player.id, b"first picture".to_vec())]
+        );
+        set_player_picture(&conn, player.id, b"replacement").unwrap();
+        assert_eq!(
+            player_pictures(&conn).unwrap(),
+            vec![(player.id, b"replacement".to_vec())]
+        );
+        delete_player(&conn, player.id).unwrap();
+        assert!(player_pictures(&conn).unwrap().is_empty());
+    }
+
     /// A schema-complete throwaway database, so these tests exercise the real
     /// migrations rather than a hand-built subset of them.
     fn memory_db() -> Connection {
@@ -1145,6 +1071,50 @@ mod tests {
         .unwrap();
         record_player_commander_use(conn, player.id, commander.id).unwrap();
         (player.id, commander.id)
+    }
+
+    #[test]
+    fn changing_a_commander_preserves_partner_history_and_other_players() {
+        let conn = memory_db();
+        let (player, old) = player_with_deck(&conn, "Owner");
+        let other = create_player(&conn, "Other").unwrap();
+        record_player_commander_use(&conn, other.id, old).unwrap();
+        let partner = upsert_commander(&conn, "partner", "Partner", None, None, "W").unwrap();
+        let replacement =
+            upsert_commander(&conn, "replacement", "Replacement", None, None, "U").unwrap();
+        record_player_commander_use(&conn, player, partner.id).unwrap();
+        set_player_partner(&conn, player, old, Some(partner.id)).unwrap();
+        conn.execute("INSERT INTO games (id, started_at, ended_at, pod_size) VALUES (1, '2026-09-25', '2026-09-25', 2)", []).unwrap();
+        conn.execute("INSERT INTO game_players (game_id, player_id, commander_id, seat, final_life, final_poison, won) VALUES (1, ?1, ?2, 0, 40, 0, 1)", params![player, old]).unwrap();
+
+        replace_player_commander(&conn, player, old, replacement.id).unwrap();
+        let decks = player_commander_history(&conn, player).unwrap();
+        assert_eq!(decks.len(), 1);
+        assert_eq!(decks[0].commander.id, replacement.id);
+        assert_eq!(decks[0].partner.as_ref().unwrap().id, partner.id);
+        assert_eq!(
+            saved_partner(&conn, player, partner.id).unwrap().id,
+            replacement.id
+        );
+        assert_eq!(
+            player_commander_history(&conn, other.id).unwrap()[0]
+                .commander
+                .id,
+            old
+        );
+        let historical: i64 = conn
+            .query_row(
+                "SELECT commander_id FROM game_players WHERE game_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(historical, old);
+
+        // An existing partner cannot silently replace the primary and merge rows.
+        assert!(replace_player_commander(&conn, player, replacement.id, partner.id).is_err());
+        assert_eq!(player_commander_history(&conn, player).unwrap(), decks);
+        assert!(replace_player_commander(&conn, player, old, replacement.id).is_err());
     }
 
     fn analysis(public_id: &str, bracket: u8, salt: f64) -> Analysis {
