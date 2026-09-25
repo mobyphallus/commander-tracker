@@ -9,6 +9,8 @@ mod cache;
 mod cards;
 #[path = "../db.rs"]
 mod db;
+#[path = "../feedback.rs"]
+mod feedback;
 #[path = "../icon.rs"]
 mod icon;
 #[path = "../keyboard.rs"]
@@ -81,6 +83,9 @@ const PAGES: &[&str] = &[
     "deck-list",
     "commander-options",
     "setup-badges",
+    "feedback-out",
+    "feedback-qr",
+    "feedback-history",
 ];
 impl Review {
     fn new() -> (Self, Task<Msg>) {
@@ -264,6 +269,56 @@ impl Review {
                 game::GameMessage::StartDamageFocus(1),
             );
         }
+        self.game.feedback_panel = None;
+        if p == 20 {
+            self.game.seats[0].mark_out(model::Elimination {
+                cause: model::OutCause::Concede,
+                killer_seat: None,
+                turn: 1,
+            });
+            session::save(&self.conn, &self.game).unwrap();
+        }
+        if p == 21 {
+            let url = "http://192.168.1.50:8787/f/0123456789abcdef0123456789abcdef";
+            self.game.feedback_panel = Some(feedback::Panel {
+                name: "Alexandra".into(),
+                url: Some(url.into()),
+                qr: feedback::qr(url),
+                error: None,
+            });
+        }
+        if p == 22 {
+            let token: String = self
+                .conn
+                .query_row(
+                    "SELECT token FROM feedback_members WHERE match_key=?1 AND seat=0",
+                    [self.game.started_at.to_rfc3339()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            feedback::submit(&mut self.conn,&token,&feedback::Draft {rating:"4".into(),problem:"1".into(),kingmaker:"2".into(),notes:"Fun game overall. The final turns felt slow; let's agree on quicker turns next time.".into()}).unwrap();
+            let _ = game::update(
+                &mut self.game,
+                &mut self.conn,
+                game::GameMessage::StartDeclareWinner(1),
+            );
+            let _ = game::update(
+                &mut self.game,
+                &mut self.conn,
+                game::GameMessage::PickWinReason(model::WinReason::CombatDamage),
+            );
+            let _ = game::update(
+                &mut self.game,
+                &mut self.conn,
+                game::GameMessage::ConfirmEndGame,
+            );
+            let id = db::list_games(&self.conn).unwrap()[0].id;
+            history::update(
+                &mut self.history,
+                &self.conn,
+                history::HistoryMessage::ViewGame(id),
+            );
+        }
         self.game.game_menu_open = p == 2;
         self.game.undo_open = p == 3;
         self.game.help_open = p == 4;
@@ -404,8 +459,8 @@ impl Review {
         let p = self.page % PAGES.len();
         let view = match p {
             0 | 1 => home::view(&self.home, &self.players),
-            2..=5 | 13..=15 => game::view(&self.game, &self.images),
-            6..=9 => history::view(&self.history),
+            2..=5 | 13..=15 | 20..=21 => game::view(&self.game, &self.images),
+            6..=9 | 22 => history::view(&self.history),
             16 => iced::widget::container(cards::grid(
                 self.decks
                     .iter()

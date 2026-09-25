@@ -20,6 +20,7 @@ pub enum Screen {
 }
 
 pub struct App {
+    feedback: crate::feedback::Service,
     conn: Connection,
     fatal_error: Option<String>,
     rematch: Option<setup::SetupState>,
@@ -62,8 +63,14 @@ impl App {
                 Vec::new()
             }
         };
+        let feedback = if fatal_error.is_none() {
+            crate::feedback::Service::start(&conn)
+        } else {
+            Default::default()
+        };
         (
             Self {
+                feedback,
                 conn,
                 fatal_error,
                 rematch: None,
@@ -128,12 +135,18 @@ impl App {
         match message {
             Message::RetryDatabase => Task::none(),
             Message::Storage(msg) => {
-                if matches!(msg, crate::storage::StorageMessage::ConfirmRestore) {
+                let restoring = matches!(msg, crate::storage::StorageMessage::ConfirmRestore);
+                if restoring {
+                    self.feedback = Default::default();
                     self.rematch = None;
                     self.image_cache.clear();
                 }
                 if let Screen::Storage(state) = &mut self.screen {
-                    return crate::storage::update(state, &mut self.conn, msg);
+                    let task = crate::storage::update(state, &mut self.conn, msg);
+                    if restoring {
+                        self.feedback = crate::feedback::Service::start(&self.conn);
+                    }
+                    return task;
                 }
                 Task::none()
             }
@@ -241,6 +254,20 @@ impl App {
             }
             Message::Game(msg) => {
                 if let Screen::Game(state) = &mut self.screen {
+                    if let game::GameMessage::OpenFeedback(seat) = msg {
+                        // Existing saves from before this feature get their links here too.
+                        if let Err(error) = crate::session::save(&self.conn, state) {
+                            state.error = Some(error);
+                            return Task::none();
+                        }
+                        state.feedback_panel = Some(crate::feedback::panel(
+                            &self.conn,
+                            state,
+                            seat,
+                            &self.feedback,
+                        ));
+                        return Task::none();
+                    }
                     let (task, action) = game::update(state, &mut self.conn, msg);
                     match action {
                         Some(game::Action::Finished)
@@ -262,6 +289,14 @@ impl App {
             }
             Message::History(msg) => {
                 if let Screen::History(state) = &mut self.screen {
+                    if let history::HistoryMessage::OpenFeedback(member) = msg {
+                        state.feedback_panel = Some(crate::feedback::saved_panel(
+                            &self.conn,
+                            member,
+                            &self.feedback,
+                        ));
+                        return Task::none();
+                    }
                     history::update(state, &self.conn, msg);
                 }
                 Task::none()
@@ -338,6 +373,7 @@ mod flow_tests {
     fn fixture() -> App {
         let (conn, game) = crate::session::tests::fixture();
         App {
+            feedback: Default::default(),
             home: home::HomeState::load(&conn),
             players: db::list_players(&conn).unwrap(),
             conn,

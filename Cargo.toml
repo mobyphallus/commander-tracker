@@ -9,12 +9,19 @@ description = "Local MTG Commander pod tracker: life, poison, commander damage, 
 iced = { version = "0.13", features = ["tokio", "image", "lazy", "advanced", "canvas"] }
 rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1", features = ["time", "sync"] }
+tokio = { version = "1", features = ["time", "sync", "net", "rt", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
+
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+url = "2"
+socket2 = "0.6"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }

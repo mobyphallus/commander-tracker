@@ -9,6 +9,7 @@ use crate::model::{GameDetail, GameDetailSeat, GameSummary, WinReason};
 use crate::style;
 
 pub struct HistoryState {
+    pub feedback_panel: Option<crate::feedback::Panel>,
     pub games: Vec<GameSummary>,
     pub error: Option<String>,
     query: String,
@@ -35,6 +36,7 @@ impl HistoryState {
             ),
         };
         Self {
+            feedback_panel: None,
             games,
             terms,
             error,
@@ -52,6 +54,8 @@ impl HistoryState {
 
 #[derive(Debug, Clone)]
 pub enum HistoryMessage {
+    OpenFeedback(i64),
+    CloseFeedback,
     ViewGame(i64),
     Retry,
     Query(String),
@@ -70,6 +74,8 @@ pub enum HistoryMessage {
 
 pub fn update(state: &mut HistoryState, conn: &Connection, message: HistoryMessage) {
     match message {
+        HistoryMessage::OpenFeedback(_) => {}
+        HistoryMessage::CloseFeedback => state.feedback_panel = None,
         HistoryMessage::Retry => *state = HistoryState::load(conn),
         HistoryMessage::Query(q) => state.query = q,
         HistoryMessage::Days(days) => state.days = days,
@@ -266,6 +272,10 @@ fn sentence_case(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn view(state: &HistoryState) -> Element<'_, Message> {
+    if let Some(panel) = &state.feedback_panel {
+        return crate::feedback::view(panel, Message::History(HistoryMessage::CloseFeedback));
+    }
+
     iced::widget::responsive(move |size| view_sized(state, size.width < 1100.)).into()
 }
 
@@ -462,7 +472,12 @@ fn detail_view(detail: &GameDetail, compact: bool) -> Element<'_, Message> {
 
     let header = row![
         header,
+        style::touch_button("Refresh", style::T_LABEL)
+            .width(120)
+            .style(style::secondary)
+            .on_press(Message::History(HistoryMessage::ViewGame(detail.id))),
         style::touch_button("Correct result", style::T_LABEL)
+            .width(190)
             .style(style::secondary)
             .on_press(Message::History(HistoryMessage::Edit))
     ]
@@ -554,6 +569,78 @@ fn detail_view(detail: &GameDetail, compact: bool) -> Element<'_, Message> {
         .width(Length::Fill)
         .style(style::panel);
 
+    let mut responses =
+        column![
+            text("Player-reported impressions, separate from the recorded result.")
+                .size(style::T_BODY)
+                .color(style::TEXT_MUTED)
+        ]
+        .spacing(style::GAP);
+    if detail.feedback.is_empty() {
+        responses = responses.push(
+            text("No feedback submitted yet. Refresh to check for new responses.")
+                .size(style::T_BODY),
+        );
+    }
+    if !detail.feedback_players.is_empty() {
+        let links = row(detail
+            .feedback_players
+            .iter()
+            .map(|(id, name)| {
+                style::touch_button(format!("Feedback link · {name}"), style::T_BODY)
+                    .width(Length::Shrink)
+                    .style(style::secondary)
+                    .on_press(Message::History(HistoryMessage::OpenFeedback(*id)))
+                    .into()
+            })
+            .collect::<Vec<Element<Message>>>())
+        .spacing(style::GAP_SM)
+        .wrap();
+        responses = responses.push(links);
+    }
+    for response in &detail.feedback {
+        let mut entry = column![
+            text(format!("{} · {}/5", response.player_name, response.rating))
+                .size(style::T_SUBHEAD),
+            text(format!(
+                "Problem player: {}",
+                response
+                    .problem_player
+                    .as_deref()
+                    .unwrap_or("None / not sure")
+            ))
+            .size(style::T_BODY),
+            text(format!(
+                "Kingmaker: {}",
+                response.kingmaker.as_deref().unwrap_or("None / not sure")
+            ))
+            .size(style::T_BODY),
+        ]
+        .spacing(style::GAP_SM);
+        if !response.notes.is_empty() {
+            entry = entry.push(text(&response.notes).size(style::T_BODY));
+        }
+        entry = entry.push(
+            text(format!(
+                "Updated {}",
+                chrono::DateTime::parse_from_rfc3339(&response.updated_at)
+                    .map(|time| time
+                        .with_timezone(&chrono::Local)
+                        .format("%b %-d · %H:%M")
+                        .to_string())
+                    .unwrap_or_else(|_| response.updated_at.clone())
+            ))
+            .size(style::T_CAPTION)
+            .color(style::TEXT_MUTED),
+        );
+        responses = responses.push(
+            container(entry)
+                .padding(style::GAP)
+                .width(Length::Fill)
+                .style(style::panel),
+        );
+    }
+
     let seats = column(
         detail
             .seats
@@ -571,6 +658,7 @@ fn detail_view(detail: &GameDetail, compact: bool) -> Element<'_, Message> {
                 column![
                     section("RESULT", summary),
                     section("COMMANDER HATE", hate),
+                    section("PLAYER FEEDBACK", responses),
                     section("SEATS", seats)
                 ]
                 .spacing(style::GAP)

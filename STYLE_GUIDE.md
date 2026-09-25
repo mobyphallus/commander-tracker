@@ -45,6 +45,7 @@ Standard controls are 72 logical pixels tall; major actions are 88. Touch target
 - Save each game action and checkpoint running timers every five seconds. Resume paused. Record actual play duration separately from start/end timestamps; finish the history write and removal of recovery data atomically.
 - The game menu provides recent actions and undo, a revisitable touch guide, and Save & return home. Keep touch hints short and pause timers while the guide is open. Long dialogs must scroll at shorter window heights.
 - Failed data loads must say what failed and offer a retry, never masquerade as empty history. Failed writes retain the current game or editor. Restore requires a review step and creates a safety backup before replacement.
+- Eliminated players get a personal QR link for 1–5 match ratings, optional problem-player and kingmaker selections, and notes. Feedback stays player-linked, appears separately from factual results, and remains accessible from match history. Keep the phone form large, readable, and usable without JavaScript.
 - History filters include every participant and both partner commanders. Result corrections require a review step and retain the previous record for audit.
 - Stats leaders pair photos/art with names, and show decided-game counts beside rates. Mark samples under five decided games as small samples.
 - Deck brackets are local estimates. Starting mana is not total setup cost; unknown prerequisites cannot establish an early combo. Keep salt scores and setup uncertainty separate.

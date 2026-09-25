@@ -22,8 +22,13 @@ struct SavedGame {
 
 pub fn save(conn: &Connection, state: &GameState) -> Result<(), String> {
     let payload = serde_json::json!({"version": 1, "game": state, "undo": state.undo});
-    db::save_active_game(conn, &payload.to_string())
-        .map_err(|e| format!("Autosave failed: {e}. Keep the app open and try saving again."))
+    let save = || -> rusqlite::Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        crate::feedback::sync(&tx, state)?;
+        db::save_active_game(&tx, &payload.to_string())?;
+        tx.commit()
+    };
+    save().map_err(|e| format!("Autosave failed: {e}. Keep the app open and try saving again."))
 }
 
 pub fn load(conn: &Connection) -> Result<Option<GameState>, String> {

@@ -436,6 +436,10 @@ pub struct GameDetailKill {
 /// The full box score for a single past game.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GameDetail {
+    #[serde(default)]
+    pub feedback: Vec<crate::feedback::Response>,
+    #[serde(default)]
+    pub feedback_players: Vec<(i64, String)>,
     pub elapsed_seconds: Option<u64>,
     pub id: i64,
     pub started_at: chrono::DateTime<chrono::Utc>,

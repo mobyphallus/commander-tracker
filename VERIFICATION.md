@@ -1,6 +1,6 @@
 # Verification — 2026-09-25
 
-`cargo test --offline --bin commander_pod`: 119 passed, 1 ignored (live network).
+`cargo test --offline --bin commander_pod`: 124 passed, 1 ignored (live network).
 `cargo build --offline --bin commander_pod --bin ui_review`: passed.
 
 Application-message tests cover changing life, saving and returning home,
@@ -11,7 +11,7 @@ A regression test ensures dismissing Help after recovery keeps timers paused.
 
 The review harness uses only an in-memory sample database, with long player names,
 a partner deck, missing art, and saved results. Run `cargo run --bin ui_review -- N`,
-where N is 0 (1875×1205), 1 (800×1280), or 2 (1280×800). Each run captures twenty
+where N is 0 (1875×1205), 1 (800×1280), or 2 (1280×800). Each run captures twenty-three
 states including recovery, game dialogs, search keyboard, result correction,
 stats, restore confirmation, rematch setup, partner damage controls, running/paused game boards, bracket/salt badges, linked deck lists, commander options, and setup badges.
 
@@ -39,3 +39,14 @@ Deck-list tests cover cached quantities, exact owner links, unlinking, refresh
 errors retaining cached data, ignored stale responses, and independent list/score
 navigation in Players and Setup. Deck lists use the existing Moxfield client and
 cache successfully fetched lists in SQLite; their first load requires a connection.
+
+Phone feedback is covered by database and real HTTP tests: per-player links,
+1–5 rating and participant validation, bounded notes, escaped HTML, origin checks,
+updates without duplicates, Back In/undo eligibility, recovery, atomic final-game
+attachment, backup/restore, and server restart on the same port. The HTTP test
+requires permission to bind a loopback port. All 124 tests passed with that
+permission; one pre-existing live-service test remains ignored.
+
+The phone form was rendered in isolated headless Firefox at 390×844. Desktop
+review includes the eliminated-player action, QR panel, and feedback history.
+A real phone on the local Wi-Fi still needs the user's hands-on check.

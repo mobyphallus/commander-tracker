@@ -30,6 +30,7 @@ pub fn open() -> rusqlite::Result<Connection> {
     let mut path = data_dir();
     path.push("pod.db");
     let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(2))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     // Preserve an upgrade copy before the first recovery/duration migration.
     let existing: bool = conn
@@ -131,6 +132,7 @@ pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
 
+    crate::feedback::init(conn)?;
     migrate_scryfall_id_to_oracle_id(conn)?;
     migrate_add_ending_turn(conn)?;
     if !conn
@@ -694,6 +696,8 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
         )?;
     }
 
+    tx.execute("UPDATE feedback_matches SET game_id=?1, status='finished' WHERE match_key=?2",
+        params![game_id, game.started_at.to_rfc3339()])?;
     tx.execute("DELETE FROM active_game", [])?;
     tx.commit()
 }
@@ -880,6 +884,8 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
     };
 
     Ok(GameDetail {
+        feedback: crate::feedback::for_game(conn, game_id)?,
+        feedback_players: crate::feedback::invites_for_game(conn, game_id)?,
         elapsed_seconds,
         id: game_id,
         started_at: parse_dt(&started_at),

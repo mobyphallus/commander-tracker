@@ -31,6 +31,8 @@ pub enum SeatTab {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct GameState {
     #[serde(skip)]
+    pub feedback_panel: Option<crate::feedback::Panel>,
+    #[serde(skip)]
     pub error: Option<String>,
     #[serde(skip)]
     pub result_save_failed: bool,
@@ -204,6 +206,7 @@ impl GameState {
             *turns = 1;
         }
         Self {
+            feedback_panel: None,
             error: None,
             result_save_failed: false,
             help_open: false,
@@ -314,6 +317,8 @@ impl GameState {
 
 #[derive(Debug, Clone)]
 pub enum GameMessage {
+    OpenFeedback(usize),
+    CloseFeedback,
     Tick,
     Undo,
     OpenUndo,
@@ -380,6 +385,11 @@ pub(crate) fn update_inner(
     message: GameMessage,
 ) -> (iced::Task<Message>, Option<Action>) {
     match message {
+        GameMessage::OpenFeedback(_) => (iced::Task::none(), None),
+        GameMessage::CloseFeedback => {
+            state.feedback_panel = None;
+            (iced::Task::none(), None)
+        }
         GameMessage::Undo => {
             crate::session::undo(state);
             (iced::Task::none(), None)
@@ -735,7 +745,7 @@ pub(crate) fn update_inner(
         }
         GameMessage::AbandonGame => {
             if state.pending_abandon {
-                match db::clear_active_game(conn) {
+                match crate::feedback::abandon(conn, state) {
                     Ok(()) => return (iced::Task::none(), Some(Action::Abandoned)),
                     Err(e) => state.error = Some(format!("Couldn’t discard the saved game: {e}")),
                 }
@@ -878,6 +888,9 @@ pub fn view<'a>(
     state: &'a GameState,
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
+    if let Some(panel) = &state.feedback_panel {
+        return crate::feedback::view(panel, Message::Game(GameMessage::CloseFeedback));
+    }
     if let Some(error) = &state.error {
         return dialog(
             column![
@@ -1221,7 +1234,10 @@ fn seat_panel<'a>(
     if let Some(partner) = &seat.partner {
         identity.push_str(&partner.color_identity);
     }
-    let mut caption_lines = vec![Line::new(seat.player.name.clone(), style::T_PLAYER_NAME as f32)];
+    let mut caption_lines = vec![Line::new(
+        seat.player.name.clone(),
+        style::T_PLAYER_NAME as f32,
+    )];
     if !subtitle.is_empty() {
         caption_lines.push(Line::new(subtitle, style::T_CAPTION as f32).secondary());
     }
@@ -1356,21 +1372,29 @@ fn eliminated_tile<'a>(
     let art = art::framed(&seat.commander, image_cache, 16, facing.radians());
 
     let scrim = container(
-        column![
-            text("ELIMINATED").size(style::T_HEADING),
-            text(seat.player.name.clone()).size(style::T_SUBHEAD),
-            text(seat.commander.name.clone()).size(style::T_BODY),
-            text(out_line.unwrap_or_else(|| "out".to_string())).size(style::T_BODY),
-            text(format!("Final: {} life, {} poison", seat.life, seat.poison))
-                .size(style::T_CAPTION),
-            style::touch_button("Back In", style::T_ACTION)
-                .width(Length::Fixed(220.0))
-                .style(style::secondary)
-                .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
-        ]
-        .spacing(14)
-        .align_x(iced::Alignment::Center),
+        scrollable(
+            column![
+                text("ELIMINATED").size(style::T_HEADING),
+                text(seat.player.name.clone()).size(style::T_SUBHEAD),
+                text(seat.commander.name.clone()).size(style::T_BODY),
+                text(out_line.unwrap_or_else(|| "out".to_string())).size(style::T_BODY),
+                text(format!("Final: {} life, {} poison", seat.life, seat.poison))
+                    .size(style::T_CAPTION),
+                style::touch_button("Rate this game", style::T_ACTION)
+                    .width(Length::Fixed(220.0))
+                    .style(style::primary)
+                    .on_press(Message::Game(GameMessage::OpenFeedback(index))),
+                style::touch_button("Back In", style::T_ACTION)
+                    .width(Length::Fixed(220.0))
+                    .style(style::secondary)
+                    .on_press(Message::Game(GameMessage::ToggleEliminated(index))),
+            ]
+            .spacing(14)
+            .align_x(iced::Alignment::Center),
+        )
+        .height(Length::Fill),
     )
+    .padding(16)
     .width(Length::Fill)
     .height(Length::Fill)
     .center_x(Length::Fill)
