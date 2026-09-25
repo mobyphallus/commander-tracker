@@ -259,14 +259,7 @@ pub fn options_for(pod_size: usize) -> Vec<TableLayout> {
                 vec![vec![0], vec![1, 2], vec![3, 4], vec![5, 6], vec![7]],
             ),
         ],
-        _ => {
-            let columns: Vec<Vec<usize>> = (0..pod_size)
-                .collect::<Vec<_>>()
-                .chunks(2)
-                .map(|c| c.to_vec())
-                .collect();
-            vec![TableLayout::new("Pairs", columns)]
-        }
+        _ => Vec::new(),
     }
 }
 

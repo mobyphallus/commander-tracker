@@ -47,18 +47,17 @@ pub fn update(state: &mut HistoryState, conn: &Connection, message: HistoryMessa
 
 /// Width of the "Back" control in both headers, so the two views don't shift
 /// under your thumb when you move between them.
-const BACK_W: f32 = 220.0;
 
 // Fixed column widths for the game list. A history screen is a table, so the
 // columns are pinned rather than left to each row's content - dates, results
 // and turn counts line up down the page and can be read in one sweep.
-const WHEN_W: f32 = 260.0;
-const HOW_W: f32 = 340.0;
-const COUNT_W: f32 = 130.0;
+const WHEN_W: f32 = 160.0;
+const HOW_W: f32 = 200.0;
+const COUNT_W: f32 = 80.0;
 
 // The same idea for a seat inside one game's box score.
-const OUT_W: f32 = 520.0;
-const TOTAL_W: f32 = 140.0;
+const OUT_W: f32 = 320.0;
+const TOTAL_W: f32 = 96.0;
 
 // ---------------------------------------------------------------------------
 // Small parts
@@ -137,28 +136,10 @@ fn empty_state<'a>(headline: &'a str, hint: &'a str) -> Element<'a, Message> {
 fn page_header<'a>(
     title: String,
     sub: String,
-    back_label: &'a str,
+    _back_label: &'a str,
     back: Message,
 ) -> Element<'a, Message> {
-    container(
-        row![
-            column![
-                text(title).size(style::T_TITLE),
-                text(sub).size(style::T_CAPTION).color(style::TEXT_MUTED),
-            ]
-            .spacing(style::GAP_XS),
-            iced::widget::horizontal_space(),
-            style::touch_button(back_label, style::T_LABEL)
-                .width(Length::Fixed(BACK_W))
-                .style(style::ghost)
-                .on_press(back),
-        ]
-        .align_y(Alignment::Center),
-    )
-    .padding([style::GAP, style::GAP + style::GAP_SM])
-    .width(Length::Fill)
-    .style(style::header)
-    .into()
+    style::page_header(title, sub, back)
 }
 
 /// How long the game ran, in the shortest form that still reads as a length
@@ -187,8 +168,12 @@ fn sentence_case(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn view(state: &HistoryState) -> Element<'_, Message> {
+    iced::widget::responsive(move |size| view_sized(state, size.width < 1100.)).into()
+}
+
+fn view_sized(state: &HistoryState, compact: bool) -> Element<'_, Message> {
     if let Some(detail) = &state.selected {
-        return detail_view(detail);
+        return detail_view(detail, compact);
     }
 
     let count = match state.games.len() {
@@ -209,7 +194,7 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
                 state
                     .games
                     .iter()
-                    .map(game_row)
+                    .map(|game| game_row(game, compact))
                     .collect::<Vec<Element<Message>>>(),
             )
             .spacing(style::GAP_SM)
@@ -232,7 +217,7 @@ pub fn view(state: &HistoryState) -> Element<'_, Message> {
 
 /// One past game, read left to right: when it was, who took it and with
 /// what, how it was won, how long it ran, how many sat down.
-fn game_row(g: &GameSummary) -> Element<'_, Message> {
+fn game_row(g: &GameSummary, compact: bool) -> Element<'_, Message> {
     let (winner, winner_sub, winner_ink) = match (&g.winner_name, &g.winner_commander) {
         (Some(name), Some(commander)) => (name.clone(), commander.clone(), style::ACCENT_BRIGHT),
         (Some(name), None) => (
@@ -247,53 +232,64 @@ fn game_row(g: &GameSummary) -> Element<'_, Message> {
         ),
     };
 
-    button(
-        row![
-            stacked(
-                g.started_at.format("%-d %b %Y").to_string(),
-                style::T_LABEL,
-                style::TEXT,
-                g.started_at.format("%H:%M").to_string(),
-                Length::Fixed(WHEN_W),
-                Alignment::Start,
-            ),
-            stacked(
-                winner,
-                style::T_SUBHEAD,
-                winner_ink,
-                winner_sub,
-                Length::Fill,
-                Alignment::Start,
-            ),
-            stacked(
-                g.win_reason
-                    .map(|r| r.label())
-                    .unwrap_or("Unrecorded")
-                    .to_string(),
-                style::T_BODY,
-                style::TEXT,
-                "win condition".to_string(),
-                Length::Fixed(HOW_W),
-                Alignment::Start,
-            ),
-            count_cell(g.ending_turn.to_string(), "turns", COUNT_W),
-            count_cell(g.pod_size.to_string(), "players", COUNT_W),
+    let winner = stacked(
+        winner,
+        style::T_SUBHEAD,
+        winner_ink,
+        winner_sub,
+        Length::Fill,
+        Alignment::Start,
+    );
+    let date = stacked(
+        g.started_at.format("%-d %b %Y").to_string(),
+        style::T_LABEL,
+        style::TEXT,
+        g.started_at.format("%H:%M").to_string(),
+        Length::Fixed(WHEN_W),
+        Alignment::Start,
+    );
+    let result = stacked(
+        g.win_reason
+            .map(|r| r.label())
+            .unwrap_or("Unrecorded")
+            .to_string(),
+        style::T_BODY,
+        style::TEXT,
+        "win condition".into(),
+        Length::Fixed(HOW_W),
+        Alignment::Start,
+    );
+    let counts = row![
+        count_cell(g.ending_turn.to_string(), "turns", COUNT_W),
+        count_cell(g.pod_size.to_string(), "players", COUNT_W)
+    ]
+    .spacing(style::GAP);
+    let content: Element<Message> = if compact {
+        column![
+            winner,
+            row![date, result, counts].spacing(style::GAP).wrap()
         ]
         .spacing(style::GAP)
-        .align_y(Alignment::Center),
-    )
-    .padding([style::GAP, style::GAP + style::GAP_SM])
-    .width(Length::Fill)
-    .style(style::row_button)
-    .on_press(Message::History(HistoryMessage::ViewGame(g.id)))
-    .into()
+        .into()
+    } else {
+        row![date, winner, result, counts]
+            .spacing(style::GAP)
+            .align_y(Alignment::Center)
+            .into()
+    };
+    button(content)
+        .padding([style::GAP, style::GAP + style::GAP_SM])
+        .width(Length::Fill)
+        .style(style::row_button)
+        .on_press(Message::History(HistoryMessage::ViewGame(g.id)))
+        .into()
 }
 
 // ---------------------------------------------------------------------------
 // One game's box score
 // ---------------------------------------------------------------------------
 
-fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
+fn detail_view(detail: &GameDetail, compact: bool) -> Element<'_, Message> {
     let header = page_header(
         detail.started_at.format("%-d %b %Y").to_string(),
         format!(
@@ -334,7 +330,11 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
                 style::T_HEADING,
                 winner_ink,
                 winner_sub,
-                Length::Fill,
+                if compact {
+                    Length::Fixed(600.0)
+                } else {
+                    Length::Fill
+                },
                 Alignment::Start,
             ),
             stacked(
@@ -353,7 +353,8 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
             count_cell(detail.seats.len().to_string(), "players", COUNT_W),
         ]
         .spacing(style::GAP)
-        .align_y(Alignment::Center),
+        .align_y(Alignment::Center)
+        .wrap(),
     )
     .padding([style::GAP, style::GAP + style::GAP_SM])
     .width(Length::Fill)
@@ -394,7 +395,7 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
         detail
             .seats
             .iter()
-            .map(seat_row)
+            .map(|seat| seat_row(seat, compact))
             .collect::<Vec<Element<Message>>>(),
     )
     .spacing(style::GAP_SM)
@@ -403,9 +404,15 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
     container(
         column![
             header,
-            section("RESULT", summary),
-            section("COMMANDER HATE", hate),
-            section("SEATS", scrollable(seats).height(Length::Fill)).height(Length::Fill),
+            scrollable(
+                column![
+                    section("RESULT", summary),
+                    section("COMMANDER HATE", hate),
+                    section("SEATS", seats)
+                ]
+                .spacing(style::GAP)
+            )
+            .height(Length::Fill),
         ]
         .spacing(style::GAP)
         .padding(style::GAP),
@@ -417,7 +424,7 @@ fn detail_view(detail: &GameDetail) -> Element<'_, Message> {
 
 /// One seat's line in the box score: who they were, how they went out, and
 /// what they finished on. The winner's panel is the only lit thing here.
-fn seat_row(s: &GameDetailSeat) -> Element<'_, Message> {
+fn seat_row(s: &GameDetailSeat, compact: bool) -> Element<'_, Message> {
     let (out_main, out_sub) = match &s.out {
         Some(out) => (
             format!(
@@ -457,7 +464,11 @@ fn seat_row(s: &GameDetailSeat) -> Element<'_, Message> {
                 style::TEXT
             },
             s.commander_name.clone(),
-            Length::Fill,
+            if compact {
+                Length::Fixed(600.0)
+            } else {
+                Length::Fill
+            },
             Alignment::Start,
         ),
         stacked(
@@ -472,7 +483,8 @@ fn seat_row(s: &GameDetailSeat) -> Element<'_, Message> {
         count_cell(s.final_poison.to_string(), "poison", TOTAL_W),
     ]
     .spacing(style::GAP)
-    .align_y(Alignment::Center);
+    .align_y(Alignment::Center)
+    .wrap();
 
     container(
         column![

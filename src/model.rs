@@ -114,6 +114,12 @@ pub struct Seat {
     /// kill and which turn it was are both impossible to reconstruct at the
     /// end of the game, so they are never inferred later.
     pub elimination: Option<Elimination>,
+    /// Whose deck this is, when it isn't the player's own.
+    ///
+    /// A borrowed game counts for the deck and for whoever piloted it, and
+    /// not at all for the owner - they weren't playing. This is carried so
+    /// history can say whose deck it was; no stat reads it.
+    pub borrowed_from: Option<Player>,
 }
 
 impl Seat {
@@ -127,7 +133,14 @@ impl Seat {
             commander_damage_taken: HashMap::new(),
             eliminated: false,
             elimination: None,
+            borrowed_from: None,
         }
+    }
+
+    /// Marks this seat as playing someone else's deck.
+    pub fn borrowed_from(mut self, owner: Option<Player>) -> Self {
+        self.borrowed_from = owner;
+        self
     }
 
     /// Put a seat out, with the record of why. Always use this rather than
@@ -474,6 +487,8 @@ pub struct GameDetailOut {
 pub struct GameDetailSeat {
     pub player_name: String,
     pub commander_name: String,
+    /// Whose deck it was, when the player was borrowing it.
+    pub borrowed_from: Option<String>,
     pub final_life: i32,
     pub final_poison: i32,
     pub won: bool,

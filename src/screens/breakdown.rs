@@ -22,10 +22,10 @@ const W_COUNT: f32 = 70.0;
 const W_FLOOR: f32 = 86.0;
 const W_SCORE: f32 = 96.0;
 /// The proportional bars in the salt table.
-const W_BAR: f32 = 260.0;
+const W_BAR: f32 = 160.0;
 const BAR_H: f32 = 14.0;
 /// The big bracket digit's box, wide enough for the label beneath it.
-const W_HERO: f32 = 210.0;
+const W_HERO: f32 = 144.0;
 /// How many cards to name per salt category before falling back to a count.
 const CARDS_SHOWN: usize = 6;
 
@@ -125,9 +125,7 @@ fn hero<'a, Msg: 'a>(analysis: &'a Analysis) -> Element<'a, Msg> {
     }
 
     container(
-        row![bracket_block, salt_block, detail]
-            .spacing(style::GAP)
-            .align_y(Alignment::Center),
+        column![row![bracket_block, salt_block].spacing(style::GAP), detail].spacing(style::GAP),
     )
     .padding(style::GAP)
     .width(Length::Fill)

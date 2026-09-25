@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{container, image, stack, text};
+use iced::widget::{container, image, responsive, stack, Space};
 use iced::{Element, Length, Rectangle, Size};
 
 use crate::model::{ArtFraming, Commander};
@@ -49,7 +49,7 @@ pub fn image_dimensions(handle: &image::Handle) -> Size {
 pub fn framed<'a, Msg: 'a>(
     commander: &Commander,
     image_cache: &HashMap<String, image::Handle>,
-    placeholder_size: u16,
+    _placeholder_size: u16,
     rotation: f32,
 ) -> Element<'a, Msg> {
     let handle = commander
@@ -58,8 +58,9 @@ pub fn framed<'a, Msg: 'a>(
         .cloned();
 
     let Some(handle) = handle else {
-        let name = commander.name.clone();
-        return container(text(name).size(placeholder_size))
+        // The seat already carries its name in a rotated caption. A second
+        // unrotated name here would show through the life counter's scrim.
+        return container(Space::new(Length::Fill, Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x(Length::Fill)
@@ -70,14 +71,12 @@ pub fn framed<'a, Msg: 'a>(
     panned_image::display(handle, commander.framing, rotation)
 }
 
-/// Size of the partner inset. Fixed rather than proportional: every tile
-/// this appears in is large, and a fixed box keeps the second commander
-/// recognisable instead of shrinking to nothing in a crowded pod.
+/// Maximum partner inset size; smaller seats constrain it proportionally.
 const INSET_W: f32 = 168.0;
 const INSET_H: f32 = 120.0;
 
 /// A seat's art: the primary commander filling the tile, with the partner
-/// (when there is one) inset in the top-right corner. Falls back to the
+/// (when there is one) inset away from the edge controls. Falls back to the
 /// plain single-commander art when the deck has no partner.
 pub fn framed_pair<'a, Msg: 'a>(
     commander: &Commander,
@@ -92,18 +91,32 @@ pub fn framed_pair<'a, Msg: 'a>(
         return primary;
     };
 
-    let inset = container(
-        container(framed(partner, image_cache, 12, rotation))
-            .width(Length::Fixed(INSET_W))
-            .height(Length::Fixed(INSET_H))
-            .clip(true)
-            .style(crate::style::art_inset),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_x(iced::alignment::Horizontal::Right)
-    .align_y(iced::alignment::Vertical::Top)
-    .padding(14);
+    let partner_handle = partner
+        .portrait_url()
+        .and_then(|url| image_cache.get(url))
+        .cloned();
+    let framing = partner.framing;
+    let inset = responsive(move |size| {
+        let width = INSET_W.min(size.width * 0.24);
+        let height = INSET_H.min(size.height * 0.22);
+        let art: Element<Msg> = match &partner_handle {
+            Some(handle) => panned_image::display(handle.clone(), framing, rotation),
+            None => Space::new(Length::Fill, Length::Fill).into(),
+        };
+        container(
+            container(art)
+                .width(width)
+                .height(height)
+                .clip(true)
+                .style(crate::style::art_inset),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Top)
+        .padding(iced::Padding::ZERO.top(size.height * 0.23).right(14))
+        .into()
+    });
 
     stack![primary, inset]
         .width(Length::Fill)

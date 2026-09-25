@@ -4,20 +4,13 @@
 //! a seat that needs attention - and get its look from here. Nothing outside
 //! this module should invent a colour, a corner radius or a shadow.
 //!
-//! The house style: a near-black surface stack with a violet cast, lit by a
-//! single dark-purple accent. Colour is a scarce resource - the accent marks
-//! the one thing on a screen that matters (the active seat, the primary
-//! action) and nothing else. Depth comes from four flat surface steps plus
-//! hairline borders rather than from heavy shadows, which is what keeps it
-//! reading as sleek instead of as a stack of grey boxes.
+//! Neutral charcoal surfaces keep commander art in the foreground. Purple is
+//! reserved for actions, selection and the current turn. See STYLE_GUIDE.md.
 
 use iced::border::Radius;
 use iced::theme::palette;
-use iced::widget::{button, column, container, text, text_input, Button};
-use iced::{
-    gradient, Alignment, Background, Border, Color, Degrees, Gradient, Length, Shadow, Theme,
-    Vector,
-};
+use iced::widget::{button, column, container, row, text, text_input, Button};
+use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme, Vector};
 
 // ---------------------------------------------------------------------------
 // Colour
@@ -32,38 +25,30 @@ const fn hex(rgb: u32) -> Color {
     )
 }
 
-/// The surface stack, darkest first. Every opaque background in the app is
+/// The neutral surface stack, darkest first. Every opaque background in the app is
 /// one of these four - a fifth shade of near-black is always a mistake.
 ///
 /// `0` is the page, `1` is anything resting on it (panels, rows, cards),
 /// `2` is anything raised off that (hover, selection, plain buttons), and
 /// `3` is reserved for hairlines and borders rather than fills.
-pub const SURFACE_0: Color = hex(0x0B0910);
-pub const SURFACE_1: Color = hex(0x151120);
-pub const SURFACE_2: Color = hex(0x1F1830);
-pub const SURFACE_3: Color = hex(0x2E2542);
+pub const SURFACE_0: Color = hex(0x101114);
+pub const SURFACE_1: Color = hex(0x191B20);
+pub const SURFACE_2: Color = hex(0x24272E);
+pub const SURFACE_3: Color = hex(0x363A44);
 
 /// The accent ramp. [`ACCENT`] is the house purple; [`ACCENT_DEEP`] is for
 /// large tinted fills where full saturation would shout, and
 /// [`ACCENT_BRIGHT`] for hover and focus, where it has to visibly lift.
-pub const ACCENT_DEEP: Color = hex(0x281A45);
-pub const ACCENT: Color = hex(0x7C3AED);
-pub const ACCENT_BRIGHT: Color = hex(0x9F74FF);
+pub const ACCENT_DEEP: Color = hex(0x2B2340);
+pub const ACCENT: Color = hex(0x8B5CF6);
+pub const ACCENT_BRIGHT: Color = hex(0xB69AFF);
 
 /// Ink. [`TEXT_MUTED`] is for captions and secondary lines and is the
 /// dimmest thing allowed to carry words - anything fainter is decoration.
-pub const TEXT: Color = hex(0xEDE9F7);
-pub const TEXT_MUTED: Color = hex(0xA79CC0);
+pub const TEXT: Color = hex(0xF3F4F7);
+pub const TEXT_MUTED: Color = hex(0xADB1BD);
 /// Ink for text sitting on an accent fill.
 pub const TEXT_ON_ACCENT: Color = hex(0xF8F5FF);
-/// A secondary line on an accent fill. [`TEXT_MUTED`] is a surface ink and
-/// vanishes against the accent, so this dims the light ink rather than
-/// reaching for a darker one.
-pub const TEXT_ON_ACCENT_MUTED: Color = Color {
-    a: 0.76,
-    ..TEXT_ON_ACCENT
-};
-
 /// Status colours. Deliberately desaturated next to the accent so a win or a
 /// lethal seat reads as *status*, not as a second brand colour.
 pub const SUCCESS: Color = hex(0x35C48A);
@@ -81,9 +66,9 @@ pub const HAIRLINE: Color = Color {
 
 /// Corner radii. Bigger than a desktop app would use, on purpose: this runs
 /// on a touchscreen where soft, chunky shapes read as tappable.
-pub const R_SM: f32 = 10.0;
+pub const R_SM: f32 = 12.0;
 pub const R_MD: f32 = 16.0;
-pub const R_LG: f32 = 22.0;
+pub const R_LG: f32 = 20.0;
 /// Fully rounded - chips, pills and the round counter glyphs.
 pub const R_PILL: f32 = 999.0;
 
@@ -91,16 +76,15 @@ pub const R_PILL: f32 = 999.0;
 // scale, so ~1875x1210 logical px, ~6.5 logical px per mm. A finger needs
 // roughly 9mm, hence the 60px floor on anything tappable.
 /// Standard tappable row/button height.
-pub const TOUCH_H: f32 = 76.0;
+pub const TOUCH_H: f32 = 72.0;
 /// Primary call-to-action height.
-pub const TOUCH_H_LG: f32 = 104.0;
+pub const TOUCH_H_LG: f32 = 88.0;
 /// Page padding and the gap between major blocks.
-pub const GAP: u16 = 18;
+pub const GAP: u16 = 16;
 /// Spacing sub-units, for inside a block rather than between blocks.
-/// Everything in the app is one of these three or a multiple of [`GAP`] -
-/// there is no fourth spacing value, and no bare number in a screen file.
+/// Use these steps and their multiples for shared component spacing.
 pub const GAP_SM: u16 = GAP / 2;
-pub const GAP_XS: u16 = GAP / 3;
+pub const GAP_XS: u16 = GAP / 4;
 
 /// Vertical padding that lands a text field exactly on [`TOUCH_H`], given a
 /// [`T_SUBHEAD`] value inside it. Derived rather than eyeballed so every
@@ -118,20 +102,19 @@ pub const T_CAPTION: u16 = 16;
 pub const T_BODY: u16 = 18;
 pub const T_LABEL: u16 = 20;
 pub const T_ACTION: u16 = 22;
-pub const T_SUBHEAD: u16 = 26;
+pub const T_SUBHEAD: u16 = 24;
 pub const T_LEAD: u16 = 30;
-pub const T_HEADING: u16 = 34;
-pub const T_TITLE: u16 = 40;
-pub const T_DISPLAY: u16 = 54;
+pub const T_HEADING: u16 = 32;
+pub const T_TITLE: u16 = 36;
+pub const T_DISPLAY: u16 = 48;
 pub const T_COUNTER: u16 = 76;
 
-/// Elevation. Shadows are violet-black rather than neutral black so they
-/// tint the surface underneath instead of dirtying it.
+/// Elevation. Shadows are neutral and reserved for over-art elements.
 fn shadow(blur: f32, y: f32, alpha: f32) -> Shadow {
     Shadow {
         color: Color {
             a: alpha,
-            ..hex(0x05030A)
+            ..hex(0x050608)
         },
         offset: Vector::new(0.0, y),
         blur_radius: blur,
@@ -149,7 +132,7 @@ fn shadow(blur: f32, y: f32, alpha: f32) -> Shadow {
 /// of the background and the text colour, which produces a neutral grey -
 /// and since `secondary` is what every plain button in the app lands on,
 /// that grey is most of what you'd see. Spelling the ramps out keeps the
-/// violet cast in the surfaces, where it does the work.
+/// neutral surfaces and purple action states consistent.
 pub fn app_theme() -> Theme {
     Theme::custom_with_fn("Commander Pod".to_string(), base_palette(), |_| extended())
 }
@@ -176,7 +159,7 @@ fn extended() -> palette::Extended {
             // Deliberately lighter than SURFACE_2: iced spends
             // `background.strong` on text-input placeholders and scrollbar
             // thumbs, which have to be legible rather than structural.
-            strong: pair(hex(0x6E6288), TEXT),
+            strong: pair(hex(0x737986), TEXT),
         },
         primary: palette::Primary {
             base: pair(ACCENT, TEXT_ON_ACCENT),
@@ -214,48 +197,14 @@ pub fn touch_button<'a, Msg: 'a>(label: impl text::IntoFragment<'a>, size: u16) 
     sized_button(label, size, TOUCH_H)
 }
 
-/// The edge of a square choice tile. Big enough to hold its own on a
-/// full-screen question and to be an easy target from across a table, while
-/// a whole scale of them still fits one row.
-pub const TILE: f32 = 230.0;
-
-/// One option in a set you pick from by tapping: a value, and a word saying
-/// what the value means.
-///
-/// Deliberately [`secondary`]. A screen that asks you to choose between
-/// equal options has no single most-important one, so none of them takes
-/// the accent - it stays on the header. Filling every tile with the accent
-/// would make the whole screen shout and say nothing.
-pub fn choice_tile<'a, Msg: 'a>(
-    value: impl text::IntoFragment<'a>,
-    label: impl text::IntoFragment<'a>,
-) -> Button<'a, Msg> {
-    button(
-        container(
-            column![
-                text(value).size(T_DISPLAY),
-                text(label).size(T_CAPTION).color(TEXT_MUTED),
-            ]
-            .spacing(2)
-            .align_x(Alignment::Center),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill),
-    )
-    .padding(0)
-    .width(Length::Fixed(TILE))
-    .height(Length::Fixed(TILE))
-    .style(secondary)
-}
-
 /// A name you pick out of a short list - a player taking a seat.
 ///
 /// Deliberately much bigger than a row or a button. At setup the screen
 /// holds five names and nothing else, and a control sized for a dense list
 /// leaves most of the table empty while making the one thing on it hard to
 /// hit from a chair.
-pub const NAME_TILE_W: f32 = 340.0;
-pub const NAME_TILE_H: f32 = 150.0;
+pub const NAME_TILE_W: f32 = 280.0;
+pub const NAME_TILE_H: f32 = 112.0;
 
 pub fn name_tile<'a, Msg: 'a>(label: impl text::IntoFragment<'a>) -> Button<'a, Msg> {
     sized_button(label, T_TITLE, NAME_TILE_H).width(Length::Fixed(NAME_TILE_W))
@@ -305,24 +254,22 @@ fn dim(style: button::Style) -> button::Style {
     }
 }
 
-/// The one action on a screen you actually want tapped. Accent-filled, with
-/// a top-to-bottom wash so it reads as a lit surface rather than a flat
-/// swatch, and the only button carrying a shadow.
+/// A restrained solid accent with high-contrast ink, reserved for the next action.
 pub fn primary(_theme: &Theme, status: button::Status) -> button::Style {
-    let (top, bottom, lift) = match status {
-        button::Status::Hovered => (ACCENT_BRIGHT, ACCENT, 14.0),
-        button::Status::Pressed => (ACCENT_DEEP, ACCENT, 4.0),
-        _ => (ACCENT, hex(0x5B27B8), 10.0),
+    let fill = match status {
+        button::Status::Hovered => hex(0x7C4BDF),
+        button::Status::Pressed => ACCENT_DEEP,
+        _ => hex(0x7040CF),
     };
     let base = button::Style {
-        background: Some(wash(top, bottom)),
+        background: Some(fill.into()),
         text_color: TEXT_ON_ACCENT,
-        shadow: shadow(lift * 1.6, lift * 0.4, 0.45),
         ..button_base(R_MD)
     };
-    match status {
-        button::Status::Disabled => dim(base),
-        _ => base,
+    if matches!(status, button::Status::Disabled) {
+        dim(base)
+    } else {
+        base
     }
 }
 
@@ -451,7 +398,7 @@ pub fn tile_selected(_theme: &Theme, status: button::Status) -> button::Style {
             width: 2.0,
             radius: Radius::from(R_MD),
         },
-        shadow: shadow(18.0, 6.0, 0.4),
+        shadow: Shadow::default(),
     }
 }
 
@@ -541,8 +488,8 @@ pub fn ghost(_theme: &Theme, status: button::Status) -> button::Style {
 /// player name, so on-tile controls all read as one family.
 pub fn glass_button(_theme: &Theme, status: button::Status) -> button::Style {
     let (bg, line) = match status {
-        button::Status::Hovered | button::Status::Pressed => (0.78, ACCENT_BRIGHT.scale_alpha(0.6)),
-        _ => (0.62, Color { a: 0.22, ..TEXT }),
+        button::Status::Hovered | button::Status::Pressed => (0.96, ACCENT_BRIGHT.scale_alpha(0.6)),
+        _ => (0.9, Color { a: 0.22, ..TEXT }),
     };
     button::Style {
         background: Some(Color { a: bg, ..SCRIM }.into()),
@@ -556,14 +503,20 @@ pub fn glass_button(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// A vertical wash between two colours. The whole app's gradients are this
-/// shape - top-lit, never diagonal, never more than two stops.
-fn wash(top: Color, bottom: Color) -> Background {
-    Background::Gradient(Gradient::Linear(
-        gradient::Linear::new(Degrees(180.0))
-            .add_stop(0.0, top)
-            .add_stop(1.0, bottom),
-    ))
+/// Scores need a near-opaque surface to stay readable over pale card art.
+pub fn score_button(theme: &Theme, status: button::Status) -> button::Style {
+    let mut paint = glass_button(theme, status);
+    paint.background = Some(match status {
+        button::Status::Pressed => ACCENT_DEEP.into(),
+        button::Status::Hovered => SURFACE_2.into(),
+        _ => Color {
+            a: 0.94,
+            ..SURFACE_1
+        }
+        .into(),
+    });
+    paint.border.radius = R_MD.into();
+    paint
 }
 
 // ---------------------------------------------------------------------------
@@ -580,14 +533,14 @@ pub fn panel(_theme: &Theme) -> container::Style {
             width: 1.0,
             radius: Radius::from(R_MD),
         },
-        shadow: shadow(14.0, 4.0, 0.35),
+        shadow: Shadow::default(),
         ..container::Style::default()
     }
 }
 
 /// Same as [`panel`], but lit by the accent to call out the active seat or
-/// the selected item. The glow does the work - the border is there to
-/// survive being seen on a screen at arm's length across a table.
+/// the selected item. A clear border allows the state to
+/// remain visible at arm's length across a table.
 pub fn panel_active(theme: &Theme) -> container::Style {
     container::Style {
         border: Border {
@@ -595,11 +548,7 @@ pub fn panel_active(theme: &Theme) -> container::Style {
             width: 3.0,
             radius: Radius::from(R_MD),
         },
-        shadow: Shadow {
-            color: Color { a: 0.5, ..ACCENT },
-            offset: Vector::new(0.0, 0.0),
-            blur_radius: 26.0,
-        },
+        shadow: Shadow::default(),
         ..panel(theme)
     }
 }
@@ -626,7 +575,7 @@ pub fn panel_selected(theme: &Theme) -> container::Style {
 ///
 /// Deliberately the card-face colours rather than anything from the palette
 /// above - this is the one place the house style gives way. A player reads a
-/// mana symbol by its colour before they read its letter, and tinting these
+/// mana symbol by its colour and silhouette, and tinting these
 /// violet to match the app would cost exactly the recognition they exist
 /// for. Anything that isn't WUBRG is colourless.
 pub fn mana_color(symbol: char) -> Color {
@@ -640,26 +589,9 @@ pub fn mana_color(symbol: char) -> Color {
     }
 }
 
-/// Ink for the letter inside a pip. Near-black rather than the app's text
+/// Ink for the symbol inside a pip. Near-black rather than the app's text
 /// colour, which would vanish on these pale discs.
 pub const MANA_INK: Color = hex(0x1B1410);
-
-/// One mana pip: a filled disc with a dark rim, so it holds its edge over
-/// card art as well as over a panel.
-pub fn mana_pip(symbol: char) -> impl Fn(&Theme) -> container::Style {
-    let fill = mana_color(symbol);
-    move |_theme: &Theme| container::Style {
-        background: Some(fill.into()),
-        text_color: Some(MANA_INK),
-        border: Border {
-            color: Color { a: 0.45, ..SCRIM },
-            width: 1.0,
-            radius: Radius::from(R_PILL),
-        },
-        shadow: shadow(6.0, 1.0, 0.45),
-        ..container::Style::default()
-    }
-}
 
 pub fn badge(_theme: &Theme) -> container::Style {
     container::Style {
@@ -682,30 +614,64 @@ pub fn panel_danger(theme: &Theme) -> container::Style {
             width: 3.0,
             radius: Radius::from(R_MD),
         },
-        shadow: Shadow {
-            color: Color { a: 0.45, ..DANGER },
-            offset: Vector::new(0.0, 0.0),
-            blur_radius: 24.0,
-        },
+        shadow: Shadow::default(),
         ..panel(theme)
     }
 }
 
-/// The title block at the top of a screen. The only large accent-tinted
-/// surface in the app, which is what makes it read as the top of the page
-/// without needing a rule under it.
+/// Quiet page chrome. Purple belongs on the actionable content, not every header.
 pub fn header(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(wash(ACCENT_DEEP, SURFACE_1)),
         text_color: Some(TEXT),
-        border: Border {
-            color: HAIRLINE,
-            width: 1.0,
-            radius: Radius::from(R_LG),
-        },
-        shadow: shadow(18.0, 6.0, 0.3),
-        ..container::Style::default()
+        ..Default::default()
     }
+}
+
+/// Shared title and back control for non-game screens.
+pub fn page_header<'a, Msg: Clone + 'a>(
+    title: impl text::IntoFragment<'a>,
+    subtitle: impl text::IntoFragment<'a>,
+    back: Msg,
+) -> Element<'a, Msg> {
+    container(
+        row![
+            icon_button(crate::icon::Glyph::Back, "Back", T_LABEL)
+                .width(120)
+                .style(ghost)
+                .on_press(back),
+            column![
+                text(title).size(T_TITLE),
+                text(subtitle).size(T_CAPTION).color(TEXT_MUTED)
+            ]
+            .spacing(GAP_XS)
+            .width(Length::Fill),
+        ]
+        .spacing(GAP)
+        .align_y(Alignment::Center),
+    )
+    .padding([GAP_SM, 0])
+    .width(Length::Fill)
+    .style(header)
+    .into()
+}
+
+/// Labeled touch action. Icons are decorative and never the only cue.
+pub fn icon_button<'a, Msg: 'a>(
+    glyph: crate::icon::Glyph,
+    label: impl text::IntoFragment<'a>,
+    size: u16,
+) -> Button<'a, Msg> {
+    button(
+        container(
+            row![crate::icon::view(glyph, 24.0, TEXT), text(label).size(size)]
+                .spacing(GAP_SM)
+                .align_y(Alignment::Center),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill),
+    )
+    .padding([0, GAP])
+    .height(TOUCH_H)
 }
 
 /// A row in a table you read rather than tap. Flatter than [`panel`]: ten
@@ -751,9 +717,9 @@ fn meter(fill: Color) -> container::Style {
 // a dark scrim instead of a theme surface. iced can't do a real backdrop blur
 // without a custom shader, so these translucent chips are the stand-in.
 
-/// The base for every over-art scrim: violet-black rather than pure black,
+/// The neutral-black base for every over-art scrim,
 /// so a tile that's half art and half chip still reads as one surface.
-const SCRIM: Color = hex(0x08060E);
+const SCRIM: Color = hex(0x080A0D);
 
 fn frosted(alpha: f32, radius: f32, border_alpha: f32) -> container::Style {
     container::Style {
@@ -784,7 +750,7 @@ pub struct ChipPaint {
 /// Paint matching [`glass`].
 pub fn glass_paint() -> ChipPaint {
     ChipPaint {
-        background: Color { a: 0.62, ..SCRIM },
+        background: Color { a: 0.90, ..SCRIM },
         border: Color { a: 0.22, ..TEXT },
         radius: R_LG,
     }
@@ -793,7 +759,7 @@ pub fn glass_paint() -> ChipPaint {
 /// Paint matching [`glass_strong`].
 pub fn glass_strong_paint() -> ChipPaint {
     ChipPaint {
-        background: Color { a: 0.72, ..SCRIM },
+        background: Color { a: 0.94, ..SCRIM },
         border: Color { a: 0.26, ..TEXT },
         radius: R_LG + 4.0,
     }
@@ -804,7 +770,10 @@ pub fn glass_strong_paint() -> ChipPaint {
 /// accent that appears on the board itself.
 pub fn accent_chip_paint() -> ChipPaint {
     ChipPaint {
-        background: Color { a: 0.88, ..ACCENT },
+        background: Color {
+            a: 0.98,
+            ..ACCENT_DEEP
+        },
         border: Color {
             a: 0.95,
             ..ACCENT_BRIGHT
@@ -815,22 +784,17 @@ pub fn accent_chip_paint() -> ChipPaint {
 
 /// A translucent chip for labels sitting over commander art.
 pub fn glass(_theme: &Theme) -> container::Style {
-    frosted(0.62, R_LG, 0.22)
+    frosted(0.90, R_LG, 0.22)
 }
 
 /// Heavier version for the big life number, which sits directly on the art.
 pub fn glass_strong(_theme: &Theme) -> container::Style {
-    frosted(0.72, R_LG + 4.0, 0.26)
+    frosted(0.94, R_LG + 4.0, 0.26)
 }
 
 /// Small round chip behind the +/- glyphs.
 pub fn glass_round(_theme: &Theme) -> container::Style {
-    frosted(0.55, R_PILL, 0.24)
-}
-
-/// A pill for the game timer floating in the middle of the table.
-pub fn glass_pill(_theme: &Theme) -> container::Style {
-    frosted(0.55, R_PILL, 0.24)
+    frosted(0.82, R_PILL, 0.24)
 }
 
 /// A near-opaque cover over a whole tile - the seat action menu, and the

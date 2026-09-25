@@ -15,6 +15,7 @@ mod salt;
 mod screens;
 mod scryfall;
 mod style;
+mod table_preview;
 
 fn main() -> iced::Result {
     iced::application(app::App::title, app::App::update, app::App::view)

@@ -88,6 +88,8 @@ pub struct SeatSetup {
     /// Shown on the deck tiles so a pod can pick decks that match without
     /// leaving the table.
     pub deck_links: HashMap<i64, db::DeckLink>,
+    /// Whose deck this seat is playing, when it isn't their own.
+    pub borrowed_from: Option<Player>,
 }
 
 impl SeatSetup {
@@ -138,6 +140,17 @@ impl SeatSetup {
     }
 }
 
+/// Browsing someone else's collection to borrow a deck from it.
+///
+/// Two steps in one piece of state: with no `lender` yet it lists everyone
+/// who owns a deck; once one is picked it shows that person's decks.
+#[derive(Debug, Clone, Default)]
+pub struct Borrowing {
+    pub lender: Option<Player>,
+    pub decks: Vec<SavedDeck>,
+    pub links: HashMap<i64, db::DeckLink>,
+}
+
 pub struct SetupState {
     pub stage: SetupStage,
     pub pod_size: usize,
@@ -163,6 +176,8 @@ pub struct SetupState {
     /// the game can't start on an arbitrary default.
     pub first_seat: Option<usize>,
     pub turn_direction: TurnDirection,
+    /// Set while the seat is borrowing a deck from another player.
+    pub borrowing: Option<Borrowing>,
     /// The app's own keyboard, and which field it's typing into.
     pub kb: Keyboard<Field>,
     pub error: Option<String>,
@@ -189,6 +204,7 @@ impl SetupState {
             editing_slot: PRIMARY,
             first_seat: None,
             turn_direction: TurnDirection::Clockwise,
+            borrowing: None,
             kb: Keyboard::default(),
             error: None,
             score_summary: None,
@@ -220,6 +236,7 @@ impl SetupState {
         self.art_target = None;
         self.art_options.clear();
         self.framing = false;
+        self.borrowing = None;
         self.kb.close();
     }
 
@@ -278,6 +295,13 @@ pub enum SetupMessage {
     SetTurnDirection(TurnDirection),
     /// Drop a set of search results and go back to this player's own decks.
     ShowSavedDecks,
+    /// Go looking through everyone else's collections.
+    StartBorrow,
+    /// Browse this player's decks to borrow one.
+    PickLender(Player),
+    /// Seat a deck belonging to the lender currently being browsed.
+    BorrowDeck(SavedDeck),
+    CancelBorrow,
     /// A text field was tapped, so the keyboard comes up on it.
     Focus(Field),
     Key(keyboard::Key),
@@ -360,6 +384,10 @@ pub fn update(
             (Task::none(), None)
         }
         SetupMessage::ChoosePodSize(n) => {
+            if !(MIN_POD..=MAX_POD).contains(&n) {
+                state.error = Some("Choose between 2 and 8 players.".into());
+                return (Task::none(), None);
+            }
             state.pod_size = n;
             state.seats = vec![SeatSetup::default(); n];
             state.table_layout = None;
@@ -523,6 +551,68 @@ pub fn update(
             state.kb.close();
             (Task::none(), None)
         }
+        SetupMessage::StartBorrow => {
+            state.borrowing = Some(Borrowing::default());
+            state.kb.close();
+            (Task::none(), None)
+        }
+        SetupMessage::PickLender(lender) => {
+            let decks = db::player_commander_history(conn, lender.id).unwrap_or_default();
+            let links = db::deck_links(conn, lender.id).unwrap_or_default();
+            let art = Task::batch(
+                decks
+                    .iter()
+                    .flat_map(|d| [Some(&d.commander), d.partner.as_ref()])
+                    .flatten()
+                    .filter_map(|c| c.portrait_url().map(str::to_string))
+                    .map(|url| {
+                        let key = url.clone();
+                        Task::perform(scryfall::fetch_image(url), move |res| {
+                            Message::ArtLoaded(key.clone(), res)
+                        })
+                    }),
+            );
+            state.borrowing = Some(Borrowing {
+                lender: Some(lender),
+                decks,
+                links,
+            });
+            (art, None)
+        }
+        SetupMessage::BorrowDeck(deck) => {
+            let Some(seat) = state.editing_seat else {
+                return (Task::none(), None);
+            };
+            let Some(lender) = state.borrowing.as_ref().and_then(|b| b.lender.clone()) else {
+                return (Task::none(), None);
+            };
+
+            // Deliberately no `record_player_commander_use` for the pilot.
+            // That call is what puts a deck in someone's collection, and a
+            // borrowed deck stays its owner's - the loan is recorded on the
+            // game, not on the borrower. Nor is it recorded for the lender,
+            // who isn't the one playing it.
+            let mut tasks = vec![load_portrait_task(&deck.commander)];
+            let slot = state.editing_slot;
+            let commander = resolve_framing(state, conn, seat, deck.commander);
+            state.seats[seat].set_commander_in(slot, Some(commander));
+            if slot == PRIMARY {
+                if let Some(partner) = deck.partner {
+                    tasks.push(load_portrait_task(&partner));
+                    let partner = resolve_framing(state, conn, seat, partner);
+                    state.seats[seat].partner = Some(partner);
+                }
+                state.seats[seat].borrowed_from = Some(lender);
+            }
+            state.editing_seat = None;
+            state.editing_slot = PRIMARY;
+            state.clear_editor_fields();
+            (Task::batch(tasks), None)
+        }
+        SetupMessage::CancelBorrow => {
+            state.borrowing = None;
+            (Task::none(), None)
+        }
         SetupMessage::Focus(field) => {
             let value = state.field_text(field).to_string();
             state.kb.open(field, &value);
@@ -579,6 +669,7 @@ pub fn update(
             // A saved pair comes as one deck: taking half of it without the
             // other half would silently drop the partner.
             if slot == PRIMARY {
+                state.seats[seat].borrowed_from = None;
                 if let Some(partner) = deck.partner {
                     tasks.push(load_portrait_task(&partner));
                     let partner = resolve_framing(state, conn, seat, partner);
@@ -647,6 +738,11 @@ pub fn update(
 
                     let commander = resolve_framing(state, conn, seat, commander);
                     state.seats[seat].set_commander_in(slot, Some(commander));
+                    // A deck picked off Scryfall is this player's own, so
+                    // any loan left over from a previous pick is void.
+                    if slot == PRIMARY {
+                        state.seats[seat].borrowed_from = None;
+                    }
                     if let Some(partner) = saved_partner {
                         tasks.push(load_portrait_task(&partner));
                         let partner = resolve_framing(state, conn, seat, partner);
@@ -728,9 +824,11 @@ pub fn update(
                 state.seats[seat].set_commander_in(slot, None);
                 // Dropping the primary drops the partner with it: a partner
                 // on its own isn't a deck, and the picker would otherwise
-                // reopen on a seat that still looks half-filled.
+                // reopen on a seat that still looks half-filled. The loan
+                // goes with it - it belonged to the deck, not the seat.
                 if slot == PRIMARY {
                     state.seats[seat].partner = None;
+                    state.seats[seat].borrowed_from = None;
                 }
             }
             state.art_target = None;
@@ -801,6 +899,7 @@ pub fn update(
                             STARTING_LIFE,
                         )
                         .with_partner(s.partner.clone())
+                        .borrowed_from(s.borrowed_from.clone())
                     })
                     .collect();
                 (
@@ -885,31 +984,25 @@ const PAD_DOUBLE: f32 = PAD * 2.0;
 /// Fixed widths, so the same kind of control is the same size everywhere:
 /// the way back, the one action that moves you on, a header utility, a card
 /// in a picker, and a piece of commander art.
-const BACK_W: f32 = 260.0;
-const CTA_W: f32 = 460.0;
-const UTILITY_W: f32 = 220.0;
+const BACK_W: f32 = 200.0;
+const CTA_W: f32 = 280.0;
+const UTILITY_W: f32 = 176.0;
 const CARD_W: f32 = 320.0;
 /// One printing in the art gallery. Card-shaped, because a printing is a
 /// whole card and a box that isn't its shape would make the picture
 /// overflow - see the note in [`crate::cards`].
 const ART_W: f32 = 200.0;
 const ART_H: f32 = ART_W * 204.0 / 146.0;
-/// The table diagram on the layout step, at roughly the screen's own shape
-/// so the preview is a scale model rather than a squashed one.
-const PREVIEW_W: f32 = 300.0;
-const PREVIEW_H: f32 = 190.0;
-
-/// "Step 2 of 4", plus a dot per step so the distance left to travel is
+/// "Step 2 of 4", plus a progress segment per step so the distance left is
 /// readable without counting words.
 fn step_eyebrow<'a>(step: usize) -> Element<'a, Message> {
     let dots = row((1..=STEP_COUNT)
         .map(|n| {
-            text("\u{2022}")
-                .size(style::T_HEADING)
-                .color(if n <= step {
-                    style::ACCENT_BRIGHT
+            container(iced::widget::Space::new(32, 4))
+                .style(if n <= step {
+                    style::meter_fill
                 } else {
-                    style::SURFACE_3
+                    style::meter_track
                 })
                 .into()
         })
@@ -976,7 +1069,7 @@ fn step_footer<'a>(
     forward: Element<'a, Message>,
 ) -> Element<'a, Message> {
     row![
-        style::touch_button(back_label, style::T_ACTION)
+        style::icon_button(crate::icon::Glyph::Back, back_label, style::T_ACTION)
             .width(Length::Fixed(BACK_W))
             .style(style::secondary)
             .on_press(back),
@@ -997,14 +1090,19 @@ fn forward_action(
     blocked: &str,
 ) -> Element<'static, Message> {
     let enabled = message.is_some();
-    let mut cta = style::cta_button(label.to_string(), style::T_LEAD)
-        .width(Length::Fixed(CTA_W))
-        .style(style::primary);
+    let mut cta = style::icon_button(
+        crate::icon::Glyph::Check,
+        label.to_string(),
+        style::T_ACTION,
+    )
+    .height(style::TOUCH_H_LG)
+    .width(Length::Fixed(CTA_W))
+    .style(style::primary);
     if let Some(message) = message {
         cta = cta.on_press(message);
     }
 
-    let mut bar = row![].spacing(PAD).align_y(Alignment::Center);
+    let mut bar = column![].spacing(PAD_TIGHT).align_x(Alignment::End);
     if !enabled && !blocked.is_empty() {
         bar = bar.push(
             text(blocked.to_string())
@@ -1168,125 +1266,183 @@ fn choice_caption<'a>(selected: bool, chosen: &'a str, idle: &'a str) -> Element
 // ---------------------------------------------------------------------------
 
 fn pod_size_view(state: &SetupState) -> Element<'_, Message> {
-    // One row, 2 through 8, so the choice reads as a scale you run your eye
-    // along rather than a grid you have to search. It wraps if the window is
-    // ever too narrow to hold the whole scale.
-    let tiles: Vec<Element<Message>> = (MIN_POD..=MAX_POD)
-        .map(|n| {
-            let tile = style::choice_tile(n.to_string(), if n == 2 { "player" } else { "players" })
-                .on_press(Message::Setup(SetupMessage::ChoosePodSize(n)));
-            selection_ring(state.pod_size == n, tile)
-        })
-        .collect();
-
+    let body = iced::widget::responsive(move |size| {
+        let height = ((size.height - PAD) / 2.).max(220.);
+        let first = row((2..=5)
+            .map(|n| pod_choice(n, state.pod_size == n, height))
+            .collect::<Vec<_>>())
+        .spacing(PAD);
+        let second = row((6..=8)
+            .map(|n| pod_choice(n, state.pod_size == n, height))
+            .collect::<Vec<_>>())
+        .spacing(PAD);
+        scrollable(
+            column![first, second]
+                .spacing(PAD)
+                .padding([0., PAD_DOUBLE]),
+        )
+        .height(Length::Fill)
+        .into()
+    });
     step_page(
         step_header(
             step_eyebrow(1),
-            "How many players?".to_string(),
-            "Everyone at the table, including you.".to_string(),
+            "How many are playing?".into(),
+            "Choose your pod size. Everyone starts at 40 life.".into(),
             Vec::new(),
         ),
-        row(tiles)
-            .spacing(PAD_HALF)
-            .align_y(Alignment::Center)
-            .wrap()
-            .into(),
+        body.into(),
         step_footer(
             "Home",
             Message::GoHome,
-            footer_hint("Tap a number to continue"),
+            footer_hint("2–8 players · Tap a card to continue"),
         ),
         state.error.as_deref(),
     )
+}
+
+fn pod_choice(count: usize, selected: bool, height: f32) -> Element<'static, Message> {
+    let table = layout::options_for(count).remove(0);
+    button(
+        column![
+            row![
+                text(count.to_string()).size(style::T_DISPLAY),
+                text("players")
+                    .size(style::T_LABEL)
+                    .color(style::TEXT_MUTED),
+                iced::widget::horizontal_space(),
+                crate::icon::view(crate::icon::Glyph::Next, 24., style::ACCENT_BRIGHT),
+            ]
+            .spacing(PAD_HALF)
+            .align_y(Alignment::Center),
+            container(crate::table_preview::view(&table))
+                .height(Length::Fill)
+                .padding(PAD_HALF),
+        ]
+        .spacing(PAD),
+    )
+    .padding(PAD_DOUBLE)
+    .width(Length::Fill)
+    .height(height)
+    .style(if selected {
+        style::tile_selected
+    } else {
+        style::row_button
+    })
+    .on_press(Message::Setup(SetupMessage::ChoosePodSize(count)))
+    .into()
 }
 
 // ---------------------------------------------------------------------------
 // Step 2 - how the table is arranged
 // ---------------------------------------------------------------------------
 
-/// A small numbered-box diagram of a layout, using the same rendering logic
-/// as the real board so it's an accurate preview, just shrunk down.
-fn layout_preview(table: &TableLayout) -> Element<'static, Message> {
-    container(layout::render_table(table, |idx| {
-        container(
-            text((idx + 1).to_string())
+fn layout_description(table: &TableLayout) -> &'static str {
+    match table.name.as_str() {
+        "Stacked" => "Face each other across the screen",
+        "Two Sides" | "Three Pairs" | "Four Pairs" => "Split evenly along the two long sides",
+        "Two Heads" => "One player at each end of the table",
+        "Head Left" => "One player at the left end",
+        "Head Right" => "One player at the right end",
+        _ => "Match the seats to your table",
+    }
+}
+
+fn layout_card(table: &TableLayout, selected: bool, height: f32) -> Element<'static, Message> {
+    button(
+        column![
+            row![
+                text(table.name.clone()).size(style::T_HEADING),
+                iced::widget::horizontal_space(),
+                crate::icon::view(
+                    if selected {
+                        crate::icon::Glyph::Check
+                    } else {
+                        crate::icon::Glyph::Next
+                    },
+                    28.,
+                    style::ACCENT_BRIGHT
+                ),
+            ]
+            .align_y(Alignment::Center)
+            .spacing(PAD),
+            text(layout_description(table))
+                .size(style::T_LABEL)
+                .color(style::TEXT_MUTED),
+            container(crate::table_preview::view(table))
+                .height(Length::Fill)
+                .padding(PAD),
+            row![
+                text(format!("{} seats", table.ring_order().len()))
+                    .size(style::T_CAPTION)
+                    .color(style::TEXT_MUTED),
+                iced::widget::horizontal_space(),
+                text(if selected {
+                    "Use this layout"
+                } else {
+                    "Choose layout"
+                })
                 .size(style::T_ACTION)
-                .color(style::TEXT),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .style(style::panel)
-        .into()
-    }))
-    .width(Length::Fixed(PREVIEW_W))
-    .height(Length::Fixed(PREVIEW_H))
+                .color(style::ACCENT_BRIGHT),
+            ]
+            .align_y(Alignment::Center),
+        ]
+        .spacing(PAD),
+    )
+    .padding(PAD_DOUBLE)
+    .height(height)
+    .width(Length::Fill)
+    .style(if selected {
+        style::tile_selected
+    } else {
+        style::row_button
+    })
+    .on_press(Message::Setup(SetupMessage::ChooseLayout(table.clone())))
     .into()
 }
 
 fn layout_choice_view(state: &SetupState) -> Element<'_, Message> {
-    let options = layout::options_for(state.pod_size);
-    let chosen = state.table_layout.as_ref().map(|t| t.name.as_str());
-
-    // Two per row keeps the previews large enough to read at a glance.
-    let mut rows: Vec<Element<Message>> = Vec::new();
-    for chunk in options.chunks(2) {
-        let cards: Vec<Element<Message>> = chunk
+    let body = iced::widget::responsive(move |size| {
+        let options = layout::options_for(state.pod_size);
+        let chosen = state.table_layout.as_ref();
+        let stacked = size.width < 1000. && options.len() > 1;
+        let height = if stacked {
+            ((size.height - PAD) / 2.).max(300.)
+        } else {
+            size.height.max(360.)
+        };
+        let cards: Vec<Element<Message>> = options
             .iter()
-            .map(|opt| {
-                let selected = chosen == Some(opt.name.as_str());
-                let card = button(
-                    column![
-                        layout_preview(opt),
-                        text(opt.name.clone())
-                            .size(style::T_SUBHEAD)
-                            .color(style::TEXT),
-                        choice_caption(selected, "Selected", "Tap to choose"),
-                    ]
-                    .spacing(PAD_HALF)
-                    .align_x(Alignment::Center),
-                )
-                .padding(PAD)
-                .style(style::secondary)
-                .on_press(Message::Setup(SetupMessage::ChooseLayout(opt.clone())));
-                selection_ring(selected, card)
-            })
+            .map(|table| layout_card(table, chosen == Some(table), height))
             .collect();
-        rows.push(row(cards).spacing(PAD).into());
-    }
-
-    let body: Element<Message> = if rows.is_empty() {
-        empty_state(
-            "No layouts for this pod size",
-            "Go back a step and pick a different number of players.",
-        )
-    } else {
+        let choices: Element<Message> = if stacked {
+            column(cards).spacing(PAD).into()
+        } else {
+            row(cards).spacing(PAD).into()
+        };
         scrollable(
-            column(rows)
-                .spacing(PAD)
-                .align_x(Alignment::Center)
+            container(choices)
+                .padding([0., PAD_DOUBLE])
                 .width(Length::Fill),
         )
-        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
-    };
-
+    });
     step_page(
         step_header(
             step_eyebrow(2),
-            "How are you sitting?".to_string(),
+            "Make room at the table".into(),
             format!(
-                "{} players \u{00b7} pick the arrangement that matches your table.",
+                "{} players · Choose the layout that matches where everyone is sitting.",
                 state.pod_size
             ),
             Vec::new(),
         ),
-        body,
+        body.into(),
         step_footer(
             "Back",
             Message::Setup(SetupMessage::BackToPodSizeChoice),
-            footer_hint("Tap a layout to continue"),
+            footer_hint("Numbers mark seats · Purple lines face each player"),
         ),
         state.error.as_deref(),
     )
@@ -1513,6 +1669,37 @@ fn editor_overlay<'a>(
                     footer_hint("Tap a name to seat that player"),
                 ),
             )
+        } else if let Some(borrowing) = &state.borrowing {
+            let (title, instruction, hint) = match &borrowing.lender {
+                Some(lender) => (
+                    format!("Borrow from {}", lender.name),
+                    format!(
+                        "Whatever they win with counts for {} and for the deck - never for {}.",
+                        seat.player
+                            .as_ref()
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| "this seat".into()),
+                        lender.name
+                    ),
+                    "Tap a deck to play it",
+                ),
+                None => (
+                    "Whose deck?".to_string(),
+                    "Anyone with decks on record can lend one, whether or not they're playing."
+                        .to_string(),
+                    "Tap a name to see their decks",
+                ),
+            };
+            (
+                title,
+                instruction,
+                borrow_picker(borrowing, players_cache, image_cache),
+                step_footer(
+                    "Back",
+                    Message::Setup(SetupMessage::CancelBorrow),
+                    footer_hint(hint),
+                ),
+            )
         } else if seat.commander_in(state.editing_slot).is_none() {
             let title = if state.editing_slot == PARTNER {
                 "Pick a partner"
@@ -1521,7 +1708,7 @@ fn editor_overlay<'a>(
             };
             (
                 title.to_string(),
-                "Tap one this player has run before, or search Scryfall by name.".to_string(),
+                "Tap one this player has run before, borrow one, or search Scryfall.".to_string(),
                 commander_picker(state, seat, image_cache),
                 step_footer(
                     "Back to Grid",
@@ -1591,7 +1778,7 @@ fn player_picker<'a>(state: &'a SetupState, players_cache: &'a [Player]) -> Elem
     };
 
     let has_name = !state.new_player_name.trim().is_empty();
-    let mut add = style::touch_button("Add Player", style::T_ACTION)
+    let mut add = style::icon_button(crate::icon::Glyph::Add, "Add Player", style::T_ACTION)
         .width(Length::Fixed(UTILITY_W))
         .style(style::primary);
     if has_name {
@@ -1665,20 +1852,22 @@ fn commander_picker<'a>(
             "Search for their commander by name and it'll be waiting here next time.",
         )
     } else {
-        cards::grid(
-            history
-                .iter()
-                .map(|deck| {
-                    cards::deck_tile(
-                        deck,
-                        false,
-                        image_cache,
-                        seat.deck_meta(deck),
-                        Message::Setup(SetupMessage::PickHistoryCommander(deck.clone())),
-                    )
-                })
-                .collect(),
-        )
+        cards::adaptive_grid(history.len(), move |i, width| {
+            let deck = &history[i];
+            cards::deck_tile(
+                deck,
+                false,
+                image_cache,
+                seat.deck_meta(deck),
+                Message::Setup(SetupMessage::PickHistoryCommander(deck.clone())),
+                Message::Setup(SetupMessage::OpenScore(
+                    seat.player.as_ref().unwrap().id,
+                    deck.commander.id,
+                    deck.label(),
+                )),
+                width,
+            )
+        })
     };
 
     let caption: Element<Message> = if showing_results {
@@ -1713,9 +1902,10 @@ fn commander_picker<'a>(
         "Search".into()
     };
 
-    let mut search_button = style::touch_button(search_label, style::T_ACTION)
-        .width(Length::Fixed(UTILITY_W))
-        .style(style::primary);
+    let mut search_button =
+        style::icon_button(crate::icon::Glyph::Search, search_label, style::T_ACTION)
+            .width(Length::Fixed(UTILITY_W))
+            .style(style::primary);
     if !state.cooldown.active() && !state.searching && !state.commander_query.trim().is_empty() {
         search_button = search_button.on_press(Message::Setup(SetupMessage::SearchCommanders));
     }
@@ -1729,6 +1919,10 @@ fn commander_picker<'a>(
                 |s| Message::Setup(SetupMessage::CommanderQueryChanged(s)),
             ),
             search_button,
+            style::touch_button("Borrow", style::T_ACTION)
+                .width(Length::Fixed(UTILITY_W))
+                .style(style::secondary)
+                .on_press(Message::Setup(SetupMessage::StartBorrow)),
         ]
         .spacing(PAD)
         .align_y(Alignment::Center),
@@ -1739,6 +1933,70 @@ fn commander_picker<'a>(
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+/// Borrowing, in two steps: whose collection, then which deck of theirs.
+///
+/// The lender list deliberately isn't limited to the people at this table -
+/// a deck's owner doesn't have to be playing for someone to sleeve it up.
+fn borrow_picker<'a>(
+    borrowing: &'a Borrowing,
+    players_cache: &'a [Player],
+    image_cache: &'a HashMap<String, image::Handle>,
+) -> Element<'a, Message> {
+    match &borrowing.lender {
+        None => {
+            let lenders: Vec<Element<Message>> = players_cache
+                .iter()
+                .map(|p| {
+                    style::name_tile(&p.name)
+                        .style(style::secondary)
+                        .on_press(Message::Setup(SetupMessage::PickLender(p.clone())))
+                        .into()
+                })
+                .collect();
+            if lenders.is_empty() {
+                empty_state(
+                    "Nobody to borrow from",
+                    "No one on the roster has a deck saved yet.",
+                )
+            } else {
+                cards::grid(lenders)
+            }
+        }
+        Some(_) => {
+            if borrowing.decks.is_empty() {
+                return empty_state(
+                    "No decks on record",
+                    "This player hasn't saved a deck yet, so there's nothing to lend.",
+                );
+            }
+            cards::adaptive_grid(borrowing.decks.len(), move |i, width| {
+                let deck = &borrowing.decks[i];
+                let meta = borrowing
+                    .links
+                    .get(&deck.commander.id)
+                    .map(|link| cards::DeckMeta {
+                        bracket: link.bracket,
+                        salt: link.salt_total,
+                    })
+                    .unwrap_or_default();
+                cards::deck_tile(
+                    deck,
+                    false,
+                    image_cache,
+                    meta,
+                    Message::Setup(SetupMessage::BorrowDeck(deck.clone())),
+                    Message::Setup(SetupMessage::OpenScore(
+                        borrowing.lender.as_ref().unwrap().id,
+                        deck.commander.id,
+                        deck.label(),
+                    )),
+                    width,
+                )
+            })
+        }
+    }
 }
 
 fn art_gallery<'a>(
@@ -2302,5 +2560,28 @@ mod comparison_tests {
             SeatSetup::default().selected_meta(),
             cards::DeckMeta::default()
         );
+    }
+}
+
+#[cfg(test)]
+mod pod_limit_tests {
+    use super::*;
+
+    #[test]
+    fn pod_size_is_limited_to_two_through_eight_without_resetting_valid_seats() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut state = SetupState::new();
+        for n in MIN_POD..=MAX_POD {
+            let _ = update(&mut state, &conn, SetupMessage::ChoosePodSize(n));
+            assert_eq!(state.seats.len(), n);
+            assert_eq!(state.stage, SetupStage::ChooseLayout);
+        }
+        for n in [0, 1, 9, usize::MAX] {
+            let _ = update(&mut state, &conn, SetupMessage::ChoosePodSize(n));
+            assert_eq!(state.pod_size, MAX_POD);
+            assert_eq!(state.seats.len(), MAX_POD);
+            assert!(state.error.is_some());
+            assert!(layout::options_for(n).is_empty());
+        }
     }
 }

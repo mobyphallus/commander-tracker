@@ -103,7 +103,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     migrate_add_art_framing(conn)?;
     migrate_add_partners(conn)?;
     migrate_add_art_framing_table(conn)?;
-    migrate_add_deck_analysis(conn)
+    migrate_add_deck_analysis(conn)?;
+    migrate_add_borrowed_decks(conn)
 }
 
 /// A saved deck can be pointed at its Moxfield list, and once it is we keep
@@ -166,6 +167,25 @@ fn migrate_add_art_framing_table(conn: &Connection) -> rusqlite::Result<()> {
 /// damage a per-commander total rather than a per-seat one. Existing rows
 /// are single-commander games, so they default to no partner and all damage
 /// attributed to the primary.
+/// Who owned the deck someone played, when it wasn't them.
+///
+/// NULL means the pilot's own deck, which is what every row written before
+/// this column existed was - so there's nothing to backfill. Stats
+/// deliberately don't read it: a borrowed game belongs to the deck and to
+/// the player who piloted it, and the owner gets no credit for a game they
+/// weren't in. It's here so history can say whose deck it was.
+fn migrate_add_borrowed_decks(conn: &Connection) -> rusqlite::Result<()> {
+    let has_owner: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('game_players') WHERE name = 'owner_player_id'")?
+        .exists([])?;
+    if !has_owner {
+        conn.execute_batch(
+            "ALTER TABLE game_players ADD COLUMN owner_player_id INTEGER REFERENCES players(id);",
+        )?;
+    }
+    Ok(())
+}
+
 fn migrate_add_partners(conn: &Connection) -> rusqlite::Result<()> {
     let has_partner: bool = conn
         .prepare(
@@ -524,8 +544,8 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
         tx.execute(
             "INSERT INTO game_players
                 (game_id, player_id, commander_id, partner_commander_id, seat,
-                 final_life, final_poison, won)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 final_life, final_poison, won, owner_player_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 game_id,
                 seat.player.id,
@@ -534,7 +554,8 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
                 seat_index as i64,
                 seat.life,
                 seat.poison,
-                won as i64
+                won as i64,
+                seat.borrowed_from.as_ref().map(|owner| owner.id)
             ],
         )?;
         game_player_ids.push(tx.last_insert_rowid());
@@ -806,12 +827,13 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
         final_life: i32,
         final_poison: i32,
         won: bool,
+        owner_player_id: Option<i64>,
     }
 
     let seat_rows: Vec<SeatRow> = {
         let mut stmt = conn.prepare(
             "SELECT id, player_id, commander_id, partner_commander_id,
-                    final_life, final_poison, won
+                    final_life, final_poison, won, owner_player_id
              FROM game_players WHERE game_id = ?1 ORDER BY seat",
         )?;
         let result = stmt
@@ -824,6 +846,7 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
                     final_life: row.get(4)?,
                     final_poison: row.get(5)?,
                     won: row.get::<_, i64>(6)? != 0,
+                    owner_player_id: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -886,9 +909,22 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
             )
             .optional()?;
 
+        // Only a borrowed deck names an owner; playing your own says nothing.
+        let borrowed_from: Option<String> = match r.owner_player_id {
+            Some(owner_id) if owner_id != r.player_id => conn
+                .query_row(
+                    "SELECT name FROM players WHERE id = ?1",
+                    params![owner_id],
+                    |row| row.get(0),
+                )
+                .ok(),
+            _ => None,
+        };
+
         seats.push(GameDetailSeat {
             player_name,
             commander_name,
+            borrowed_from,
             final_life: r.final_life,
             final_poison: r.final_poison,
             won: r.won,

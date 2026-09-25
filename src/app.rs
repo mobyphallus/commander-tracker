@@ -23,6 +23,7 @@ pub struct App {
     players: Vec<Player>,
     image_cache: HashMap<String, image::Handle>,
     screen: Screen,
+    home: home::HomeState,
 }
 
 #[derive(Debug, Clone)]
@@ -41,12 +42,14 @@ impl App {
     pub fn new() -> (Self, Task<Message>) {
         let conn = db::open().expect("failed to open local database");
         let players = db::list_players(&conn).unwrap_or_default();
+        let home = home::HomeState::load(&conn);
         (
             Self {
                 conn,
                 players,
                 image_cache: HashMap::new(),
                 screen: Screen::Home,
+                home,
             },
             Task::none(),
         )
@@ -110,6 +113,7 @@ impl App {
                 Task::none()
             }
             Message::GoHome => {
+                self.home = home::HomeState::load(&self.conn);
                 self.screen = Screen::Home;
                 Task::none()
             }
@@ -120,6 +124,15 @@ impl App {
                     }
                     home::HomeMessage::ViewStats => {
                         self.screen = Screen::Stats(stats::StatsState::load(&self.conn));
+                    }
+                    home::HomeMessage::ViewGame(id) => {
+                        let mut state = history::HistoryState::load(&self.conn);
+                        history::update(
+                            &mut state,
+                            &self.conn,
+                            history::HistoryMessage::ViewGame(id),
+                        );
+                        self.screen = Screen::History(state);
                     }
                     home::HomeMessage::ViewHistory => {
                         self.screen = Screen::History(history::HistoryState::load(&self.conn));
@@ -151,6 +164,7 @@ impl App {
                     let (task, action) = game::update(state, &mut self.conn, msg);
                     match action {
                         Some(game::Action::Finished) | Some(game::Action::Abandoned) => {
+                            self.home = home::HomeState::load(&self.conn);
                             self.screen = Screen::Home;
                         }
                         None => {}
@@ -186,7 +200,7 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         match &self.screen {
-            Screen::Home => home::view(),
+            Screen::Home => home::view(&self.home, &self.players),
             Screen::Setup(state) => setup::view(state, &self.players, &self.image_cache),
             Screen::Game(state) => game::view(state, &self.image_cache),
             Screen::Stats(state) => stats::view(state),

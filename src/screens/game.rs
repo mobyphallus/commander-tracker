@@ -58,6 +58,8 @@ pub struct GameState {
     /// Set while the "are you sure" prompt for abandoning is up. Abandoning
     /// saves nothing, so it never happens on a single tap.
     pub pending_abandon: bool,
+    /// Global controls are separate from routine seat interactions.
+    pub game_menu_open: bool,
     /// A counter zone currently held down; holding it applies +/-10 every
     /// couple of seconds instead of the normal +/-1 on release, and an
     /// upward drag past the swipe threshold turns it into opening the
@@ -170,6 +172,7 @@ impl GameState {
             zero_life_prompt_dismissed,
             pending_winner: None,
             pending_abandon: false,
+            game_menu_open: false,
             pending_reason: None,
             press_hold: None,
             action_menu_for: None,
@@ -256,6 +259,8 @@ impl GameState {
 pub enum GameMessage {
     Tick,
     TogglePause,
+    OpenGameMenu,
+    CloseGameMenu,
     NextTurn,
     SwitchTab(usize, SeatTab),
     CounterPressStart(usize, CounterTarget, i32),
@@ -308,8 +313,19 @@ pub fn update(
             }
             (iced::Task::none(), None)
         }
+        GameMessage::OpenGameMenu => {
+            state.game_menu_open = true;
+            state.press_hold = None;
+            state.action_menu_for = None;
+            (iced::Task::none(), None)
+        }
+        GameMessage::CloseGameMenu => {
+            state.game_menu_open = false;
+            (iced::Task::none(), None)
+        }
         GameMessage::TogglePause => {
             state.paused = !state.paused;
+            state.game_menu_open = false;
             (iced::Task::none(), None)
         }
         GameMessage::NextTurn => {
@@ -573,6 +589,8 @@ pub fn update(
             }
         }
         GameMessage::RequestAbandon => {
+            state.game_menu_open = false;
+            state.press_hold = None;
             state.pending_abandon = true;
             (iced::Task::none(), None)
         }
@@ -580,7 +598,10 @@ pub fn update(
             state.pending_abandon = false;
             (iced::Task::none(), None)
         }
-        GameMessage::AbandonGame => (iced::Task::none(), Some(Action::Abandoned)),
+        GameMessage::AbandonGame => (
+            iced::Task::none(),
+            state.pending_abandon.then_some(Action::Abandoned),
+        ),
     }
 }
 
@@ -647,38 +668,72 @@ fn clock_row<'a>(label: &str, value: String, size: u16) -> Element<'a, Message> 
     .into()
 }
 
-/// Abandoning writes nothing - no result, no stats row, no history entry -
-/// so it gets a full-screen confirm rather than a button you can brush.
-fn abandon_confirm_view<'a>() -> Element<'a, Message> {
-    container(
+/// Global controls live away from the counters, behind the central timer.
+fn game_menu_view(state: &GameState) -> Element<'_, Message> {
+    dialog(
         column![
-            text("Abandon this game?").size(style::T_TITLE),
-            text(
-                "Nothing is saved: no winner, no stats, no history entry. Life totals, \
-                 commander damage and the turn count all go with it."
+            crate::icon::view(crate::icon::Glyph::History, 32., style::ACCENT_BRIGHT),
+            text("Game menu").size(style::T_TITLE),
+            text(if state.paused {
+                "Timers are paused."
+            } else {
+                "Timers are running."
+            })
+            .size(style::T_BODY)
+            .color(style::TEXT_MUTED),
+            style::icon_button(
+                if state.paused {
+                    crate::icon::Glyph::Play
+                } else {
+                    crate::icon::Glyph::Pause
+                },
+                if state.paused {
+                    "Resume game"
+                } else {
+                    "Pause timers"
+                },
+                style::T_ACTION
             )
-            .size(style::T_BODY),
-            row![
-                style::cta_button("Keep Playing", style::T_SUBHEAD)
-                    .width(Length::Fixed(380.0))
-                    .style(style::secondary)
-                    .on_press(Message::Game(GameMessage::CancelAbandon)),
-                style::cta_button("Abandon Game", style::T_SUBHEAD)
-                    .width(Length::Fixed(380.0))
-                    .style(style::danger)
-                    .on_press(Message::Game(GameMessage::AbandonGame)),
-            ]
-            .spacing(20),
+            .width(Length::Fill)
+            .style(style::secondary)
+            .on_press(Message::Game(GameMessage::TogglePause)),
+            style::touch_button("Back to game", style::T_ACTION)
+                .width(Length::Fill)
+                .style(style::primary)
+                .on_press(Message::Game(GameMessage::CloseGameMenu)),
+            style::icon_button(crate::icon::Glyph::Close, "Abandon game", style::T_LABEL)
+                .width(Length::Fill)
+                .style(style::danger_ghost)
+                .on_press(Message::Game(GameMessage::RequestAbandon)),
         ]
-        .spacing(26)
-        .align_x(iced::Alignment::Center)
-        .padding(30),
+        .spacing(style::GAP),
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
+}
+
+fn dialog<'a>(content: iced::widget::Column<'a, Message>) -> Element<'a, Message> {
+    container(
+        container(content)
+            .padding(32)
+            .max_width(560)
+            .style(style::panel),
+    )
+    .padding(style::GAP)
     .center_x(Length::Fill)
     .center_y(Length::Fill)
     .into()
+}
+
+/// Abandoning writes nothing; the primary escape keeps the current game.
+fn abandon_confirm_view<'a>() -> Element<'a, Message> {
+    dialog(column![
+        text("Abandon this game?").size(style::T_TITLE),
+        text("This game won't be saved to history. Its life totals, commander damage and turn count will be lost.")
+            .size(style::T_BODY).color(style::TEXT_MUTED),
+        style::touch_button("Keep playing", style::T_ACTION).width(Length::Fill)
+            .style(style::primary).on_press(Message::Game(GameMessage::CancelAbandon)),
+        style::touch_button("Abandon game", style::T_ACTION).width(Length::Fill)
+            .style(style::danger).on_press(Message::Game(GameMessage::AbandonGame)),
+    ].spacing(style::GAP))
 }
 
 pub fn view<'a>(
@@ -701,62 +756,61 @@ pub fn view<'a>(
         return abandon_confirm_view();
     }
 
-    // The whole in-game header collapses into one cluster floating dead
-    // centre of the seat grid: pause on the left, the clocks in the middle,
-    // abandon on the right. It sits in the middle of the table whatever the
-    // pod size, which is the one spot no seat tile owns.
-    let mut clocks = column![
-        clock_row("GAME", format_duration(state.game_seconds), style::T_LEAD),
-        clock_row(
-            &format!("TURN {}", state.turn_number),
-            format_duration(state.turn_seconds),
-            style::T_SUBHEAD,
-        ),
-    ]
-    .spacing(2);
-    if state.paused {
-        clocks = clocks.push(
-            text("PAUSED")
-                .size(style::T_MICRO)
-                .color(style::ACCENT_BRIGHT),
-        );
+    if state.game_menu_open {
+        return game_menu_view(state);
     }
 
-    // While commander damage is being logged, the middle of the table is
-    // where "Done" belongs - it's the only thing you want next, and it used
-    // to be stranded in a banner above the board. The clocks keep running
-    // underneath; they just aren't what you need to see right now.
-    let middle: Element<Message> = match state.damage_focus {
-        Some(focus) => style::cta_button(
-            format!("Done \u{00b7} {}", state.seats[focus].player.name),
-            style::T_SUBHEAD,
+    // Only one compact control occupies the center: the timer/menu at rest,
+    // or Done during damage entry. Destructive actions stay off the board.
+    let controls: Element<Message> = if let Some(focus) = state.damage_focus {
+        button(
+            column![
+                row![
+                    crate::icon::view(crate::icon::Glyph::Check, 24., style::TEXT),
+                    text("Done").size(style::T_ACTION)
+                ]
+                .spacing(style::GAP_SM)
+                .align_y(iced::Alignment::Center),
+                container(
+                    text(format!("Damage to {}", state.seats[focus].player.name))
+                        .size(style::T_CAPTION)
+                )
+                .height(24)
+                .clip(true),
+            ]
+            .spacing(style::GAP_XS)
+            .align_x(iced::Alignment::Center),
         )
-        .width(Length::Fixed(360.0))
+        .padding(style::GAP)
+        .width(240)
         .style(style::primary)
         .on_press(Message::Game(GameMessage::EndDamageFocus))
-        .into(),
-        None => container(clocks)
-            .padding([10.0, 26.0])
-            .style(style::glass_pill)
-            .into(),
-    };
-
-    let controls = row![
-        style::touch_button(
-            if state.paused { "Resume" } else { "Pause" },
-            style::T_LABEL,
+        .into()
+    } else {
+        button(
+            column![
+                clock_row("GAME", format_duration(state.game_seconds), style::T_LABEL),
+                clock_row(
+                    &format!("TURN {}", state.turn_number),
+                    format_duration(state.turn_seconds),
+                    style::T_LABEL
+                ),
+                text(if state.paused {
+                    "Paused · Game menu"
+                } else {
+                    "Game menu"
+                })
+                .size(style::T_CAPTION)
+                .color(style::TEXT_MUTED),
+            ]
+            .spacing(style::GAP_XS)
+            .align_x(iced::Alignment::Center),
         )
-        .width(Length::Fixed(190.0))
-        .style(style::glass_button)
-        .on_press(Message::Game(GameMessage::TogglePause)),
-        middle,
-        style::touch_button("Abandon", style::T_LABEL)
-            .width(Length::Fixed(190.0))
-            .style(style::danger)
-            .on_press(Message::Game(GameMessage::RequestAbandon)),
-    ]
-    .spacing(16)
-    .align_y(iced::Alignment::Center);
+        .padding([style::GAP_SM, style::GAP])
+        .style(style::score_button)
+        .on_press(Message::Game(GameMessage::OpenGameMenu))
+        .into()
+    };
 
     let board = layout::render_table(&state.table_layout, |idx| {
         seat_panel(idx, state, image_cache)
@@ -966,13 +1020,24 @@ fn seat_panel<'a>(
     // Everything a player reads on their own tile is turned to face them,
     // since they're sitting round the table rather than behind the screen.
     let facing = state.table_layout.seat_orientation(index);
-    let art = art::framed_pair(
-        &seat.commander,
-        seat.partner.as_ref(),
-        image_cache,
-        18,
-        facing.radians(),
-    );
+    let art = if state.damage_focus.is_some() {
+        // Show the actual source commander while logging damage; partner
+        // selector chips already identify both cards and need clear space.
+        art::framed(
+            seat.commander_in(state.damage_slot(index)),
+            image_cache,
+            18,
+            facing.radians(),
+        )
+    } else {
+        art::framed_pair(
+            &seat.commander,
+            seat.partner.as_ref(),
+            image_cache,
+            18,
+            facing.radians(),
+        )
+    };
 
     let (value, target, subtitle) = active_counter(index, state);
 
@@ -1105,6 +1170,7 @@ fn seat_panel<'a>(
     };
 
     container(card)
+        .padding(3)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style_fn)
@@ -1412,6 +1478,45 @@ mod elimination_tests {
         let seats = vec![seat(1, "Ada"), seat(2, "Bo"), seat(3, "Cy"), seat(4, "Di")];
         let layout = layout::options_for(4).into_iter().next().unwrap();
         GameState::new(seats, layout, vec![0, 1, 2, 3])
+    }
+
+    #[test]
+    fn game_menu_and_pause_preserve_the_game() {
+        let mut state = game();
+        state.game_seconds = 123;
+        update_for_test(&mut state, GameMessage::OpenGameMenu);
+        assert!(state.game_menu_open);
+        update_for_test(&mut state, GameMessage::TogglePause);
+        assert!(state.paused);
+        assert!(!state.game_menu_open);
+        update_for_test(&mut state, GameMessage::Tick);
+        assert_eq!(state.game_seconds, 123);
+        update_for_test(&mut state, GameMessage::OpenGameMenu);
+        update_for_test(&mut state, GameMessage::TogglePause);
+        update_for_test(&mut state, GameMessage::Tick);
+        assert_eq!(state.game_seconds, 124);
+        assert_eq!(state.seats[0].life, 40);
+    }
+
+    #[test]
+    fn abandoning_requires_confirmation_and_cancel_keeps_state() {
+        let mut state = game();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        assert!(update(&mut state, &mut conn, GameMessage::AbandonGame)
+            .1
+            .is_none());
+        update_for_test(&mut state, GameMessage::RequestAbandon);
+        update_for_test(&mut state, GameMessage::CancelAbandon);
+        assert!(!state.pending_abandon);
+        assert!(update(&mut state, &mut conn, GameMessage::AbandonGame)
+            .1
+            .is_none());
+        assert_eq!(state.seats.len(), 4);
+        update_for_test(&mut state, GameMessage::RequestAbandon);
+        assert!(matches!(
+            update(&mut state, &mut conn, GameMessage::AbandonGame).1,
+            Some(Action::Abandoned)
+        ));
     }
 
     /// Lethal commander damage names its own killer: the commander that

@@ -75,11 +75,11 @@ pub fn update(state: &mut StatsState, message: StatsMessage) {
 // ---------------------------------------------------------------------------
 
 /// The comparison bar's column.
-const W_BAR: f32 = 300.0;
+const W_BAR: f32 = 140.0;
 /// A plain count ("14", "1.4").
-const W_NUM: f32 = 120.0;
+const W_NUM: f32 = 72.0;
 /// The headline figure of a row - a percentage or a win-loss record.
-const W_HEAD: f32 = 170.0;
+const W_HEAD: f32 = 100.0;
 /// Bar thickness. Thin on purpose: it's a comparison aid, not a chart.
 const BAR_H: f32 = 10.0;
 
@@ -166,14 +166,23 @@ fn bar<'a>(frac: f64) -> Element<'a, Message> {
 /// One line of a table: the name takes the slack, the fixed-width cells
 /// after it line up down the screen.
 fn stat_row<'a>(
+    compact: bool,
     name: Element<'a, Message>,
     cells: Vec<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let mut line = row![name].spacing(style::GAP).align_y(Alignment::Center);
-    for cell in cells {
-        line = line.push(cell);
-    }
-
+    let line: Element<Message> = if compact {
+        column![
+            name,
+            row(cells).spacing(style::GAP).align_y(Alignment::Center)
+        ]
+        .spacing(style::GAP_SM)
+        .into()
+    } else {
+        row(std::iter::once(name).chain(cells))
+            .spacing(style::GAP)
+            .align_y(Alignment::Center)
+            .into()
+    };
     container(line)
         .padding(ROW_PAD)
         .width(Length::Fill)
@@ -201,6 +210,7 @@ fn empty_state<'a>(headline: &'a str, note: &'a str) -> Element<'a, Message> {
 /// A titled block: a heading, a row of column headings, and the rows - or a
 /// centred note where the rows would be.
 fn table<'a>(
+    compact: bool,
     title: &'a str,
     heads: Vec<Element<'a, Message>>,
     rows: Vec<Element<'a, Message>>,
@@ -211,7 +221,15 @@ fn table<'a>(
         empty_state(empty_headline, empty_note)
     } else {
         column![
-            container(row(heads).spacing(style::GAP).align_y(Alignment::Center)).padding(ROW_PAD),
+            container(if compact {
+                let mut heads = heads.into_iter();
+                column![heads.next().unwrap(), row(heads).spacing(style::GAP)]
+                    .spacing(style::GAP_SM)
+                    .into()
+            } else {
+                Element::from(row(heads).spacing(style::GAP).align_y(Alignment::Center))
+            })
+            .padding(ROW_PAD),
             column(rows).spacing(style::GAP_SM),
         ]
         .into()
@@ -244,20 +262,11 @@ fn callout<'a>(value: String, caption: &'a str) -> Element<'a, Message> {
 // ---------------------------------------------------------------------------
 
 pub fn view(state: &StatsState) -> Element<'_, Message> {
-    let header = container(
-        row![
-            text("Stats").size(style::T_TITLE),
-            iced::widget::horizontal_space(),
-            style::touch_button("Back", style::T_LABEL)
-                .width(Length::Fixed(200.0))
-                .style(style::secondary)
-                .on_press(Message::GoHome),
-        ]
-        .align_y(Alignment::Center),
-    )
-    .padding(style::GAP)
-    .width(Length::Fill)
-    .style(style::header);
+    iced::widget::responsive(move |size| view_sized(state, size.width < 1100.)).into()
+}
+
+fn view_sized(state: &StatsState, compact: bool) -> Element<'_, Message> {
+    let header = style::page_header("Table Stats", "Every game tells a story", Message::GoHome);
 
     // A segmented control rather than three loose buttons: one panel holds
     // the set, and only the selected segment is filled, so which tab you're
@@ -285,9 +294,9 @@ pub fn view(state: &StatsState) -> Element<'_, Message> {
     .style(style::panel);
 
     let body = match state.tab {
-        StatsTab::Players => players_tab(state),
-        StatsTab::Matchups => matchups_tab(state),
-        StatsTab::Hate => hate_tab(state),
+        StatsTab::Players => players_tab(state, compact),
+        StatsTab::Matchups => matchups_tab(state, compact),
+        StatsTab::Hate => hate_tab(state, compact),
     };
 
     container(
@@ -300,7 +309,7 @@ pub fn view(state: &StatsState) -> Element<'_, Message> {
     .into()
 }
 
-fn players_tab(state: &StatsState) -> Element<'_, Message> {
+fn players_tab(state: &StatsState, compact: bool) -> Element<'_, Message> {
     if state.players.is_empty() && state.win_reasons.is_empty() {
         return empty_state(
             "No games recorded yet",
@@ -318,6 +327,7 @@ fn players_tab(state: &StatsState) -> Element<'_, Message> {
                 0.0
             };
             stat_row(
+                compact,
                 name_cell(p.player_name.clone(), None),
                 vec![
                     bar(rate),
@@ -341,6 +351,7 @@ fn players_tab(state: &StatsState) -> Element<'_, Message> {
                 0.0
             };
             stat_row(
+                compact,
                 name_cell(w.reason.label().to_string(), None),
                 vec![
                     bar(share),
@@ -361,6 +372,7 @@ fn players_tab(state: &StatsState) -> Element<'_, Message> {
 
     column![
         table(
+            compact,
             "Win rates",
             vec![
                 head_name("Player"),
@@ -375,6 +387,7 @@ fn players_tab(state: &StatsState) -> Element<'_, Message> {
             "Win rates appear as soon as somebody wins a game.",
         ),
         table(
+            compact,
             "How games end",
             vec![
                 head_name("Ending"),
@@ -392,7 +405,7 @@ fn players_tab(state: &StatsState) -> Element<'_, Message> {
     .into()
 }
 
-fn matchups_tab(state: &StatsState) -> Element<'_, Message> {
+fn matchups_tab(state: &StatsState, compact: bool) -> Element<'_, Message> {
     let rows: Vec<Element<Message>> = state
         .matchups
         .iter()
@@ -404,6 +417,7 @@ fn matchups_tab(state: &StatsState) -> Element<'_, Message> {
                 0.0
             };
             stat_row(
+                compact,
                 name_cell(m.commander_a.clone(), Some(format!("vs {}", m.commander_b))),
                 vec![
                     bar(share),
@@ -415,6 +429,7 @@ fn matchups_tab(state: &StatsState) -> Element<'_, Message> {
         .collect();
 
     table(
+        compact,
         "Commander matchups",
         vec![
             head_name("Matchup"),
@@ -428,7 +443,7 @@ fn matchups_tab(state: &StatsState) -> Element<'_, Message> {
     )
 }
 
-fn hate_tab(state: &StatsState) -> Element<'_, Message> {
+fn hate_tab(state: &StatsState, compact: bool) -> Element<'_, Message> {
     if state.haters.is_empty() && state.hated.is_empty() && state.grudges.is_empty() {
         return empty_state(
             "No hate logged yet",
@@ -450,6 +465,7 @@ fn hate_tab(state: &StatsState) -> Element<'_, Message> {
         .iter()
         .map(|h| {
             stat_row(
+                compact,
                 name_cell(
                     h.player_name.clone(),
                     Some(format!(
@@ -478,6 +494,7 @@ fn hate_tab(state: &StatsState) -> Element<'_, Message> {
         .iter()
         .map(|c| {
             stat_row(
+                compact,
                 name_cell(
                     c.commander_name.clone(),
                     Some(format!(
@@ -506,6 +523,7 @@ fn hate_tab(state: &StatsState) -> Element<'_, Message> {
         .iter()
         .map(|g| {
             stat_row(
+                compact,
                 name_cell(
                     format!("{} \u{203a} {}", g.hater_name, g.commander_name),
                     Some(format!("piloted by {}", g.victim_name)),
@@ -520,6 +538,7 @@ fn hate_tab(state: &StatsState) -> Element<'_, Message> {
 
     column![
         table(
+            compact,
             "Biggest haters",
             vec![
                 head_name("Player"),
@@ -532,6 +551,7 @@ fn hate_tab(state: &StatsState) -> Element<'_, Message> {
             "Log it from a seat tile during a game and the tally builds up here.",
         ),
         table(
+            compact,
             "Most hated commanders",
             vec![
                 head_name("Commander"),
@@ -544,6 +564,7 @@ fn hate_tab(state: &StatsState) -> Element<'_, Message> {
             "The table will tell you which one deserves it soon enough.",
         ),
         table(
+            compact,
             "Grudges",
             vec![
                 head_name("Grudge"),

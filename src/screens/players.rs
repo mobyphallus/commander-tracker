@@ -819,10 +819,9 @@ const FIELD_PAD: [f32; 2] = [style::FIELD_PAD, style::GAP as f32];
 
 /// Action column widths. Shared by the roster and the commander list so the
 /// right-hand edge of every list is one straight line.
-const W_BACK: f32 = 200.0;
-const W_WIDE: f32 = 240.0;
-const W_ACTION: f32 = 180.0;
-const W_NARROW: f32 = 150.0;
+const W_WIDE: f32 = 200.0;
+const W_ACTION: f32 = 160.0;
+const W_NARROW: f32 = 128.0;
 /// One printing in the art gallery. Card-shaped, because a printing is a
 /// whole card and a box that isn't its shape would make the picture
 /// overflow - see the note in [`crate::cards`].
@@ -835,22 +834,8 @@ const ART_H: f32 = ART_W * 204.0 / 146.0;
 
 /// The title block every view on this screen starts with, with the way out
 /// in the top right where it is on every other screen.
-fn screen_header<'a>(title: String, size: u16, back: Message) -> Element<'a, Message> {
-    container(
-        row![
-            text(title).size(size),
-            iced::widget::horizontal_space(),
-            style::touch_button("Back", style::T_LABEL)
-                .width(Length::Fixed(W_BACK))
-                .style(style::secondary)
-                .on_press(back),
-        ]
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(style::GAP)
-    .width(Length::Fill)
-    .style(style::header)
-    .into()
+fn screen_header<'a>(title: String, _size: u16, back: Message) -> Element<'a, Message> {
+    style::page_header(title, "Players & commanders", back)
 }
 
 /// Something deliberate to look at when a list is empty - centred, so it
@@ -1007,10 +992,12 @@ pub fn view<'a>(
             "Add everyone who sits at this table - they'll keep their commanders and their record.",
         )
     } else {
-        cards::grid(state.players.iter().map(player_tile).collect())
+        cards::adaptive_grid(state.players.len(), move |i, width| {
+            player_tile(&state.players[i], width)
+        })
     };
 
-    let mut add_button = style::touch_button("Add Player", style::T_ACTION)
+    let mut add_button = style::icon_button(crate::icon::Glyph::Add, "Add Player", style::T_ACTION)
         .width(Length::Fixed(W_WIDE))
         .style(style::primary);
     if !state.new_player_name.trim().is_empty() {
@@ -1055,6 +1042,19 @@ fn profile_action(
     button(
         container(
             column![
+                crate::icon::view(
+                    match title {
+                        "Commanders" => crate::icon::Glyph::Decks,
+                        "Rename" => crate::icon::Glyph::Edit,
+                        _ => crate::icon::Glyph::Delete,
+                    },
+                    32.,
+                    if title == "Delete" {
+                        style::DANGER
+                    } else {
+                        style::ACCENT_BRIGHT
+                    }
+                ),
                 text(title).size(style::T_HEADING),
                 text(caption).size(style::T_BODY).color(style::TEXT_MUTED),
             ]
@@ -1065,14 +1065,14 @@ fn profile_action(
         .center_y(Length::Fill),
     )
     .padding(style::GAP)
-    .width(Length::Fixed(cards::TILE))
-    .height(Length::Fixed(cards::TILE))
+    .width(Length::Fixed(280.0))
+    .height(Length::Fixed(208.0))
     .style(style::row_button)
     .on_press(Message::Players(action))
     .into()
 }
 
-fn player_tile(player: &Player) -> Element<'_, Message> {
+fn player_tile(player: &Player, width: f32) -> Element<'_, Message> {
     let initials: String = player
         .name
         .split_whitespace()
@@ -1085,12 +1085,12 @@ fn player_tile(player: &Player) -> Element<'_, Message> {
             column![
                 container(
                     text(initials)
-                        .size(style::T_COUNTER)
+                        .size(style::T_DISPLAY)
                         .color(style::ACCENT_BRIGHT)
                 )
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .style(style::art_inset),
+                .center_x(96)
+                .center_y(96)
+                .style(style::badge),
                 text(&player.name).size(style::T_SUBHEAD),
                 text("View profile")
                     .size(style::T_CAPTION)
@@ -1101,8 +1101,8 @@ fn player_tile(player: &Player) -> Element<'_, Message> {
         .padding(style::GAP),
     )
     .padding(style::GAP_SM)
-    .width(Length::Fixed(cards::TILE))
-    .height(Length::Fixed(cards::TILE))
+    .width(Length::Fixed(width))
+    .height(Length::Fixed(240.0))
     .style(style::row_button)
     .on_press(Message::Players(PlayersMessage::OpenProfile(player.id)))
     .into()
@@ -1186,14 +1186,14 @@ fn player_row<'a>(state: &'a PlayersState, p: &'a Player) -> Element<'a, Message
                     .on_press(Message::Players(PlayersMessage::ManageCommanders(
                         p.clone()
                     ))),
-                style::touch_button("Rename", style::T_LABEL)
+                style::icon_button(crate::icon::Glyph::Edit, "Rename", style::T_LABEL)
                     .width(Length::Fixed(W_ACTION))
                     .style(style::secondary)
                     .on_press(Message::Players(PlayersMessage::StartEdit(
                         p.id,
                         p.name.clone()
                     ))),
-                style::touch_button("Delete", style::T_LABEL)
+                style::icon_button(crate::icon::Glyph::Delete, "Delete", style::T_LABEL)
                     .width(Length::Fixed(W_NARROW))
                     .style(style::danger_ghost)
                     .on_press(Message::Players(PlayersMessage::AskDelete(p.id))),
@@ -1227,21 +1227,18 @@ fn manage_view<'a>(
             "Add one and it's here every time this player sits down.",
         )
     } else {
-        cards::grid(
-            managed
-                .commanders
-                .iter()
-                .map(|deck| {
-                    cards::deck_tile(
-                        deck,
-                        managed.selected == Some(deck.commander.id),
-                        image_cache,
-                        deck_meta(managed, deck),
-                        Message::Players(PlayersMessage::SelectDeck(deck.commander.id)),
-                    )
-                })
-                .collect(),
-        )
+        cards::adaptive_grid(managed.commanders.len(), move |i, width| {
+            let deck = &managed.commanders[i];
+            cards::deck_tile(
+                deck,
+                managed.selected == Some(deck.commander.id),
+                image_cache,
+                deck_meta(managed, deck),
+                Message::Players(PlayersMessage::SelectDeck(deck.commander.id)),
+                Message::Players(PlayersMessage::OpenDeckPage(deck.commander.id)),
+                width,
+            )
+        })
     };
 
     let caption = match managed.commanders.len() {
@@ -1276,14 +1273,14 @@ fn manage_view<'a>(
 /// to add another. Always on screen, so the grid above it never changes
 /// height when a deck is tapped.
 fn deck_bar<'a>(managed: &'a ManagedPlayer) -> Element<'a, Message> {
-    let add = style::touch_button("+ Add a Deck", style::T_ACTION)
+    let add = style::icon_button(crate::icon::Glyph::Add, "Add a Deck", style::T_ACTION)
         .width(Length::Fixed(W_WIDE))
         .style(style::primary)
         .on_press(Message::Players(PlayersMessage::OpenSearch(
             SearchFor::Deck,
         )));
 
-    let body = match managed.selected.and_then(|id| managed.deck(id)) {
+    let body: Element<Message> = match managed.selected.and_then(|id| managed.deck(id)) {
         Some(deck) => {
             let paired = deck.partner.is_some();
             let mut arts = row![art_button(&deck.commander, paired)].spacing(style::GAP_SM);
@@ -1306,22 +1303,25 @@ fn deck_bar<'a>(managed: &'a ManagedPlayer) -> Element<'a, Message> {
                     ))),
             };
 
-            row![
-                text(deck.label())
-                    .size(style::T_SUBHEAD)
-                    .color(style::TEXT)
-                    .width(Length::Fill),
-                salt_button(managed, deck.commander.id),
-                arts,
-                pairing,
-                style::touch_button("Remove", style::T_LABEL)
-                    .width(Length::Fixed(W_NARROW))
-                    .style(style::danger_ghost)
-                    .on_press(Message::Players(PlayersMessage::RemoveCommander(
-                        deck.commander.id
-                    ))),
-                add,
+            column![
+                text(deck.label()).size(style::T_LABEL).color(style::TEXT),
+                row![
+                    salt_button(managed, deck.commander.id),
+                    arts,
+                    pairing,
+                    style::touch_button("Remove", style::T_LABEL)
+                        .width(Length::Fixed(W_NARROW))
+                        .style(style::danger_ghost)
+                        .on_press(Message::Players(PlayersMessage::RemoveCommander(
+                            deck.commander.id
+                        ))),
+                    add,
+                ]
+                .spacing(style::GAP_SM)
+                .wrap(),
             ]
+            .spacing(style::GAP_SM)
+            .into()
         }
         None => row![
             text("Tap a deck for its salt score, art, partner or to remove it")
@@ -1329,10 +1329,13 @@ fn deck_bar<'a>(managed: &'a ManagedPlayer) -> Element<'a, Message> {
                 .color(style::TEXT_MUTED)
                 .width(Length::Fill),
             add,
-        ],
+        ]
+        .spacing(style::GAP)
+        .align_y(iced::Alignment::Center)
+        .into(),
     };
 
-    container(body.spacing(style::GAP).align_y(iced::Alignment::Center))
+    container(body)
         .padding(ROW_PAD)
         .width(Length::Fill)
         .style(style::panel)
@@ -1605,9 +1608,10 @@ fn search_view<'a>(
     } else {
         "Search".into()
     };
-    let mut search_button = style::touch_button(search_label, style::T_ACTION)
-        .width(Length::Fixed(W_WIDE))
-        .style(style::primary);
+    let mut search_button =
+        style::icon_button(crate::icon::Glyph::Search, search_label, style::T_ACTION)
+            .width(Length::Fixed(W_WIDE))
+            .style(style::primary);
     if !state.cooldown.active() && !managed.searching && !managed.query.trim().is_empty() {
         search_button = search_button.on_press(Message::Players(PlayersMessage::Search));
     }

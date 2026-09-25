@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, row, scrollable, stack, text};
+use iced::widget::{button, column, container, image, responsive, row, scrollable, stack, text};
 use iced::{Alignment, ContentFit, Element, Length};
 
 use crate::model::{Commander, SavedDeck};
@@ -40,25 +40,31 @@ const ART_ASPECT: f32 = 457.0 / 626.0;
 /// Scryfall's `small` card image, 146x204.
 const CARD_ASPECT: f32 = 204.0 / 146.0;
 
-/// A deck tile is a square. One shape repeated is what makes a grid of ten
-/// decks read as a rack of cards rather than as ten unrelated panels, and a
-/// square is the shape a thumb finds without aiming.
-/// Sized to fill the row rather than to a round number: five of these plus
-/// their gaps span the table's screen almost exactly, so ten decks - the
-/// most anyone here keeps - land in two full rows with nothing left over.
-/// Big enough, too, to know a commander by its art from across the table
-/// instead of by reading the name under it.
+/// Preferred tile width; grids derive their actual width from the viewport.
 pub const TILE: f32 = 350.0;
+const NAME_H: f32 = style::T_LABEL as f32 * 1.3 * 2.0;
 
-/// The tile's inside, after its padding.
-const INNER_W: f32 = TILE - style::GAP_SM as f32 * 2.0;
-/// The art fills that width at its own proportions - see the note above on
-/// why it is never cropped to fit.
-const ART_H: f32 = INNER_W * ART_ASPECT;
-/// Whatever is left of the square: two lines of [`style::T_LABEL`] at
-/// iced's 1.3x line height, give or take a pixel. Deriving it this way is
-/// what makes the tile exactly square rather than nearly so.
-const NAME_H: f32 = TILE - style::GAP_SM as f32 * 2.0 - ART_H - style::GAP_XS as f32;
+/// Fit whole columns into the viewport, reserving space for the scrollbar.
+fn tile_width(available: f32) -> f32 {
+    let usable = (available - style::GAP as f32).max(1.0);
+    let columns = ((usable + style::GAP as f32) / (320.0 + style::GAP as f32))
+        .floor()
+        .max(1.0);
+    ((usable - (columns - 1.0) * style::GAP as f32) / columns).min(TILE)
+}
+
+/// Each tile gets the same measured width. The column inside `grid` keeps
+/// the scrollable's minimum height from stretching individual cards.
+pub fn adaptive_grid<'a, Message: 'a>(
+    count: usize,
+    make: impl Fn(usize, f32) -> Element<'a, Message> + 'a,
+) -> Element<'a, Message> {
+    responsive(move |size| {
+        let width = tile_width(size.width);
+        grid((0..count).map(|i| make(i, width)).collect())
+    })
+    .into()
+}
 
 /// A whole card, close enough to the size Scryfall serves it at that it
 /// stays crisp instead of being blown up. Search results keep the card's
@@ -87,8 +93,7 @@ impl DeckMeta {
     }
 }
 
-/// One mana pip. A pale disc with its letter in dark ink, which is how the
-/// game itself prints them.
+/// Mana symbols use a pale disc and a recognizable dark vector silhouette.
 pub const PIP: f32 = 30.0;
 
 /// A deck's colour identity as pips rather than as a run of letters.
@@ -110,15 +115,7 @@ pub fn mana_row<'a, Message: 'a>(identity: &str) -> Element<'a, Message> {
 }
 
 fn pip<'a, Message: 'a>(symbol: char) -> Element<'a, Message> {
-    container(
-        text(symbol.to_string())
-            .size(style::T_CAPTION)
-            .color(style::MANA_INK),
-    )
-    .center_x(Length::Fixed(PIP))
-    .center_y(Length::Fixed(PIP))
-    .style(style::mana_pip(symbol))
-    .into()
+    crate::icon::mana(symbol, PIP)
 }
 
 /// How many search results get their picture fetched. Scryfall answers a
@@ -145,45 +142,48 @@ pub fn grid<'a, Message: 'a>(tiles: Vec<Element<'a, Message>>) -> Element<'a, Me
 
 /// One saved deck: its art, its name, and its colours.
 ///
-/// A partner pair takes two squares' worth of width and shows both cards at
-/// full size rather than squeezing two arts into one square. It's one deck
-/// either way - the tile is one button - but a deck with two commanders
-/// looks like one at a glance, and neither art has to be cropped to say so.
+/// Partners share one selectable tile and preserve both images' proportions.
 pub fn deck_tile<'a, Message: Clone + 'a>(
     deck: &'a SavedDeck,
     selected: bool,
     images: &'a Images,
     meta: DeckMeta,
     on_press: Message,
+    on_summary: Message,
+    tile_width: f32,
 ) -> Element<'a, Message> {
-    let (art, width): (Element<Message>, f32) = match &deck.partner {
-        Some(partner) => (
-            row![portrait(&deck.commander, images), portrait(partner, images)]
-                .spacing(style::GAP_XS)
-                .into(),
-            INNER_W * 2.0 + style::GAP_XS as f32,
-        ),
-        None => (portrait(&deck.commander, images), INNER_W),
+    let width = tile_width - style::GAP_SM as f32 * 2.0;
+    // Partners share a single tile; neither the selectable area nor the grid
+    // changes width. Both full-card portraits keep their original proportions.
+    let art: Element<Message> = match &deck.partner {
+        Some(partner) => {
+            let half = (width - style::GAP_XS as f32) / 2.0;
+            container(
+                row![
+                    portrait(&deck.commander, images, half),
+                    portrait(partner, images, half)
+                ]
+                .spacing(style::GAP_XS),
+            )
+            .center_y(width * ART_ASPECT)
+            .style(style::panel)
+            .into()
+        }
+        None => portrait(&deck.commander, images, width),
     };
+    let art_height = width * ART_ASPECT;
 
-    button(
+    let tile = button(
         column![
             // The colours and the deck's numbers ride on the art instead of
-            // taking rows of their own, which is what keeps the tile square.
+            // taking rows of their own, preserving space for the commander name.
             stack![
                 art,
-                container(
-                    row![
-                        mana_row(&identity(deck)),
-                        iced::widget::horizontal_space(),
-                        meta_chips(meta),
-                    ]
-                    .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_y(Alignment::End)
-                .padding(style::GAP_XS),
+                container(row![mana_row(&identity(deck)),].align_y(Alignment::Center),)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_y(Alignment::End)
+                    .padding(style::GAP_XS),
             ],
             container(
                 text(deck.label())
@@ -191,19 +191,33 @@ pub fn deck_tile<'a, Message: Clone + 'a>(
                     .color(style::TEXT)
                     .width(Length::Fixed(width)),
             )
-            .height(Length::Fixed(NAME_H)),
+            .height(Length::Fixed(NAME_H))
+            .clip(true),
         ]
         .spacing(style::GAP_XS),
     )
     .padding(style::GAP_SM)
     .width(Length::Fixed(width + style::GAP_SM as f32 * 2.0))
-    .height(Length::Fixed(TILE))
+    .height(Length::Fixed(
+        art_height + NAME_H + style::GAP_XS as f32 + style::GAP_SM as f32 * 2.0,
+    ))
     .style(if selected {
         style::tile_selected
     } else {
         style::row_button
     })
-    .on_press(on_press)
+    .on_press(on_press);
+
+    // Sibling controls: tapping a score must not also select the deck.
+    stack![
+        tile,
+        container(score_button(meta, on_summary))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::End)
+            .align_y(Alignment::Start)
+            .padding(style::GAP),
+    ]
     .into()
 }
 
@@ -252,10 +266,11 @@ pub fn card_tile<'a, Message: Clone + 'a>(
 pub fn portrait<'a, Message: 'a>(
     commander: &'a Commander,
     images: &'a Images,
+    width: f32,
 ) -> Element<'a, Message> {
     match commander.portrait_url().and_then(|u| images.get(u)) {
-        Some(handle) => picture(handle, INNER_W, ART_H),
-        None => waiting(&commander.name, INNER_W, ART_H),
+        Some(handle) => picture(handle, width, width * ART_ASPECT),
+        None => waiting(&commander.name, width, width * ART_ASPECT),
     }
 }
 
@@ -304,16 +319,6 @@ fn waiting<'a, Message: 'a>(name: &str, width: f32, height: f32) -> Element<'a, 
     .into()
 }
 
-/// The colour-identity chip.
-fn badge<'a, Message: 'a>(label: String) -> Element<'a, Message> {
-    container(text(label).size(style::T_CAPTION).color(style::TEXT_MUTED))
-        .padding([0, style::GAP_XS])
-        .height(Length::Fixed(BADGE_H))
-        .align_y(Alignment::Center)
-        .style(style::badge)
-        .into()
-}
-
 /// A readable touch target over commander art, using the shared glass surface.
 pub fn score_button<'a, Message: Clone + 'a>(
     meta: DeckMeta,
@@ -324,11 +329,11 @@ pub fn score_button<'a, Message: Clone + 'a>(
             .width(Length::Shrink)
             .into();
     }
-    let mut scores = row![].spacing(style::GAP).align_y(Alignment::Center);
+    let mut scores = row![].spacing(style::GAP_SM).align_y(Alignment::Center);
     if let Some(bracket) = meta.bracket {
         scores = scores.push(
             column![
-                text(bracket.to_string()).size(style::T_HEADING),
+                text(bracket.to_string()).size(style::T_LABEL),
                 text("BRACKET").size(style::T_MICRO)
             ]
             .align_x(Alignment::Center),
@@ -337,19 +342,20 @@ pub fn score_button<'a, Message: Clone + 'a>(
     if let Some(salt) = meta.salt {
         scores = scores.push(
             column![
-                text(format!("{salt:.0}")).size(style::T_HEADING),
+                text(format!("{salt:.0}")).size(style::T_LABEL),
                 text("SALT").size(style::T_MICRO)
             ]
             .align_x(Alignment::Center),
         );
     }
     button(
-        column![scores, text("View summary").size(style::T_CAPTION)]
+        column![scores]
             .spacing(style::GAP_XS)
             .align_x(Alignment::Center),
     )
     .padding(style::GAP_SM)
-    .style(style::glass_button)
+    .height(style::TOUCH_H)
+    .style(style::score_button)
     .on_press(on_press)
     .into()
 }
@@ -383,26 +389,6 @@ fn ordered(identity: &str) -> String {
     letters.into_iter().collect()
 }
 
-/// The bracket a linked deck plays at and how salty its list is, as two
-/// small chips. Nothing at all when the deck has no Moxfield link - an
-/// empty pair of chips would suggest the numbers were zero rather than
-/// unknown.
-pub fn meta_chips<'a, Message: 'a>(meta: DeckMeta) -> Element<'a, Message> {
-    if meta.is_empty() {
-        return iced::widget::horizontal_space()
-            .width(Length::Shrink)
-            .into();
-    }
-    let mut chips = row![].spacing(style::GAP_XS / 2);
-    if let Some(bracket) = meta.bracket {
-        chips = chips.push(badge(format!("B{bracket}")));
-    }
-    if let Some(salt) = meta.salt {
-        chips = chips.push(badge(format!("{salt:.0} SALT")));
-    }
-    chips.into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,20 +407,24 @@ mod tests {
     }
 
     #[test]
-    fn a_deck_tile_is_square() {
-        let height = style::GAP_SM as f32 * 2.0 + ART_H + style::GAP_XS as f32 + NAME_H;
-        assert!(
-            (height - TILE).abs() < 0.5,
-            "tile is {TILE} wide but {height} tall"
-        );
+    fn adaptive_tiles_fit_tablet_widths() {
+        for available in [736.0, 1216.0, 1811.0] {
+            let width = tile_width(available);
+            assert!((280.0..=TILE).contains(&width));
+            let columns = ((available - style::GAP as f32 + style::GAP as f32)
+                / (320.0 + style::GAP as f32))
+                .floor();
+            assert!(
+                columns * width + (columns - 1.0) * style::GAP as f32
+                    <= available - style::GAP as f32 + 0.01
+            );
+            let partner_half = (width - 2.0 * style::GAP_SM as f32 - style::GAP_XS as f32) / 2.0;
+            assert!(partner_half * 2.0 + (style::GAP_XS as f32) < width);
+        }
     }
 
-    /// The whole reason every box here is cut to its picture's shape: a box
-    /// that isn't lets the image overflow, and an image that overflows
-    /// inside a scrollable gets drawn outside it.
     #[test]
     fn every_art_box_matches_the_shape_of_the_art_in_it() {
-        assert!((ART_H / INNER_W - ART_ASPECT).abs() < 0.001);
         assert!((CARD_H / CARD_W - CARD_ASPECT).abs() < 0.001);
         let thumb_w = style::TOUCH_H / ART_ASPECT;
         assert!((style::TOUCH_H / thumb_w - ART_ASPECT).abs() < 0.001);
