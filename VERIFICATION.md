@@ -1,6 +1,6 @@
 # Verification — 2026-09-25
 
-`cargo test --offline --bin commander_pod`: 116 passed, 1 ignored (live network).
+`cargo test --offline --bin commander_pod`: 119 passed, 1 ignored (live network).
 `cargo build --offline --bin commander_pod --bin ui_review`: passed.
 
 Application-message tests cover changing life, saving and returning home,
@@ -11,9 +11,9 @@ A regression test ensures dismissing Help after recovery keeps timers paused.
 
 The review harness uses only an in-memory sample database, with long player names,
 a partner deck, missing art, and saved results. Run `cargo run --bin ui_review -- N`,
-where N is 0 (1875×1205), 1 (800×1280), or 2 (1280×800). Each run captures seventeen
+where N is 0 (1875×1205), 1 (800×1280), or 2 (1280×800). Each run captures twenty
 states including recovery, game dialogs, search keyboard, result correction,
-stats, restore confirmation, rematch setup, partner damage controls, running/paused game boards, and bracket/salt badges.
+stats, restore confirmation, rematch setup, partner damage controls, running/paused game boards, bracket/salt badges, linked deck lists, commander options, and setup badges.
 
 The layout uses fixed logical dimensions and renders at half scale to fit portrait
 reviews on a landscape desktop. Captures assert sufficient window space and crop
@@ -34,3 +34,8 @@ product certification.
 The circular center control has mouse/touch hit-area tests, including corner
 pass-through and Done behavior. Identity clearance checks cover all supported
 2–8 player layouts at all three review sizes, using the actual disc dimensions.
+
+Deck-list tests cover cached quantities, exact owner links, unlinking, refresh
+errors retaining cached data, ignored stale responses, and independent list/score
+navigation in Players and Setup. Deck lists use the existing Moxfield client and
+cache successfully fetched lists in SQLite; their first load requires a connection.

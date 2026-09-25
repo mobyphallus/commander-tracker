@@ -64,7 +64,7 @@ impl Error {
 
 /// One card in a linked deck, carrying everything the salt pass needs so it
 /// never has to look the card up again.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
 pub struct Card {
     pub name: String,
     /// Basics and other duplicates arrive as one entry with a count, so
@@ -80,7 +80,7 @@ pub struct Card {
 }
 
 /// A linked Moxfield deck, reduced to what this app cares about.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
 pub struct Deck {
     pub public_id: String,
     pub name: String,

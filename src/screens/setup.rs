@@ -194,6 +194,7 @@ pub struct SetupState {
     /// The app's own keyboard, and which field it's typing into.
     pub kb: Keyboard<Field>,
     pub error: Option<String>,
+    pub deck_list: Option<super::deck_list::State>,
     pub score_summary: Option<(String, Option<crate::salt::Analysis>)>,
     pub profile_pictures: HashMap<i64, image::Handle>,
 }
@@ -271,6 +272,7 @@ impl SetupState {
             kb: Keyboard::default(),
             error: None,
             score_summary: None,
+            deck_list: None,
             profile_pictures: HashMap::new(),
         }
     }
@@ -323,6 +325,8 @@ impl SetupState {
 #[derive(Debug, Clone)]
 pub enum SetupMessage {
     OpenScore(i64, i64, String),
+    OpenDeckList(i64, i64, String),
+    DeckList(super::deck_list::Message),
     CloseScore,
     ChoosePodSize(usize),
     BackToPodSizeChoice,
@@ -438,6 +442,27 @@ pub fn update(
 ) -> (Task<Message>, Option<Action>) {
     state.error = None;
     match message {
+        SetupMessage::OpenDeckList(player, commander, label) => {
+            let (list, task) = super::deck_list::State::open(conn, player, commander, label);
+            state.deck_list = Some(list);
+            state.kb.close();
+            (
+                task.map(|msg| Message::Setup(SetupMessage::DeckList(msg))),
+                None,
+            )
+        }
+        SetupMessage::DeckList(msg) => {
+            if matches!(msg, super::deck_list::Message::Close) {
+                state.deck_list = None;
+            } else if let Some(list) = &mut state.deck_list {
+                return (
+                    list.update(conn, msg)
+                        .map(|msg| Message::Setup(SetupMessage::DeckList(msg))),
+                    None,
+                );
+            }
+            (Task::none(), None)
+        }
         SetupMessage::OpenScore(player, commander, label) => {
             state.score_summary = Some((label, db::deck_breakdown(conn, player, commander)));
             state.kb.close();
@@ -1014,6 +1039,9 @@ pub fn view<'a>(
     players_cache: &'a [Player],
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
+    if let Some(list) = &state.deck_list {
+        return super::deck_list::view(list).map(|msg| Message::Setup(SetupMessage::DeckList(msg)));
+    }
     if let Some((label, analysis)) = &state.score_summary {
         let body = match analysis {
             Some(analysis) => crate::screens::breakdown::body(analysis),
@@ -1606,7 +1634,16 @@ fn seat_tile<'a>(
                 .padding([PAD_HALF, PAD])
                 .style(style::glass),
             )
-            .padding(PAD_HALF)
+            .padding(iced::Padding {
+                bottom: if seat.selected_meta().bracket.is_some()
+                    || seat.selected_meta().salt.is_some()
+                {
+                    style::TOUCH_H + PAD_HALF as f32 * 2.0
+                } else {
+                    PAD_HALF as f32
+                },
+                ..iced::Padding::new(PAD_HALF as f32)
+            })
             .width(Length::Fill);
 
             let overlay = container(caption)
@@ -1920,6 +1957,11 @@ fn commander_picker<'a>(
                 image_cache,
                 seat.deck_meta(deck),
                 Message::Setup(SetupMessage::PickHistoryCommander(deck.clone())),
+                Message::Setup(SetupMessage::OpenDeckList(
+                    seat.player.as_ref().unwrap().id,
+                    deck.commander.id,
+                    deck.label(),
+                )),
                 Message::Setup(SetupMessage::OpenScore(
                     seat.player.as_ref().unwrap().id,
                     deck.commander.id,
@@ -2047,6 +2089,11 @@ fn borrow_picker<'a>(
                     image_cache,
                     meta,
                     Message::Setup(SetupMessage::BorrowDeck(deck.clone())),
+                    Message::Setup(SetupMessage::OpenDeckList(
+                        borrowing.lender.as_ref().unwrap().id,
+                        deck.commander.id,
+                        deck.label(),
+                    )),
                     Message::Setup(SetupMessage::OpenScore(
                         borrowing.lender.as_ref().unwrap().id,
                         deck.commander.id,
@@ -2505,8 +2552,13 @@ fn score_overlay(seat: &SeatSetup) -> Element<'_, Message> {
             .width(Length::Shrink)
             .into();
     };
-    container(cards::score_button(
+    container(cards::score_buttons(
         seat.selected_meta(),
+        Message::Setup(SetupMessage::OpenDeckList(
+            seat.borrowed_from.as_ref().unwrap_or(player).id,
+            commander.id,
+            seat.commander_label(),
+        )),
         Message::Setup(SetupMessage::OpenScore(
             seat.borrowed_from.as_ref().unwrap_or(player).id,
             commander.id,
@@ -2515,8 +2567,8 @@ fn score_overlay(seat: &SeatSetup) -> Element<'_, Message> {
     ))
     .width(Length::Fill)
     .height(Length::Fill)
-    .align_x(Alignment::End)
-    .align_y(Alignment::Start)
+    .align_x(Alignment::Start)
+    .align_y(Alignment::End)
     .padding(PAD_HALF)
     .into()
 }

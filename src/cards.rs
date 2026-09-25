@@ -149,6 +149,7 @@ pub fn deck_tile<'a, Message: Clone + 'a>(
     images: &'a Images,
     meta: DeckMeta,
     on_press: Message,
+    on_deck_list: Message,
     on_summary: Message,
     tile_width: f32,
 ) -> Element<'a, Message> {
@@ -175,16 +176,7 @@ pub fn deck_tile<'a, Message: Clone + 'a>(
 
     let tile = button(
         column![
-            // The colours and the deck's numbers ride on the art instead of
-            // taking rows of their own, preserving space for the commander name.
-            stack![
-                art,
-                container(row![mana_row(&identity(deck)),].align_y(Alignment::Center),)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_y(Alignment::End)
-                    .padding(style::GAP_XS),
-            ],
+            art,
             container(
                 text(deck.label())
                     .size(style::T_LABEL)
@@ -193,13 +185,14 @@ pub fn deck_tile<'a, Message: Clone + 'a>(
             )
             .height(Length::Fixed(NAME_H))
             .clip(true),
+            mana_row(&identity(deck)),
         ]
         .spacing(style::GAP_XS),
     )
     .padding(style::GAP_SM)
     .width(Length::Fixed(width + style::GAP_SM as f32 * 2.0))
     .height(Length::Fixed(
-        art_height + NAME_H + style::GAP_XS as f32 + style::GAP_SM as f32 * 2.0,
+        art_height + NAME_H + PIP + style::GAP_XS as f32 * 2.0 + style::GAP_SM as f32 * 2.0,
     ))
     .style(if selected {
         style::tile_selected
@@ -211,11 +204,11 @@ pub fn deck_tile<'a, Message: Clone + 'a>(
     // Sibling controls: tapping a score must not also select the deck.
     stack![
         tile,
-        container(score_button(meta, on_summary))
+        container(score_buttons(meta, on_deck_list, on_summary))
             .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::End)
-            .align_y(Alignment::Start)
+            .height(art_height + style::GAP_SM as f32 * 2.0)
+            .align_x(Alignment::Start)
+            .align_y(Alignment::End)
             .padding(style::GAP),
     ]
     .into()
@@ -320,54 +313,52 @@ fn waiting<'a, Message: 'a>(name: &str, width: f32, height: f32) -> Element<'a, 
 }
 
 /// A readable touch target over commander art, using the shared glass surface.
-pub fn score_button<'a, Message: Clone + 'a>(
+pub fn score_buttons<'a, Message: Clone + 'a>(
     meta: DeckMeta,
-    on_press: Message,
+    on_deck_list: Message,
+    on_breakdown: Message,
 ) -> Element<'a, Message> {
     if meta.is_empty() {
         return iced::widget::horizontal_space()
             .width(Length::Shrink)
             .into();
     }
-    let mut scores = row![].spacing(style::GAP).align_y(Alignment::Center);
-    if let Some(bracket) = meta.bracket {
-        scores = scores.push(
+    let badge = |glyph, value: String, label: &'static str, action| {
+        button(
             column![
                 row![
-                    crate::icon::view(crate::icon::Glyph::Bracket, 24., style::ACCENT_BRIGHT),
-                    text(bracket.to_string()).size(style::T_ACTION)
+                    crate::icon::view(glyph, 24., style::ACCENT_BRIGHT),
+                    text(value).size(style::T_ACTION)
                 ]
                 .spacing(style::GAP_XS)
                 .align_y(Alignment::Center),
-                text("BRACKET").size(style::T_MICRO)
+                text(label).size(style::T_MICRO),
             ]
             .align_x(Alignment::Center),
-        );
+        )
+        .padding(style::GAP_SM)
+        .height(style::TOUCH_H)
+        .style(style::score_button)
+        .on_press(action)
+    };
+    let mut scores = row![].spacing(style::GAP_SM).align_y(Alignment::Center);
+    if let Some(bracket) = meta.bracket {
+        scores = scores.push(badge(
+            crate::icon::Glyph::Bracket,
+            bracket.to_string(),
+            "BRACKET",
+            on_deck_list,
+        ));
     }
     if let Some(salt) = meta.salt {
-        scores = scores.push(
-            column![
-                row![
-                    crate::icon::view(crate::icon::Glyph::Salt, 24., style::TEXT_MUTED),
-                    text(format!("{salt:.0}")).size(style::T_ACTION)
-                ]
-                .spacing(style::GAP_XS)
-                .align_y(Alignment::Center),
-                text("SALT").size(style::T_MICRO)
-            ]
-            .align_x(Alignment::Center),
-        );
+        scores = scores.push(badge(
+            crate::icon::Glyph::Salt,
+            format!("{salt:.0}"),
+            "SALT",
+            on_breakdown,
+        ));
     }
-    button(
-        column![scores]
-            .spacing(style::GAP_XS)
-            .align_x(Alignment::Center),
-    )
-    .padding(style::GAP_SM)
-    .height(style::TOUCH_H)
-    .style(style::score_button)
-    .on_press(on_press)
-    .into()
+    scores.into()
 }
 
 /// The name a commander actually goes by at the table: "Thrasios", not

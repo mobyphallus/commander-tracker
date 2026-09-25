@@ -49,6 +49,8 @@ struct Review {
     setup: setup::SetupState,
     players: Vec<model::Player>,
     decks: Vec<model::SavedDeck>,
+    deck_list: screens::deck_list::State,
+    player_manager: screens::players::PlayersState,
     images: cards::Images,
     page: usize,
 }
@@ -76,6 +78,9 @@ const PAGES: &[&str] = &[
     "game-board",
     "game-paused",
     "score-badges",
+    "deck-list",
+    "commander-options",
+    "setup-badges",
 ];
 impl Review {
     fn new() -> (Self, Task<Msg>) {
@@ -143,7 +148,69 @@ impl Review {
             game::GameMessage::CounterPressEnd(game::CounterTarget::Life(0), -1),
         );
         let images = cards::Images::new();
-        let setup = setup::SetupState::rematch(&game, &conn);
+        let player = game.seats[0].player.clone();
+        let commander = game.seats[0].commander.id;
+        db::record_player_commander_use(&conn, player.id, commander).unwrap();
+        db::set_deck_link(
+            &conn,
+            player.id,
+            commander,
+            "review-list",
+            "https://moxfield.com/decks/review-list",
+        )
+        .unwrap();
+        conn.execute("UPDATE deck_analysis SET bracket=3, salt_total=127 WHERE player_id=?1 AND commander_id=?2", (player.id, commander)).unwrap();
+        let make_card = |name: &str, kind: &str, quantity| moxfield::Card {
+            name: name.into(),
+            type_line: kind.into(),
+            quantity,
+            scryfall_id: String::new(),
+            oracle_text: String::new(),
+            color_identity: String::new(),
+            usd: None,
+            reserved: false,
+        };
+        let sample = moxfield::Deck {
+            public_id: "review-list".into(),
+            name: "Tymna and Rograkh — Sample deck".into(),
+            url: "https://moxfield.com/decks/review-list".into(),
+            owner_bracket: Some(3),
+            auto_bracket: None,
+            commanders: vec![
+                make_card("Tymna the Weaver", "Legendary Creature", 1),
+                make_card("Rograkh, Son of Rohgahh", "Legendary Creature", 1),
+            ],
+            mainboard: vec![
+                make_card("Esper Sentinel", "Artifact Creature", 1),
+                make_card("Sol Ring", "Artifact", 1),
+                make_card("Swords to Plowshares", "Instant", 1),
+                make_card("Plains", "Basic Land — Plains", 36),
+            ],
+        };
+        let (mut deck_list, _) =
+            screens::deck_list::State::open(&conn, player.id, commander, "Tymna + Rograkh".into());
+        let _ = deck_list.update(
+            &conn,
+            screens::deck_list::Message::Loaded("review-list".into(), Ok(sample)),
+        );
+        let mut player_manager = screens::players::PlayersState::load(&conn);
+        let _ = screens::players::update(
+            &mut player_manager,
+            &conn,
+            screens::players::PlayersMessage::ManageCommanders(player),
+        );
+        let _ = screens::players::update(
+            &mut player_manager,
+            &conn,
+            screens::players::PlayersMessage::SelectDeck(commander),
+        );
+        let mut setup = setup::SetupState::rematch(&game, &conn);
+        for (seat, saved) in setup.seats.iter_mut().zip(&game.seats) {
+            seat.commander_history = vec![model::SavedDeck {
+                commander: saved.commander.clone(),
+                partner: saved.partner.clone(),
+            }];
+        }
         let decks = game
             .seats
             .iter()
@@ -154,6 +221,8 @@ impl Review {
             .collect();
         let mut review = Self {
             decks,
+            deck_list,
+            player_manager,
             home: home::HomeState::load(&conn),
             history: history::HistoryState::load(&conn),
             stats: stats::StatsState::load(&conn),
@@ -176,6 +245,9 @@ impl Review {
     }
     fn configure(&mut self) {
         let p = self.page % PAGES.len();
+        if p == 19 {
+            self.setup.stage = setup::SetupStage::Grid;
+        }
         self.game.error = None;
         self.game.paused = p == 15;
         self.game.game_seconds = 3725;
@@ -349,6 +421,7 @@ impl Review {
                             },
                             app::Message::GoHome,
                             app::Message::GoHome,
+                            app::Message::GoHome,
                             320.,
                         )
                     })
@@ -356,6 +429,9 @@ impl Review {
             ))
             .padding(24)
             .into(),
+            17 => screens::deck_list::view(&self.deck_list)
+                .map(|msg| app::Message::Players(screens::players::PlayersMessage::DeckList(msg))),
+            18 => screens::players::view(&self.player_manager, &self.images),
             10 => stats::view(&self.stats, &self.images),
             11 => storage::view(&self.storage),
             _ => setup::view(&self.setup, &self.players, &self.images),

@@ -54,6 +54,7 @@ pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS game_result_edits (id INTEGER PRIMARY KEY, game_id INTEGER NOT NULL REFERENCES games(id), before_json TEXT NOT NULL, edited_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS active_game (id INTEGER PRIMARY KEY CHECK(id = 1), snapshot TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS deck_lists (public_id TEXT PRIMARY KEY, contents TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS players (
             id   INTEGER PRIMARY KEY,

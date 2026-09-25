@@ -153,6 +153,7 @@ pub struct ManagedPlayer {
     pub links: HashMap<i64, db::DeckLink>,
     /// Set while one deck's own page is open, on top of the deck list.
     pub deck_page: Option<DeckPage>,
+    pub deck_list: Option<super::deck_list::State>,
 }
 
 /// One deck's page: its Moxfield link, and the breakdown if it has one.
@@ -248,6 +249,8 @@ pub enum PlayersMessage {
 
     /// Open one deck's own page, where its Moxfield link and breakdown live.
     OpenDeckPage(i64),
+    OpenDeckList(i64),
+    DeckList(super::deck_list::Message),
     CloseDeckPage,
     LinkChanged(String),
     /// Save what's in the link box and analyse it. No argument: it always
@@ -392,6 +395,7 @@ pub fn update(
                 selected: None,
                 links,
                 deck_page: None,
+                deck_list: None,
             });
             return art;
         }
@@ -478,6 +482,30 @@ pub fn update(
             }
         }
 
+        PlayersMessage::OpenDeckList(commander_id) => {
+            let Some(m) = &mut state.managing else {
+                return Task::none();
+            };
+            let Some(deck) = m.deck(commander_id) else {
+                return Task::none();
+            };
+            let (list, task) =
+                super::deck_list::State::open(conn, m.player.id, commander_id, deck.label());
+            m.deck_list = Some(list);
+            state.kb.close();
+            return task.map(|msg| Message::Players(PlayersMessage::DeckList(msg)));
+        }
+        PlayersMessage::DeckList(msg) => {
+            if let Some(m) = &mut state.managing {
+                if matches!(msg, super::deck_list::Message::Close) {
+                    m.deck_list = None;
+                } else if let Some(list) = &mut m.deck_list {
+                    return list
+                        .update(conn, msg)
+                        .map(|msg| Message::Players(PlayersMessage::DeckList(msg)));
+                }
+            }
+        }
         PlayersMessage::OpenDeckPage(commander_id) => {
             let Some(m) = &mut state.managing else {
                 return Task::none();
@@ -1076,6 +1104,10 @@ pub fn view<'a>(
         }
         // A deck's own page sits on top of the deck list, the same way the
         // art picker does.
+        if let Some(list) = &managed.deck_list {
+            return super::deck_list::view(list)
+                .map(|msg| Message::Players(PlayersMessage::DeckList(msg)));
+        }
         if let Some(page) = &managed.deck_page {
             return deck_page_view(state, managed, page);
         }
@@ -1507,6 +1539,7 @@ fn manage_view<'a>(
                 image_cache,
                 deck_meta(managed, deck),
                 Message::Players(PlayersMessage::SelectDeck(deck.commander.id)),
+                Message::Players(PlayersMessage::OpenDeckList(deck.commander.id)),
                 Message::Players(PlayersMessage::OpenDeckPage(deck.commander.id)),
                 width,
             )
@@ -1579,7 +1612,15 @@ fn selected_deck_view<'a>(
         };
         let mut options = vec![
             profile_action(
-                Glyph::Bracket,
+                Glyph::Decks,
+                "Deck list",
+                "View the cards in this linked deck",
+                PlayersMessage::OpenDeckList(deck.commander.id),
+                height,
+                false,
+            ),
+            profile_action(
+                Glyph::Salt,
                 "Salt & bracket",
                 &scores,
                 PlayersMessage::OpenDeckPage(deck.commander.id),
@@ -1660,14 +1701,22 @@ fn selected_deck_view<'a>(
         .padding(3)
         .style(style::panel)
         .clip(true);
-        row![
-            preview.width(Length::FillPortion(2)).height(Length::Fill),
-            scrollable(column(rows).spacing(16))
-                .width(Length::FillPortion(3))
-                .height(Length::Fill)
-        ]
-        .spacing(24)
-        .into()
+        let actions = scrollable(column(rows).spacing(16)).height(Length::Fill);
+        if size.width >= 1100.0 {
+            row![
+                preview.width(Length::FillPortion(2)).height(Length::Fill),
+                actions.width(Length::FillPortion(3))
+            ]
+            .spacing(24)
+            .into()
+        } else {
+            column![
+                preview.width(Length::Fill).height(220),
+                actions.width(Length::Fill)
+            ]
+            .spacing(16)
+            .into()
+        }
     });
     let mut content = column![
         screen_header(
