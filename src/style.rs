@@ -5,7 +5,7 @@
 //! this module should invent a colour, a corner radius or a shadow.
 //!
 //! Neutral charcoal surfaces keep commander art in the foreground. Purple is
-//! reserved for actions, selection and the current turn. See STYLE_GUIDE.md.
+//! reserved for actions, selection and the current turn.
 
 use iced::border::Radius;
 use iced::theme::palette;
