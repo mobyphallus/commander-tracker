@@ -1,0 +1,170 @@
+[
+  {
+    "cards": [
+      "Magda, Brazen Outlaw",
+      "Clock of Omens",
+      "Adaptive Automaton"
+    ],
+    "produces": [
+      "Infinite artifact ETB",
+      "Infinite artifact tokens",
+      "Infinite tapped Treasure tokens",
+      "Put all artifact cards and a subset of creature cards from your library onto the battlefield"
+    ],
+    "mana_value": 0,
+    "mana_needed": "",
+    "prerequisites": "",
+    "two_card": true,
+    "early": false,
+    "setup_cost_checked": false,
+    "lock": false
+  },
+  {
+    "cards": [
+      "Magda, Brazen Outlaw",
+      "Clock of Omens",
+      "Barkform Harvester"
+    ],
+    "produces": [
+      "Infinite artifact ETB",
+      "Infinite artifact tokens",
+      "Infinite tapped Treasure tokens",
+      "Put all artifact cards and a subset of creature cards from your library onto the battlefield"
+    ],
+    "mana_value": 0,
+    "mana_needed": "",
+    "prerequisites": "",
+    "two_card": true,
+    "early": false,
+    "setup_cost_checked": false,
+    "lock": false
+  },
+  {
+    "cards": [
+      "Magda, Brazen Outlaw",
+      "Clock of Omens",
+      "Liquimetal Torque"
+    ],
+    "produces": [
+      "Infinite artifact ETB",
+      "Infinite artifact tokens",
+      "Infinite tapped Treasure tokens",
+      "Put all artifact cards and a subset of creature cards from your library onto the battlefield"
+    ],
+    "mana_value": 0,
+    "mana_needed": "",
+    "prerequisites": "",
+    "two_card": true,
+    "early": false,
+    "setup_cost_checked": false,
+    "lock": false
+  },
+  {
+    "cards": [
+      "Magda, Brazen Outlaw",
+      "Clock of Omens",
+      "Metallic Mimic"
+    ],
+    "produces": [
+      "Infinite artifact ETB",
+      "Infinite artifact tokens",
+      "Infinite tapped Treasure tokens",
+      "Put all artifact cards and a subset of creature cards from your library onto the battlefield"
+    ],
+    "mana_value": 0,
+    "mana_needed": "",
+    "prerequisites": "",
+    "two_card": true,
+    "early": false,
+    "setup_cost_checked": false,
+    "lock": false
+  },
+  {
+    "cards": [
+      "Magda, Brazen Outlaw",
+      "Clock of Omens",
+      "Three Tree Mascot"
+    ],
+    "produces": [
+      "Infinite artifact ETB",
+      "Infinite artifact tokens",
+      "Infinite tapped Treasure tokens",
+      "Put all artifact cards and a subset of creature cards from your library onto the battlefield"
+    ],
+    "mana_value": 0,
+    "mana_needed": "",
+    "prerequisites": "",
+    "two_card": true,
+    "early": false,
+    "setup_cost_checked": false,
+    "lock": false
+  },
+  {
+    "cards": [
+      "Magda, Brazen Outlaw",
+      "Clock of Omens",
+      "Universal Automaton"
+    ],
+    "produces": [
+      "Infinite artifact ETB",
+      "Infinite artifact tokens",
+      "Infinite tapped Treasure tokens",
+      "Put all artifact cards and a subset of creature cards from your library onto the battlefield"
+    ],
+    "mana_value": 0,
+    "mana_needed": "",
+    "prerequisites": "",
+    "two_card": true,
+    "early": false,
+    "setup_cost_checked": false,
+    "lock": false
+  },
+  {
+    "cards": [
+      "Battered Golem",
+      "Dwarven Bloodboiler",
+      "Magda, Brazen Outlaw",
+      "Maskwood Nexus"
+    ],
+    "produces": [
+      "Infinite artifact ETB",
+      "Infinite artifact LTB",
+      "Infinite artifact sacrifice triggers",
+      "Infinite artifact tokens",
+      "Infinite colored mana",
+      "Infinitely powerful creatures you control until end of turn",
+      "Infinite Treasure tokens",
+      "Put all artifact cards and a subset of creature cards from your library onto the battlefield"
+    ],
+    "mana_value": 0,
+    "mana_needed": "",
+    "prerequisites": "",
+    "two_card": false,
+    "early": false,
+    "setup_cost_checked": false,
+    "lock": false
+  },
+  {
+    "cards": [
+      "Magda, Brazen Outlaw",
+      "Battered Golem",
+      "Maskwood Nexus"
+    ],
+    "produces": [
+      "Infinite artifact ETB",
+      "Infinite artifact LTB",
+      "Infinite artifact sacrifice triggers",
+      "Infinite artifact tokens",
+      "Infinite colored mana",
+      "Infinite Treasure tokens",
+      "Put all artifact cards and a subset of creature cards from your library onto the battlefield"
+    ],
+    "mana_value": 0,
+    "mana_needed": "",
+    "prerequisites": "",
+    "two_card": false,
+    "early": false,
+    "setup_cost_checked": false,
+    "lock": false
+  }
+]

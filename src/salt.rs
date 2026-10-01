@@ -34,6 +34,7 @@ use crate::moxfield;
 /// is commandersalt's own ceiling - a deck at 300 is as salty as the scale
 /// goes, and cEDH lists land around 200.
 pub const SALT_CEILING: f64 = 300.0;
+pub const SCORING_VERSION: u8 = 7;
 
 /// How many EDHREC lookups are in flight at once. EDHREC publishes no rate
 /// limit, so this is set by politeness rather than by a documented cap: six
@@ -250,7 +251,7 @@ impl CategoryKind {
 
     /// Salt per offending card.
     ///
-    /// Everything here was read off real scored decks, except the four
+    /// Everything here was read off real scored decks, except the categories
     /// marked below - those categories never turned up in the decks
     /// sampled, so they're set to the value their neighbours use. They're
     /// the only numbers in this file that are a judgement call, and they're
@@ -267,9 +268,10 @@ impl CategoryKind {
             CategoryKind::Sacrifice | CategoryKind::GroupSlug | CategoryKind::OffColorFetches => {
                 5.0
             }
-            // Unobserved: both are alternate-wincon / extra-attack effects,
-            // in line with the 5-point band.
-            CategoryKind::Poison | CategoryKind::ExtraCombats => 5.0,
+            // Poison remains a local estimate. Extra combats were verified
+            // against the Magda CommanderSalt report (Great Train Heist).
+            CategoryKind::Poison => 5.0,
+            CategoryKind::ExtraCombats => 3.0,
             CategoryKind::CantUntap => 4.0,
             CategoryKind::CantCast
             | CategoryKind::CantActivate
@@ -294,7 +296,34 @@ impl CategoryKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CardScore {
     pub name: String,
+    /// Combined contribution of every copy to this category.
     pub score: f64,
+    /// Absent in older analyses and report snapshots with unknown quantities.
+    #[serde(default)]
+    pub quantity: Option<u32>,
+}
+
+impl CardScore {
+    pub fn unit_score(&self) -> Option<f64> {
+        self.quantity
+            .filter(|q| *q > 0)
+            .map(|q| self.score / q as f64)
+    }
+    pub fn display_name(&self) -> String {
+        match self.quantity {
+            Some(q) if q > 0 => format!("{q} × {}", self.name),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+pub fn sort_card_scores(cards: &mut [CardScore]) {
+    cards.sort_by(|a, b| {
+        b.unit_score()
+            .unwrap_or(b.score)
+            .total_cmp(&a.unit_score().unwrap_or(a.score))
+            .then_with(|| a.name.cmp(&b.name))
+    });
 }
 
 /// One category's total, and what made it up.
@@ -302,7 +331,7 @@ pub struct CardScore {
 pub struct Category {
     pub kind: CategoryKind,
     pub score: f64,
-    /// Biggest contributor first, which is also the order to show them in.
+    /// Highest per-copy salt first; category totals still include quantities.
     pub cards: Vec<CardScore>,
 }
 
@@ -345,6 +374,12 @@ impl ComboLine {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
     #[serde(default)]
+    pub local_available: bool,
+    #[serde(default)]
+    pub assessment: Option<crate::power::Assessment>,
+    #[serde(default)]
+    pub report: Option<crate::commander_salt::Report>,
+    #[serde(default)]
     pub scoring_version: u8,
     pub deck_name: String,
     /// Moxfield's id for the list this came from, so a stored analysis can be
@@ -373,9 +408,64 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    /// Local display estimate: power bands, with the card screen as a floor.
+    /// This is a heuristic, not an official bracket classification.
+    pub fn power_bracket(&self) -> Option<u8> {
+        self.assessment.as_ref().and_then(|a| a.power).map(|power| {
+            if power >= 9. {
+                5
+            } else if power >= 7. {
+                4
+            } else if power >= 5. {
+                3
+            } else if power >= 3. {
+                2
+            } else {
+                1
+            }
+        })
+    }
+
+    pub fn calculated_bracket(&self) -> u8 {
+        self.bracket
+            .max(self.power_bracket().unwrap_or(self.bracket))
+            .clamp(1, 5)
+    }
+    /// Imported-only legacy rows use the top-level fields for the report.
+    /// Once local results exist those fields always describe the local run.
+    pub fn has_local(&self) -> bool {
+        self.local_available || self.report.is_none() || self.assessment.is_some()
+    }
+
+    pub fn retain_other_source(mut self, previous: Self) -> Self {
+        if self.public_id != previous.public_id {
+            return self;
+        }
+        if !self.has_local() && previous.has_local() {
+            let mut combined = previous;
+            combined.local_available = true;
+            combined.report = self.report;
+            combined
+        } else {
+            if self.report.is_none() {
+                self.report = previous.report;
+            }
+            self
+        }
+    }
+
     /// Older cached analyses treated free activation as free assembly.
     /// Re-evaluate their combo floor without inventing missing prerequisites.
     pub fn review_saved(mut self) -> Self {
+        if let Some(report) = &mut self.report {
+            // Migrate reports written before the two sources were retained.
+            if report.bracket == 0 {
+                report.bracket = self.bracket;
+                report.salt_total = self.salt_total;
+                report.card_count = self.card_count;
+                report.saved_at = self.analysed_at.clone();
+            }
+        }
         if self.scoring_version < 2 {
             for combo in &mut self.combos {
                 combo.early = false;
@@ -546,12 +636,7 @@ fn categories_for(card: &moxfield::Card, identity: &str) -> Vec<CategoryKind> {
         text.contains("deals damage to each opponent") || text.contains("each opponent loses"),
         CategoryKind::GroupSlug,
     );
-    add(
-        text.contains("destroy all creatures")
-            || text.contains("exile all creatures")
-            || text.contains("all creatures get -"),
-        CategoryKind::Boardwipes,
-    );
+    add(is_board_wipe(&text), CategoryKind::Boardwipes);
     add(text.contains("annihilator"), CategoryKind::Annihilator);
     add(
         text.contains("poison counter") || text.contains("infect") || text.contains("toxic"),
@@ -575,15 +660,52 @@ fn categories_for(card: &moxfield::Card, identity: &str) -> Vec<CategoryKind> {
     kinds
 }
 
+/// Broad removal, including damage wipes and overloaded removal. Requiring
+/// an opponent-facing target avoids treating your own sacrifice costs as wipes.
+pub(crate) fn is_board_wipe(text: &str) -> bool {
+    [
+        "creatures",
+        "artifacts",
+        "enchantments",
+        "nonland permanents",
+        "permanents",
+    ]
+    .iter()
+    .any(|kind| {
+        text.contains(&format!("destroy all {kind}"))
+            || text.contains(&format!("exile all {kind}"))
+            || text.contains(&format!("return all {kind}"))
+    }) || text.contains("all creatures get -")
+        || (text.contains("deals")
+            && text.contains("damage to each creature")
+            && !text.contains("damage to each creature you control"))
+        || (text.contains("overload")
+            && (text.contains("destroy target")
+                || text.contains("exile target")
+                || text.contains("return target")))
+}
+
 /// EDHREC's URL slug for a card name. Verified against their card pages:
 /// lower-cased, apostrophes and other punctuation dropped rather than
 /// hyphenated, everything else collapsed to single hyphens. A double-faced
-/// card is filed under its front face.
+/// card may use a front-face fallback after a missing-page response.
 pub fn edhrec_slug(name: &str) -> String {
-    let front = name.split(" // ").next().unwrap_or(name);
+    let front = name;
     let mut slug = String::with_capacity(front.len());
     let mut pending_hyphen = false;
-    for ch in front.chars() {
+    for original in front.chars().flat_map(char::to_lowercase) {
+        let ch = match original {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+            'è' | 'é' | 'ê' | 'ë' => 'e',
+            'ì' | 'í' | 'î' | 'ï' => 'i',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            'ý' | 'ÿ' => 'y',
+            '\u{0300}'..='\u{036f}' => continue,
+            other => other,
+        };
         if ch.is_ascii_alphanumeric() {
             if pending_hyphen && !slug.is_empty() {
                 slug.push('-');
@@ -728,6 +850,7 @@ async fn estimate_bracket(deck: &moxfield::Deck) -> Result<EstimateResponse, Err
 
     let client = reqwest::Client::builder()
         .user_agent("commander_pod/0.1 (local Commander pod tracker)")
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| Error::Bracket(e.to_string()))?;
 
@@ -769,6 +892,25 @@ struct EdhrecCard {
     salt: Option<f64>,
 }
 
+/// EDHREC indexes transforming, modal, adventure and prepared cards by front face, but split
+/// cards by the combined name. Select the correct URL before making requests:
+/// absent combined-face pages can return 403 rather than 404 from the CDN.
+fn salt_lookup_slugs(card: &moxfield::Card) -> Vec<String> {
+    let full = edhrec_slug(&card.name);
+    let Some((front, _)) = card.name.split_once(" // ") else {
+        return vec![full];
+    };
+    let front = edhrec_slug(front);
+    match card.layout.as_str() {
+        "transform" | "modal_dfc" | "reversible_card" | "flip" | "adventure" | "prepare" => {
+            vec![front]
+        }
+        "split" => vec![full],
+        _ if full != front => vec![full, front],
+        _ => vec![full],
+    }
+}
+
 /// One card's salt, from the cache if we've seen it, from EDHREC if not.
 ///
 /// A failed request is reported as "no score" rather than an error: one
@@ -776,54 +918,82 @@ struct EdhrecCard {
 /// are listed in `Analysis::unscored` so the gap is visible. It isn't
 /// cached, though - only a real answer from EDHREC is, so a network blip
 /// doesn't poison the cache for a month.
-async fn fetch_salt(client: &reqwest::Client, name: String) -> (String, Option<f64>) {
-    let slug = edhrec_slug(&name);
-    if let Some(hit) = cache::card_salt(&slug) {
-        return (name, hit);
-    }
+async fn fetch_salt(client: &reqwest::Client, card: &moxfield::Card) -> (String, Option<f64>) {
+    fetch_salt_from(client, card, "https://json.edhrec.com/pages/cards").await
+}
 
-    let url = format!("https://json.edhrec.com/pages/cards/{slug}.json");
-    let salt = match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<EdhrecPage>().await {
-            Ok(page) => {
-                let salt = page.container.json_dict.card.salt;
-                cache::store_card_salt(&slug, salt);
-                salt
-            }
-            Err(_) => None,
-        },
-        // A 403 or 404 is EDHREC saying it has no page for this card, which
-        // is a real answer and worth remembering.
-        Ok(_) => {
-            cache::store_card_salt(&slug, None);
-            None
+async fn fetch_salt_from(
+    client: &reqwest::Client,
+    card: &moxfield::Card,
+    base: &str,
+) -> (String, Option<f64>) {
+    let slugs = salt_lookup_slugs(card);
+    let has_alternative_name = slugs.len() > 1;
+    let mut salt = None;
+    for slug in slugs {
+        // Older versions cached HTTP failures as missing scores. Retry those.
+        if let Some(Some(hit)) = cache::card_salt(&slug) {
+            salt = Some(hit);
+            break;
         }
-        Err(_) => None,
-    };
-    (name, salt)
+        let url = format!("{base}/{slug}.json");
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(page) = resp.json::<EdhrecPage>().await {
+                    salt = page
+                        .container
+                        .json_dict
+                        .card
+                        .salt
+                        .filter(|v| v.is_finite() && *v >= 0.0);
+                    if salt.is_some() {
+                        cache::store_card_salt(&slug, salt);
+                        break;
+                    }
+                    // A valid card page without a rating may still have a
+                    // front-face rating in legacy imports.
+                    continue;
+                }
+                break;
+            }
+            // Legacy imports lack layouts. A nonexistent combined-name CDN
+            // page can return 403; try the known front-name alternative once.
+            Ok(resp)
+                if resp.status() == reqwest::StatusCode::NOT_FOUND
+                    || (has_alternative_name
+                        && resp.status() == reqwest::StatusCode::FORBIDDEN) =>
+            {
+                continue
+            }
+            // Rate limits and server failures must not trigger extra requests.
+            _ => break,
+        }
+    }
+    (card.name.clone(), salt)
 }
 
 /// Salt for every distinct card in the deck, keyed by name.
 async fn all_salt(deck: &moxfield::Deck) -> HashMap<String, Option<f64>> {
     let client = match reqwest::Client::builder()
         .user_agent("commander_pod/0.1 (local Commander pod tracker)")
+        .timeout(std::time::Duration::from_secs(30))
         .build()
     {
         Ok(client) => client,
         Err(_) => return HashMap::new(),
     };
 
-    let mut names: Vec<String> = deck.all_cards().map(|c| c.name.clone()).collect();
-    names.sort();
-    names.dedup();
+    let mut cards: Vec<_> = deck.all_cards().collect();
+    cards.sort_by(|a, b| a.name.cmp(&b.name));
+    cards.dedup_by(|a, b| a.name == b.name);
 
     let mut out = HashMap::new();
     // Chunked rather than all at once: a hundred simultaneous connections
     // would be rude, and the cache means this is usually a handful anyway.
-    for chunk in names.chunks(SALT_CONCURRENCY) {
+    for chunk in cards.chunks(SALT_CONCURRENCY) {
         let fetches = chunk
             .iter()
-            .map(|name| fetch_salt(&client, name.clone()))
+            .map(|card| fetch_salt(&client, card))
             .collect::<Vec<_>>();
         for (name, salt) in iced::futures::future::join_all(fetches).await {
             out.insert(name, salt);
@@ -860,10 +1030,15 @@ fn score(
     let identity = deck_identity(deck);
     let mut buckets: HashMap<CategoryKind, Vec<CardScore>> = HashMap::new();
 
+    let quantities: HashMap<_, _> = deck
+        .all_cards()
+        .map(|card| (card.name.as_str(), card.quantity))
+        .collect();
     let mut push = |kind: CategoryKind, name: &str, score: f64| {
         if score > 0.0 {
             buckets.entry(kind).or_default().push(CardScore {
                 name: name.to_string(),
+                quantity: Some(quantities.get(name).copied().unwrap_or(1)),
                 score,
             });
         }
@@ -1007,11 +1182,7 @@ fn score(
     let mut categories: Vec<Category> = buckets
         .into_iter()
         .map(|(kind, mut cards)| {
-            cards.sort_by(|a, b| {
-                b.score
-                    .total_cmp(&a.score)
-                    .then_with(|| a.name.cmp(&b.name))
-            });
+            sort_card_scores(&mut cards);
             let score = cards.iter().map(|c| c.score).sum();
             Category { kind, score, cards }
         })
@@ -1036,7 +1207,10 @@ fn score(
     unscored.dedup();
 
     Analysis {
-        scoring_version: 2,
+        local_available: true,
+        assessment: Some(crate::power::assess(deck, &combos)),
+        report: None,
+        scoring_version: SCORING_VERSION,
         deck_name: deck.name.clone(),
         public_id: deck.public_id.clone(),
         url: deck.url.clone(),
@@ -1066,6 +1240,9 @@ pub async fn analyse(deck: moxfield::Deck) -> Result<Analysis, Error> {
 /// treats them the same way - it shows the sentence and offers to try again -
 /// and keeping them apart would only push the match one layer outwards.
 pub async fn from_link(input: String) -> Result<Analysis, String> {
+    if let Some(id) = crate::commander_salt::parse_ref(&input) {
+        return crate::commander_salt::fetch(id).await;
+    }
     let deck = moxfield::fetch(input).await.map_err(|e| e.to_string())?;
     analyse(deck).await.map_err(|e| e.to_string())
 }
@@ -1081,10 +1258,256 @@ mod tests {
             scryfall_id: String::new(),
             oracle_text: oracle.to_string(),
             type_line: types.to_string(),
+            layout: String::new(),
             color_identity: String::new(),
             usd: None,
             reserved: false,
+            mana_value: None,
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "fetches the supplied Magda deck and its live scoring inputs"]
+    async fn live_magda_local_assessment() {
+        let a = from_link("https://moxfield.com/decks/mCMqeU3Ydk2PeTLx47ijkw".into())
+            .await
+            .unwrap();
+        let local = a
+            .assessment
+            .as_ref()
+            .expect("Moxfield checks must include local metrics");
+        assert_eq!(a.card_count, 100);
+        assert!(a.report.is_none());
+        assert!(local.power.is_some());
+        assert!(a
+            .categories
+            .iter()
+            .any(|c| c.kind == CategoryKind::Boardwipes && c.score >= 21.));
+        println!("Live Moxfield local: power {:.1}, synergy {:.0}, interaction {:.0}, win conditions {:.0}, salt {:.2}",
+            local.power.unwrap(), local.synergy.score, local.interaction.score, local.win_conditions.score, a.salt_total);
+    }
+
+    #[test]
+    fn recognizes_magda_wipes_without_treating_spot_damage_as_a_wipe() {
+        for oracle in [
+            "{R}, Sacrifice this creature: It deals 1 damage to each creature without flying.",
+            "Discard a card, then draw two cards.\n\nFurious deals 3 damage to each creature without flying.",
+            "Destroy target artifact you don't control.\nOverload {4}{R}",
+        ] {
+            assert!(categories_for(&card("Wipe", oracle, "Sorcery"), "R").contains(&CategoryKind::Boardwipes));
+        }
+        for oracle in [
+            "Deal 3 damage to target creature.",
+            "Prevent all damage to each creature.",
+            "This spell deals 1 damage to each creature you control.",
+            "Destroy target artifact.",
+        ] {
+            assert!(!categories_for(&card("Not a wipe", oracle, "Instant"), "R")
+                .contains(&CategoryKind::Boardwipes));
+        }
+        assert_eq!(CategoryKind::ExtraCombats.weight(), 3.);
+    }
+
+    #[test]
+    fn old_local_analyses_remain_readable_without_a_report() {
+        let mut data: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/magda-commandersalt.json"))
+                .unwrap();
+        // Use a real Analysis serialization, then remove the newly added field.
+        let a =
+            crate::commander_salt::decode(data.take(), "bf9dad6c497fcac34ff0933f6ad5ac06").unwrap();
+        let mut old = serde_json::to_value(a).unwrap();
+        old.as_object_mut().unwrap().remove("report");
+        old["scoring_version"] = 2.into();
+        let restored: Analysis = serde_json::from_value(old).unwrap();
+        assert!(restored.report.is_none());
+        assert_eq!(restored.review_saved().scoring_version, 2);
+    }
+
+    #[test]
+    fn salt_cards_sort_by_unit_rating_and_preserve_quantity_totals() {
+        let mut cards = vec![
+            CardScore {
+                name: "Forest".into(),
+                score: 0.9,
+                quantity: Some(9),
+            },
+            CardScore {
+                name: "Single salty card".into(),
+                score: 0.7,
+                quantity: Some(1),
+            },
+        ];
+        let total: f64 = cards.iter().map(|c| c.score).sum();
+        sort_card_scores(&mut cards);
+        assert_eq!(cards[0].name, "Single salty card");
+        assert_eq!(cards[1].display_name(), "9 × Forest");
+        assert!((cards[1].unit_score().unwrap() - 0.1).abs() < 1e-9);
+        assert_eq!(cards.iter().map(|c| c.score).sum::<f64>(), total);
+        let restored: Vec<CardScore> =
+            serde_json::from_str(&serde_json::to_string(&cards).unwrap()).unwrap();
+        assert_eq!(restored, cards);
+        let legacy: CardScore = serde_json::from_str(r#"{"name":"Forest","score":0.9}"#).unwrap();
+        assert_eq!(legacy.quantity, None);
+        assert_eq!(legacy.unit_score(), None);
+        let invalid = CardScore {
+            name: "Invalid count".into(),
+            score: 1.,
+            quantity: Some(0),
+        };
+        assert_eq!(invalid.unit_score(), None);
+    }
+
+    #[test]
+    fn salt_lookup_uses_front_faces_without_breaking_split_cards() {
+        for (name, expected) in [
+            (
+                "Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel",
+                "sephiroth-fabled-soldier",
+            ),
+            (
+                "Zenos yae Galvus // Shinryu, Transcendent Rival",
+                "zenos-yae-galvus",
+            ),
+            (
+                "Aclazotz, Deepest Betrayal // Temple of the Dead",
+                "aclazotz-deepest-betrayal",
+            ),
+        ] {
+            let mut c = card(name, "", "Legendary Creature");
+            c.layout = "transform".into();
+            assert_eq!(salt_lookup_slugs(&c), vec![expected]);
+        }
+        let mut modal = card("Malakir Rebirth // Malakir Mire", "", "Instant // Land");
+        modal.layout = "modal_dfc".into();
+        assert_eq!(salt_lookup_slugs(&modal), vec!["malakir-rebirth"]);
+        let mut split = card("Fast // Furious", "", "Instant // Sorcery");
+        split.layout = "split".into();
+        assert_eq!(salt_lookup_slugs(&split), vec!["fast-furious"]);
+        let legacy = card("Fast // Furious", "", "Instant // Sorcery");
+        assert_eq!(salt_lookup_slugs(&legacy), vec!["fast-furious", "fast"]);
+    }
+
+    #[test]
+    fn prepared_and_adventure_salt_use_the_creature_name() {
+        for (name, layout, slug) in [
+            (
+                "Defacing Duskmage // Vandal's Edit",
+                "prepare",
+                "defacing-duskmage",
+            ),
+            (
+                "Emeritus of Woe // Demonic Tutor",
+                "prepare",
+                "emeritus-of-woe",
+            ),
+            (
+                "Emeritus of Ideation // Ancestral Recall",
+                "prepare",
+                "emeritus-of-ideation",
+            ),
+            (
+                "Brazen Borrower // Petty Theft",
+                "adventure",
+                "brazen-borrower",
+            ),
+        ] {
+            let mut c = card(name, "", "Creature // Instant");
+            c.layout = layout.into();
+            assert_eq!(salt_lookup_slugs(&c), vec![slug]);
+        }
+    }
+
+    #[tokio::test]
+    async fn salt_http_falls_back_for_legacy_names_without_retrying_rate_limits() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            time::{Duration, Instant},
+        };
+        for (layout, responses, expected_score) in [
+            (
+                "",
+                vec![
+                    (403, "{}"),
+                    (200, r#"{"container":{"json_dict":{"card":{"salt":1.58}}}}"#),
+                ],
+                Some(1.58),
+            ),
+            (
+                "prepare",
+                vec![(
+                    200,
+                    r#"{"container":{"json_dict":{"card":{"name":"Unrated prepared creature"}}}}"#,
+                )],
+                None,
+            ),
+            ("", vec![(429, "{}")], None),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut c = card(
+                &format!("Salt Test {} // Prepared Spell", address.port()),
+                "",
+                "Creature // Instant",
+            );
+            c.layout = layout.into();
+            let name = c.name.clone();
+            let expected_paths: Vec<_> = salt_lookup_slugs(&c)
+                .into_iter()
+                .take(responses.len())
+                .map(|slug| format!("/{slug}.json"))
+                .collect();
+            let server = std::thread::spawn(move || {
+                let mut paths = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(4);
+                for (status, body) in responses {
+                    let (mut stream, _) = loop {
+                        match listener.accept() {
+                            Ok(connection) => break connection,
+                            Err(e)
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    && Instant::now() < deadline =>
+                            {
+                                std::thread::sleep(Duration::from_millis(5))
+                            }
+                            Err(e) => panic!("Expected salt request: {e}"),
+                        }
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut request = [0; 4096];
+                    let count = stream.read(&mut request).unwrap();
+                    paths.push(
+                        String::from_utf8_lossy(&request[..count])
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap()
+                            .to_owned(),
+                    );
+                    write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+                paths
+            });
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let result = fetch_salt_from(&client, &c, &format!("http://{address}")).await;
+            assert_eq!(result, (name, expected_score));
+            assert_eq!(server.join().unwrap(), expected_paths);
+        }
+    }
+
+    #[test]
+    fn edhrec_page_without_rating_is_missing_not_zero() {
+        let page: EdhrecPage = serde_json::from_value(serde_json::json!({
+            "container": {"json_dict": {"card": {"name": "Pox Plague"}}}
+        }))
+        .unwrap();
+        assert_eq!(page.container.json_dict.card.salt, None);
     }
 
     #[test]
@@ -1094,11 +1517,13 @@ mod tests {
         assert_eq!(edhrec_slug("Thassa's Oracle"), "thassas-oracle");
         assert_eq!(edhrec_slug("Kibo, Uktabi Prince"), "kibo-uktabi-prince");
         assert_eq!(edhrec_slug("Llanowar Elves"), "llanowar-elves");
-        // A double-faced card is filed under its front face.
+        // Full split names are preserved; fetch_salt handles front-face fallback.
         assert_eq!(
             edhrec_slug("Malakir Rebirth // Malakir Mire"),
-            "malakir-rebirth"
+            "malakir-rebirth-malakir-mire"
         );
+        assert_eq!(edhrec_slug("Glóin, Dwarf Emissary"), "gloin-dwarf-emissary");
+        assert_eq!(edhrec_slug("Fast // Furious"), "fast-furious");
     }
 
     #[test]
@@ -1225,6 +1650,17 @@ mod tests {
                 .map(|c| c.score)
                 .unwrap_or(0.0)
         };
+        let forest = a
+            .categories
+            .iter()
+            .find(|c| c.kind == CategoryKind::Edhrec)
+            .unwrap()
+            .cards
+            .iter()
+            .find(|c| c.name == "Forest")
+            .unwrap();
+        assert_eq!(forest.quantity, Some(9));
+        assert!((forest.unit_score().unwrap() - 0.1).abs() < 1e-9);
         // 0.1 x 9 basics + 2.7 for the Study.
         assert!((by(CategoryKind::Edhrec) - 3.6).abs() < 1e-9);
         // The $40 Study counts, at $40/50. The $1 basics are under the floor

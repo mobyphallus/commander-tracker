@@ -1,0 +1,328 @@
+{
+  "publicId": "mCMqeU3Ydk2PeTLx47ijkw",
+  "name": "Magda, Brazen Outlaw",
+  "publicUrl": "https://moxfield.com/decks/mCMqeU3Ydk2PeTLx47ijkw",
+  "bracket": 4,
+  "autoBracket": 2,
+  "boards": {
+    "commanders": {
+      "cards": {
+        "EZWvB": {
+          "quantity": 1,
+          "card": {
+            "scryfall_id": "079e6263-e54c-4899-a336-5315909b9322",
+            "name": "Magda, Brazen Outlaw",
+            "type_line": "Legendary Creature \u2014 Dwarf Berserker",
+            "oracle_text": "Other Dwarves you control get +1/+0.\nWhenever a Dwarf you control becomes tapped, create a Treasure token.\nSacrifice five Treasures: Search your library for an artifact or Dragon card, put that card onto the battlefield, then shuffle.",
+            "color_identity": [
+              "R"
+            ],
+            "reserved": false,
+            "prices": {
+              "usd": 9.5,
+              "usd_foil": 25.07,
+              "eur": 6.71,
+              "eur_foil": 15.94,
+              "tix": 0.02,
+              "ck": 10.99,
+              "ck_foil": 15.99,
+              "lastUpdatedAtUtc": "2026-09-28T10:04:40.762Z",
+              "ck_buy": 5.5,
+              "ck_buy_foil": 8.0,
+              "ck_buy_qty": 169,
+              "ck_buy_foil_qty": 9,
+              "csi": 14.99,
+              "csi_foil": 23.99,
+              "csi_buy": 0.0,
+              "csi_buy_foil": 0.0,
+              "csi_buy_qty": 0,
+              "csi_buy_foil_qty": 0,
+              "ct": 6.99,
+              "ct_foil": 31.81,
+              "scg": 8.99,
+              "scg_foil": 11.99,
+              "scg_qty": 2,
+              "scg_foil_qty": 0,
+              "scg_buy": 4.0,
+              "scg_foil_buy": 5.0,
+              "mp": 8.87,
+              "mp_foil": 15.63,
+              "mp_qty": 136
+            },
+            "card_faces": [],
+            "cmc": 2.0
+          }
+        }
+      }
+    },
+    "mainboard": {
+      "cards": {
+        "LVyQK": {
+          "quantity": 1,
+          "card": {
+            "scryfall_id": "86b5c38e-7d74-4862-8187-f5db4a3d1e0f",
+            "name": "Bloodfire Dwarf",
+            "type_line": "Creature \u2014 Dwarf",
+            "oracle_text": "{R}, Sacrifice this creature: It deals 1 damage to each creature without flying.",
+            "color_identity": [
+              "R"
+            ],
+            "reserved": false,
+            "prices": {
+              "usd": 0.32,
+              "usd_foil": 26.02,
+              "eur": 0.33,
+              "eur_foil": 12.37,
+              "tix": 0.04,
+              "ck": 0.69,
+              "ck_foil": 29.99,
+              "lastUpdatedAtUtc": "2026-09-28T10:04:40.762Z",
+              "ck_buy": 0.11,
+              "ck_buy_foil": 12.0,
+              "ck_buy_qty": 50,
+              "ck_buy_foil_qty": 0,
+              "csi": 0.35,
+              "csi_foil": 21.99,
+              "csi_buy": 0.0,
+              "csi_buy_foil": 11.0,
+              "csi_buy_qty": 0,
+              "csi_buy_foil_qty": 20,
+              "ct": 0.27,
+              "ct_foil": 23.5,
+              "scg": 0.39,
+              "scg_foil": 24.99,
+              "scg_qty": 0,
+              "scg_foil_qty": 0,
+              "scg_buy": 0.006,
+              "scg_foil_buy": 12.0,
+              "mp": 0.2,
+              "mp_foil": 20.57,
+              "mp_qty": 424
+            },
+            "card_faces": [],
+            "cmc": 1.0
+          }
+        },
+        "EPwaR": {
+          "quantity": 1,
+          "card": {
+            "scryfall_id": "5b209759-6215-49e8-a6a0-a6c94040adb2",
+            "name": "Fast // Furious",
+            "type_line": "Instant // Sorcery",
+            "color_identity": [
+              "R"
+            ],
+            "reserved": false,
+            "prices": {
+              "usd": 0.22,
+              "usd_foil": 0.25,
+              "eur": 0.06,
+              "eur_foil": 0.13,
+              "tix": 0.03,
+              "ck": 0.35,
+              "ck_foil": 0.49,
+              "lastUpdatedAtUtc": "2026-09-28T10:04:40.762Z",
+              "ck_buy": 0.01,
+              "ck_buy_foil": 0.08,
+              "ck_buy_qty": 0,
+              "ck_buy_foil_qty": 0,
+              "csi": 0.29,
+              "csi_foil": 0.49,
+              "csi_buy": 0.0,
+              "csi_buy_foil": 0.0,
+              "csi_buy_qty": 0,
+              "csi_buy_foil_qty": 0,
+              "ct": 0.12,
+              "ct_foil": 0.16,
+              "scg": 0.29,
+              "scg_foil": 0.39,
+              "scg_qty": 20,
+              "scg_foil_qty": 8,
+              "scg_buy": 0.006,
+              "scg_foil_buy": 0.006,
+              "mp": 0.15,
+              "mp_foil": 0.15,
+              "mp_qty": 1438
+            },
+            "card_faces": [
+              {
+                "id": "E5p3Z",
+                "name": "Fast",
+                "mana_cost": "{2}{R}",
+                "type_line": "Instant",
+                "oracle_text": "Discard a card, then draw two cards.",
+                "colors": [],
+                "color_indicator": [],
+                "image_seq": 8593961
+              },
+              {
+                "id": "Yo0Db",
+                "name": "Furious",
+                "mana_cost": "{3}{R}{R}",
+                "type_line": "Sorcery",
+                "oracle_text": "Furious deals 3 damage to each creature without flying.",
+                "colors": [],
+                "color_indicator": [],
+                "image_seq": 8593962
+              }
+            ],
+            "cmc": 8.0
+          }
+        },
+        "YneqA": {
+          "quantity": 1,
+          "card": {
+            "scryfall_id": "685ffd3a-7af6-4302-98c1-26d24ab4bfdf",
+            "name": "Great Train Heist",
+            "type_line": "Instant",
+            "oracle_text": "Spree (Choose one or more additional costs.)\n+ {2}{R} \u2014 Untap all creatures you control. If it's your combat phase, there is an additional combat phase after this phase.\n+ {2} \u2014 Creatures you control get +1/+0 and gain first strike until end of turn.\n+ {R} \u2014 Choose target opponent. Whenever a creature you control deals combat damage to that player this turn, create a tapped Treasure token.",
+            "color_identity": [
+              "R"
+            ],
+            "reserved": false,
+            "prices": {
+              "usd": 4.77,
+              "usd_foil": 4.84,
+              "eur": 2.34,
+              "eur_foil": 2.18,
+              "ck": 7.99,
+              "ck_foil": 8.99,
+              "lastUpdatedAtUtc": "2026-09-28T10:04:40.762Z",
+              "ck_buy": 4.4,
+              "ck_buy_foil": 4.95,
+              "ck_buy_qty": 5,
+              "ck_buy_foil_qty": 5,
+              "csi": 5.49,
+              "csi_foil": 5.99,
+              "csi_buy": 0.0,
+              "csi_buy_foil": 0.0,
+              "csi_buy_qty": 0,
+              "csi_buy_foil_qty": 0,
+              "scg": 5.49,
+              "scg_foil": 4.99,
+              "scg_qty": 0,
+              "scg_foil_qty": 0,
+              "scg_buy": 2.5,
+              "scg_foil_buy": 2.0,
+              "mp": 4.97,
+              "mp_foil": 5.21,
+              "mp_qty": 5,
+              "tix_fb": 0.02
+            },
+            "card_faces": [],
+            "cmc": 1.0
+          }
+        },
+        "Y8NyO": {
+          "quantity": 1,
+          "card": {
+            "scryfall_id": "50686ac7-346c-43d1-bdaa-28d46a12ad93",
+            "name": "Sundering Eruption // Volcanic Fissure",
+            "type_line": "Sorcery // Land",
+            "color_identity": [
+              "R"
+            ],
+            "reserved": false,
+            "prices": {
+              "usd": 1.3,
+              "usd_foil": 5.02,
+              "eur": 1.64,
+              "eur_foil": 2.07,
+              "tix": 0.03,
+              "ck": 2.79,
+              "ck_foil": 4.49,
+              "lastUpdatedAtUtc": "2026-09-28T10:04:40.762Z",
+              "ck_buy": 0.95,
+              "ck_buy_foil": 1.58,
+              "ck_buy_qty": 189,
+              "ck_buy_foil_qty": 6,
+              "csi": 1.99,
+              "csi_foil": 4.99,
+              "csi_buy": 0.6,
+              "csi_buy_foil": 0.0,
+              "csi_buy_qty": 20,
+              "csi_buy_foil_qty": 0,
+              "ct": 1.1,
+              "ct_foil": 3.14,
+              "scg": 1.99,
+              "scg_foil": 3.49,
+              "scg_qty": 20,
+              "scg_foil_qty": 8,
+              "scg_buy": 0.25,
+              "scg_foil_buy": 0.25,
+              "mp": 0.54,
+              "mp_foil": 2.53,
+              "mp_qty": 331
+            },
+            "card_faces": [
+              {
+                "id": "YBBzj",
+                "name": "Sundering Eruption",
+                "mana_cost": "{2}{R}",
+                "type_line": "Sorcery",
+                "oracle_text": "Destroy target land. Its controller may search their library for a basic land card, put it onto the battlefield tapped, then shuffle. Creatures without flying can't block this turn.",
+                "colors": [
+                  "R"
+                ],
+                "color_indicator": [],
+                "flavor_text": "\"Idea: Climbing boots also balanced for running.\"\n\u2014Expedition journal entry, very scorched",
+                "image_seq": 322918350
+              },
+              {
+                "id": "kOoAX",
+                "name": "Volcanic Fissure",
+                "mana_cost": "",
+                "type_line": "Land",
+                "oracle_text": "As this land enters, you may pay 3 life. If you don't, it enters tapped.\n{T}: Add {R}.",
+                "colors": [],
+                "color_indicator": [],
+                "flavor_text": "Even the most seasoned adventurers think twice before testing their fortunes on the volcanic teeth of Akoum.",
+                "image_seq": 322918353
+              }
+            ],
+            "cmc": 3.0
+          }
+        },
+        "EQPzD": {
+          "quantity": 1,
+          "card": {
+            "scryfall_id": "71067239-d46f-4201-a91c-6aa4c41fa8b1",
+            "name": "Vandalblast",
+            "type_line": "Sorcery",
+            "oracle_text": "Destroy target artifact you don't control.\nOverload {4}{R} (You may cast this spell for its overload cost. If you do, change \"target\" in its text to \"each.\")",
+            "color_identity": [
+              "R"
+            ],
+            "reserved": false,
+            "prices": {
+              "usd": 1.51,
+              "eur": 2.33,
+              "tix": 0.25,
+              "ck": 3.99,
+              "ck_foil": 2.99,
+              "lastUpdatedAtUtc": "2026-09-28T10:04:40.762Z",
+              "ck_buy": 1.0,
+              "ck_buy_foil": 1.05,
+              "ck_buy_qty": 140,
+              "ck_buy_foil_qty": 33,
+              "csi": 2.99,
+              "csi_buy": 0.6,
+              "csi_buy_qty": 20,
+              "scg": 1.99,
+              "scg_foil": 2.49,
+              "scg_qty": 0,
+              "scg_foil_qty": 0,
+              "scg_buy": 0.5,
+              "scg_foil_buy": 0.5,
+              "mp": 1.56,
+              "mp_foil": 1.7,
+              "mp_qty": 46
+            },
+            "card_faces": [],
+            "cmc": 1.0
+          }
+        }
+      }
+    }
+  }
+}

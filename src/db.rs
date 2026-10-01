@@ -696,8 +696,10 @@ pub fn record_game(conn: &mut Connection, game: &FinishedGame) -> rusqlite::Resu
         )?;
     }
 
-    tx.execute("UPDATE feedback_matches SET game_id=?1, status='finished' WHERE match_key=?2",
-        params![game_id, game.started_at.to_rfc3339()])?;
+    tx.execute(
+        "UPDATE feedback_matches SET game_id=?1, status='finished' WHERE match_key=?2",
+        params![game_id, game.started_at.to_rfc3339()],
+    )?;
     tx.execute("DELETE FROM active_game", [])?;
     tx.commit()
 }
@@ -905,6 +907,8 @@ pub fn game_detail(conn: &Connection, game_id: i64) -> rusqlite::Result<GameDeta
 /// whole breakdown. This is what the deck tiles and the deck bar read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeckLink {
+    pub list_scores: crate::cards::DeckMeta,
+    pub table_scores: crate::cards::DeckMeta,
     pub public_id: String,
     pub url: String,
     pub deck_name: String,
@@ -914,10 +918,25 @@ pub struct DeckLink {
     pub salt_total: Option<f64>,
 }
 
-fn deck_link_from_row(row: &rusqlite::Row) -> rusqlite::Result<(i64, DeckLink)> {
+fn deck_link_from_row(
+    row: &rusqlite::Row,
+    preferences: &crate::preferences::Preferences,
+) -> rusqlite::Result<(i64, DeckLink)> {
+    let analysis = row
+        .get::<_, Option<String>>("breakdown")?
+        .and_then(|raw| serde_json::from_str::<crate::salt::Analysis>(&raw).ok())
+        .map(crate::salt::Analysis::review_saved);
     Ok((
         row.get("commander_id")?,
         DeckLink {
+            list_scores: analysis
+                .as_ref()
+                .map(|a| preferences.scores(a, true))
+                .unwrap_or_default(),
+            table_scores: analysis
+                .as_ref()
+                .map(|a| preferences.scores(a, false))
+                .unwrap_or_default(),
             public_id: row.get("public_id")?,
             url: row.get("url")?,
             deck_name: row.get("deck_name")?,
@@ -985,7 +1004,12 @@ pub fn save_deck_analysis(
     public_id: &str,
     analysis: &crate::salt::Analysis,
 ) -> rusqlite::Result<()> {
-    let breakdown = serde_json::to_string(analysis).unwrap_or_default();
+    let mut analysis = analysis.clone().review_saved();
+    if let Some(previous) = deck_breakdown(conn, player_id, commander_id) {
+        analysis = analysis.retain_other_source(previous);
+    }
+    let breakdown = serde_json::to_string(&analysis)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     conn.execute(
         "INSERT INTO deck_analysis
             (player_id, commander_id, public_id, url, deck_name, bracket, salt_total,
@@ -1023,7 +1047,11 @@ pub fn deck_links(
         "SELECT commander_id, public_id, url, deck_name, bracket, salt_total, breakdown
          FROM deck_analysis WHERE player_id = ?1",
     )?;
-    let rows = stmt.query_map(params![player_id], deck_link_from_row)?;
+    let preferences = crate::preferences::Preferences::load(conn)
+        .map_err(rusqlite::Error::InvalidParameterName)?;
+    let rows = stmt.query_map(params![player_id], |row| {
+        deck_link_from_row(row, &preferences)
+    })?;
     rows.collect()
 }
 
@@ -1168,6 +1196,9 @@ mod tests {
 
     fn analysis(public_id: &str, bracket: u8, salt: f64) -> Analysis {
         Analysis {
+            local_available: true,
+            assessment: None,
+            report: None,
             scoring_version: 2,
             deck_name: "Test Deck".into(),
             public_id: public_id.into(),
@@ -1183,6 +1214,66 @@ mod tests {
             unscored: Vec::new(),
             analysed_at: "2026-09-24T12:00:00+00:00".into(),
         }
+    }
+
+    #[test]
+    fn local_and_report_refreshes_preserve_independent_snapshots() {
+        let conn = memory_db();
+        let (player, commander) = player_with_deck(&conn, "Compare");
+        let mut remote = crate::commander_salt::decode(
+            serde_json::from_str(include_str!("../tests/fixtures/magda-commandersalt.json"))
+                .unwrap(),
+            "bf9dad6c497fcac34ff0933f6ad5ac06",
+        )
+        .unwrap();
+        let id = remote.public_id.clone();
+        let mut local = analysis(&id, 3, 85.07);
+        local.analysed_at = "2026-09-28T12:00:00Z".into();
+        for remote_first in [false, true] {
+            remove_deck_link(&conn, player, commander).unwrap();
+            let order = if remote_first {
+                [&remote, &local]
+            } else {
+                [&local, &remote]
+            };
+            for item in order {
+                save_deck_analysis(&conn, player, commander, &id, item).unwrap();
+            }
+            let saved = deck_breakdown(&conn, player, commander).unwrap();
+            assert!(saved.has_local());
+            assert_eq!(saved.salt_total, local.salt_total);
+            assert_eq!(saved.bracket, 3);
+            assert_eq!(saved.analysed_at, local.analysed_at);
+            assert_eq!(saved.report, remote.report);
+        }
+        local.salt_total = 90.;
+        local.analysed_at = "2026-09-29T12:00:00Z".into();
+        save_deck_analysis(&conn, player, commander, &id, &local).unwrap();
+        assert_eq!(
+            deck_breakdown(&conn, player, commander).unwrap().report,
+            remote.report
+        );
+        remote.report.as_mut().unwrap().salt_total = 91.;
+        remote.report.as_mut().unwrap().scored_at = "2026-09-30T12:00:00Z".into();
+        save_deck_analysis(&conn, player, commander, &id, &remote).unwrap();
+        init(&conn).unwrap();
+        let saved = deck_breakdown(&conn, player, commander).unwrap();
+        assert_eq!(saved.salt_total, 90.);
+        assert_eq!(saved.analysed_at, local.analysed_at);
+        assert_eq!(saved.report, remote.report);
+        // Repointing to a different list must never carry over a report.
+        save_deck_analysis(
+            &conn,
+            player,
+            commander,
+            "different",
+            &analysis("different", 2, 20.),
+        )
+        .unwrap();
+        assert!(deck_breakdown(&conn, player, commander)
+            .unwrap()
+            .report
+            .is_none());
     }
 
     #[test]

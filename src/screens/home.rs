@@ -9,6 +9,7 @@ use crate::{db, layout, style, table_preview};
 
 #[derive(Debug, Clone)]
 pub enum HomeMessage {
+    Preferences,
     StartGame,
     ResumeGame,
     PlayAgain,
@@ -296,10 +297,17 @@ pub fn view<'a>(state: &'a HomeState, players: &'a [Player]) -> Element<'a, Mess
             ]
             .spacing(style::GAP_XS),
             iced::widget::horizontal_space(),
-            style::touch_button("Backup & restore", style::T_LABEL)
-                .width(200)
-                .style(style::ghost)
-                .on_press(Message::Home(HomeMessage::Storage)),
+            column![
+                style::touch_button("Settings", style::T_LABEL)
+                    .width(150)
+                    .style(style::ghost)
+                    .on_press(Message::Home(HomeMessage::Preferences)),
+                style::touch_button("Backup & restore", style::T_LABEL)
+                    .width(200)
+                    .style(style::ghost)
+                    .on_press(Message::Home(HomeMessage::Storage))
+            ]
+            .spacing(style::GAP_XS),
         ]
         .spacing(style::GAP)
         .align_y(Alignment::Center);

@@ -486,41 +486,6 @@ pub fn ghost(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// A button that matches the frosted chips used for the life total and the
-/// player name, so on-tile controls all read as one family.
-pub fn glass_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let (bg, line) = match status {
-        button::Status::Hovered | button::Status::Pressed => (0.96, ACCENT_BRIGHT.scale_alpha(0.6)),
-        _ => (0.9, Color { a: 0.22, ..TEXT }),
-    };
-    button::Style {
-        background: Some(Color { a: bg, ..SCRIM }.into()),
-        text_color: TEXT,
-        border: Border {
-            color: line,
-            width: 1.0,
-            radius: Radius::from(R_LG),
-        },
-        shadow: shadow(0.0, 0.0, 0.0),
-    }
-}
-
-/// Scores need a near-opaque surface to stay readable over pale card art.
-pub fn score_button(theme: &Theme, status: button::Status) -> button::Style {
-    let mut paint = glass_button(theme, status);
-    paint.background = Some(match status {
-        button::Status::Pressed => ACCENT_DEEP.into(),
-        button::Status::Hovered => SURFACE_2.into(),
-        _ => Color {
-            a: 0.94,
-            ..SURFACE_1
-        }
-        .into(),
-    });
-    paint.border.radius = R_MD.into();
-    paint
-}
-
 // ---------------------------------------------------------------------------
 // Containers
 // ---------------------------------------------------------------------------
@@ -536,6 +501,34 @@ pub fn panel(_theme: &Theme) -> container::Style {
             radius: Radius::from(R_MD),
         },
         shadow: Shadow::default(),
+        ..container::Style::default()
+    }
+}
+
+/// An edge-to-edge commander caption and score footer over card art.
+pub fn commander_footer(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(
+            Color {
+                a: 0.97,
+                ..SURFACE_1
+            }
+            .into(),
+        ),
+        text_color: Some(TEXT),
+        ..container::Style::default()
+    }
+}
+
+/// Inset score band beneath pregame player and commander names.
+pub fn pregame_scores(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(SURFACE_2.into()),
+        text_color: Some(TEXT),
+        border: Border {
+            radius: R_MD.into(),
+            ..Border::default()
+        },
         ..container::Style::default()
     }
 }
@@ -771,11 +764,6 @@ pub fn accent_chip_paint() -> ChipPaint {
         },
         radius: R_LG,
     }
-}
-
-/// A translucent chip for labels sitting over commander art.
-pub fn glass(_theme: &Theme) -> container::Style {
-    frosted(0.90, R_LG, 0.22)
 }
 
 /// Heavier version for the big life number, which sits directly on the art.

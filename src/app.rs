@@ -11,6 +11,7 @@ use crate::style;
 
 pub enum Screen {
     Home,
+    Preferences(crate::preferences::State),
     Storage(crate::storage::StorageState),
     Setup(setup::SetupState),
     Game(game::GameState),
@@ -32,6 +33,12 @@ pub struct App {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    OpenScoreSection(Box<Message>, crate::screens::breakdown::Section),
+    ScoreSection(crate::screens::breakdown::Section),
+    ToggleScoreGroup(String),
+    MoreScoreCards(String),
+    CollapseScoreGroups,
+    Preferences(crate::preferences::Change),
     Home(home::HomeMessage),
     Setup(setup::SetupMessage),
     Game(game::GameMessage),
@@ -133,6 +140,57 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::OpenScoreSection(open, section) => {
+                let task = self.update(*open);
+                let select = self.update(Message::ScoreSection(section));
+                Task::batch([task, select])
+            }
+            Message::ToggleScoreGroup(_)
+            | Message::MoreScoreCards(_)
+            | Message::CollapseScoreGroups => {
+                let details = match &mut self.screen {
+                    Screen::Players(state) => state
+                        .managing
+                        .as_mut()
+                        .and_then(|m| m.deck_page.as_mut())
+                        .map(|p| &mut p.details),
+                    Screen::Setup(state) => Some(&mut state.score_details),
+                    _ => None,
+                };
+                if let Some(details) = details {
+                    match message {
+                        Message::ToggleScoreGroup(key) => details.toggle(key),
+                        Message::MoreScoreCards(key) => details.show_more(key),
+                        Message::CollapseScoreGroups => details.collapse_all(),
+                        _ => unreachable!(),
+                    }
+                }
+                Task::none()
+            }
+            Message::ScoreSection(section) => {
+                match &mut self.screen {
+                    Screen::Players(state) => {
+                        if let Some(page) =
+                            state.managing.as_mut().and_then(|m| m.deck_page.as_mut())
+                        {
+                            page.section = section;
+                        }
+                    }
+                    Screen::Setup(state) => state.score_section = section,
+                    _ => {}
+                }
+                iced::widget::scrollable::snap_to(
+                    crate::screens::breakdown::scroll_id(),
+                    iced::widget::scrollable::RelativeOffset::START,
+                )
+            }
+
+            Message::Preferences(change) => {
+                if let Screen::Preferences(state) = &mut self.screen {
+                    crate::preferences::update(state, &self.conn, change);
+                }
+                Task::none()
+            }
             Message::RetryDatabase => Task::none(),
             Message::Storage(msg) => {
                 let restoring = matches!(msg, crate::storage::StorageMessage::ConfirmRestore);
@@ -174,6 +232,10 @@ impl App {
             }
             Message::Home(msg) => {
                 match msg {
+                    home::HomeMessage::Preferences => {
+                        self.screen =
+                            Screen::Preferences(crate::preferences::State::load(&self.conn));
+                    }
                     home::HomeMessage::Retry => {
                         self.home = home::HomeState::load(&self.conn);
                         self.home.play_again = self.rematch.is_some();
@@ -197,7 +259,8 @@ impl App {
                     },
                     home::HomeMessage::PlayAgain => {
                         if !self.home.resumable {
-                            if let Some(state) = self.rematch.take() {
+                            if let Some(mut state) = self.rematch.take() {
+                                setup::refresh_scores(&mut state, &self.conn);
                                 self.screen = Screen::Setup(state);
                             }
                         }
@@ -358,6 +421,7 @@ impl App {
             .into();
         }
         match &self.screen {
+            Screen::Preferences(state) => crate::preferences::view(state),
             Screen::Storage(state) => crate::storage::view(state),
             Screen::Home => home::view(&self.home, &self.players),
             Screen::Setup(state) => setup::view(state, &self.players, &self.image_cache),
@@ -387,6 +451,62 @@ mod flow_tests {
             image_cache: HashMap::new(),
             screen: Screen::Game(game),
         }
+    }
+
+    #[test]
+    fn score_link_opens_deck_then_selects_section_and_summary_resets_it() {
+        use crate::screens::breakdown::Section;
+        let mut app = fixture();
+        app.screen = Screen::Setup(setup::SetupState::new());
+        let _ = app.update(Message::OpenScoreSection(
+            Box::new(Message::Setup(setup::SetupMessage::OpenScore(
+                1,
+                1,
+                "Deck".into(),
+            ))),
+            Section::Synergy,
+        ));
+        let Screen::Setup(state) = &app.screen else {
+            panic!("wrong screen")
+        };
+        assert!(state.score_summary.is_some());
+        assert_eq!(state.score_section, Section::Synergy);
+        assert!(!state.score_details.is_open("local:Salt:Edhrec"));
+        let _ = app.update(Message::ScoreSection(Section::Salt));
+        let Screen::Setup(state) = &app.screen else {
+            panic!("wrong screen")
+        };
+        assert_eq!(state.score_section, Section::Salt);
+        let _ = app.update(Message::ToggleScoreGroup("local:Salt:Edhrec".into()));
+        let _ = app.update(Message::MoreScoreCards("local:Salt:Edhrec".into()));
+        let Screen::Setup(state) = &app.screen else {
+            panic!("wrong screen")
+        };
+        assert!(state.score_details.is_open("local:Salt:Edhrec"));
+        assert_eq!(state.score_details.limit("local:Salt:Edhrec"), 24);
+        let _ = app.update(Message::ScoreSection(Section::Synergy));
+        let Screen::Setup(state) = &app.screen else {
+            panic!("wrong screen")
+        };
+        assert!(state.score_details.is_open("local:Salt:Edhrec"));
+        let _ = app.update(Message::CollapseScoreGroups);
+        let Screen::Setup(state) = &app.screen else {
+            panic!("wrong screen")
+        };
+        assert!(!state.score_details.is_open("local:Salt:Edhrec"));
+        assert_eq!(state.score_details.limit("local:Salt:Edhrec"), 12);
+        let _ = app.update(Message::ToggleScoreGroup("local:Salt:Edhrec".into()));
+        let _ = app.update(Message::Setup(setup::SetupMessage::CloseScore));
+        let _ = app.update(Message::Setup(setup::SetupMessage::OpenScore(
+            1,
+            1,
+            "Deck".into(),
+        )));
+        let Screen::Setup(state) = &app.screen else {
+            panic!("wrong screen")
+        };
+        assert_eq!(state.score_section, Section::Summary);
+        assert!(!state.score_details.is_open("local:Salt:Edhrec"));
     }
 
     #[test]

@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, responsive, row, scrollable, stack, text};
+use iced::widget::{button, column, container, image, responsive, row, scrollable, text};
 use iced::{Alignment, ContentFit, Element, Length};
 
 use crate::model::{Commander, SavedDeck};
@@ -84,12 +84,55 @@ const CARD_TILE_H: f32 =
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct DeckMeta {
     pub bracket: Option<u8>,
+    pub power: Option<f64>,
     pub salt: Option<f64>,
+    pub win_conditions: Option<f64>,
+    pub synergy: Option<f64>,
+    pub interaction: Option<f64>,
+    pub report: bool,
 }
 
 impl DeckMeta {
-    fn is_empty(&self) -> bool {
-        self.bracket.is_none() && self.salt.is_none()
+    pub fn is_empty(&self) -> bool {
+        self.entries().is_empty()
+    }
+
+    pub fn entries(&self) -> Vec<(&'static str, String)> {
+        let mut entries = Vec::new();
+        if let Some(v) = self.bracket {
+            entries.push(("BRACKET", v.to_string()));
+        }
+        if let Some(v) = self.power {
+            entries.push(("POWER", format!("{v:.1}")));
+        }
+        if let Some(v) = self.salt {
+            entries.push(("SALT", format!("{v:.0}")));
+        }
+        for (label, value) in [
+            ("WIN CON", self.win_conditions),
+            ("SYNERGY", self.synergy),
+            ("INTERACTION", self.interaction),
+        ] {
+            if let Some(v) = value {
+                entries.push((
+                    label,
+                    if self.report {
+                        format!("{v:.0} pts")
+                    } else {
+                        format!("{v:.0}/100")
+                    },
+                ));
+            }
+        }
+        entries
+    }
+
+    pub fn summary(&self) -> String {
+        self.entries()
+            .iter()
+            .map(|(label, value)| format!("{label} {value}"))
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 }
 
@@ -143,16 +186,17 @@ pub fn grid<'a, Message: 'a>(tiles: Vec<Element<'a, Message>>) -> Element<'a, Me
 /// One saved deck: its art, its name, and its colours.
 ///
 /// Partners share one selectable tile and preserve both images' proportions.
-pub fn deck_tile<'a, Message: Clone + 'a>(
+pub fn deck_tile<'a>(
     deck: &'a SavedDeck,
     selected: bool,
     images: &'a Images,
     meta: DeckMeta,
-    on_press: Message,
-    on_deck_list: Message,
-    on_summary: Message,
+    on_press: crate::app::Message,
+    on_deck_list: crate::app::Message,
+    on_summary: crate::app::Message,
     tile_width: f32,
-) -> Element<'a, Message> {
+) -> Element<'a, crate::app::Message> {
+    use crate::app::Message;
     let width = tile_width - style::GAP_SM as f32 * 2.0;
     // Partners share a single tile; neither the selectable area nor the grid
     // changes width. Both full-card portraits keep their original proportions.
@@ -194,24 +238,25 @@ pub fn deck_tile<'a, Message: Clone + 'a>(
     .height(Length::Fixed(
         art_height + NAME_H + PIP + style::GAP_XS as f32 * 2.0 + style::GAP_SM as f32 * 2.0,
     ))
-    .style(if selected {
-        style::tile_selected
-    } else {
-        style::row_button
-    })
+    .style(style::ghost)
     .on_press(on_press);
 
-    // Sibling controls: tapping a score must not also select the deck.
-    stack![
-        tile,
-        container(score_buttons(meta, on_deck_list, on_summary))
-            .width(Length::Fill)
-            .height(art_height + style::GAP_SM as f32 * 2.0)
-            .align_x(Alignment::Start)
-            .align_y(Alignment::End)
-            .padding(style::GAP),
-    ]
-    .into()
+    // One outline and background ties the score footer to its commander.
+    let mut content = column![tile];
+    if !meta.is_empty() {
+        content = content
+            .push(iced::widget::horizontal_rule(1))
+            .push(container(score_buttons(meta, on_deck_list, on_summary)).padding(style::GAP_SM));
+    }
+    container(content)
+        .width(Length::Fixed(width + style::GAP_SM as f32 * 2.0))
+        .style(if selected {
+            style::panel_active
+        } else {
+            style::panel
+        })
+        .clip(true)
+        .into()
 }
 
 /// One card in a set of search results, with its name underneath in a fixed
@@ -312,53 +357,193 @@ fn waiting<'a, Message: 'a>(name: &str, width: f32, height: f32) -> Element<'a, 
     .into()
 }
 
-/// A readable touch target over commander art, using the shared glass surface.
-pub fn score_buttons<'a, Message: Clone + 'a>(
+/// An integrated footer: primary score at left, supporting metrics at right.
+pub fn score_buttons<'a>(
     meta: DeckMeta,
-    on_deck_list: Message,
-    on_breakdown: Message,
-) -> Element<'a, Message> {
+    on_deck_list: crate::app::Message,
+    on_breakdown: crate::app::Message,
+) -> Element<'a, crate::app::Message> {
     if meta.is_empty() {
         return iced::widget::horizontal_space()
             .width(Length::Shrink)
             .into();
     }
-    let badge = |glyph, value: String, label: &'static str, action| {
-        button(
-            column![
-                row![
-                    crate::icon::view(glyph, 24., style::ACCENT_BRIGHT),
-                    text(value).size(style::T_ACTION)
-                ]
-                .spacing(style::GAP_XS)
-                .align_y(Alignment::Center),
-                text(label).size(style::T_MICRO),
-            ]
-            .align_x(Alignment::Center),
-        )
-        .padding(style::GAP_SM)
-        .height(style::TOUCH_H)
-        .style(style::score_button)
-        .on_press(action)
+    let entries = meta.entries();
+    let primary = entries
+        .iter()
+        .find(|(label, _)| matches!(*label, "BRACKET" | "POWER"));
+    let extras: Vec<_> = entries
+        .iter()
+        .filter(|(label, _)| !matches!(*label, "BRACKET" | "POWER"))
+        .collect();
+    let mut supporting = column![].spacing(0);
+    for pair in extras.chunks(2) {
+        let mut line = row![].spacing(style::GAP_XS);
+        for (label, value) in pair {
+            line = line.push(
+                button(score_value(label, value, false))
+                    .padding(style::GAP_XS)
+                    .width(Length::Fill)
+                    .height(style::TOUCH_H)
+                    .style(style::ghost)
+                    .on_press(crate::app::Message::OpenScoreSection(
+                        Box::new(on_breakdown.clone()),
+                        crate::screens::breakdown::Section::from_label(label),
+                    )),
+            );
+        }
+        if pair.len() == 1 && extras.len() > 1 {
+            line = line.push(iced::widget::horizontal_space());
+        }
+        supporting = supporting.push(line);
+    }
+    let mut footer = row![].spacing(style::GAP_SM).align_y(Alignment::Center);
+    if let Some((label, value)) = primary {
+        footer = footer.push(
+            button(score_value(label, value, true))
+                .width(88)
+                .height(if extras.len() > 2 {
+                    style::TOUCH_H * 2.
+                } else {
+                    style::TOUCH_H
+                })
+                .padding(style::GAP_XS)
+                .style(style::ghost)
+                .on_press(if *label == "BRACKET" {
+                    on_deck_list
+                } else {
+                    crate::app::Message::OpenScoreSection(
+                        Box::new(on_breakdown),
+                        crate::screens::breakdown::Section::Power,
+                    )
+                }),
+        );
+    }
+    if !extras.is_empty() {
+        footer = footer.push(supporting.width(Length::Fill));
+    }
+    footer.into()
+}
+
+fn score_value<'a, Message: 'a>(label: &str, value: &str, primary: bool) -> Element<'a, Message> {
+    let (number, unit) = if let Some(number) = value.strip_suffix("/100") {
+        (number, " /100")
+    } else if let Some(number) = value.strip_suffix(" pts") {
+        (number, " pts")
+    } else {
+        (value, "")
     };
-    let mut scores = row![].spacing(style::GAP_SM).align_y(Alignment::Center);
-    if let Some(bracket) = meta.bracket {
-        scores = scores.push(badge(
-            crate::icon::Glyph::Bracket,
-            bracket.to_string(),
-            "BRACKET",
-            on_deck_list,
-        ));
-    }
-    if let Some(salt) = meta.salt {
-        scores = scores.push(badge(
-            crate::icon::Glyph::Salt,
-            format!("{salt:.0}"),
-            "SALT",
-            on_breakdown,
-        ));
-    }
-    scores.into()
+    let label = match label {
+        "BRACKET" => "Bracket",
+        "POWER" => "Power",
+        "SALT" => "Salt",
+        "WIN CON" => "Win con",
+        "SYNERGY" => "Synergy",
+        _ => "Interaction",
+    };
+    container(
+        column![
+            row![
+                text(number.to_owned())
+                    .size(if primary {
+                        style::T_HEADING
+                    } else {
+                        style::T_LABEL
+                    })
+                    .color(if primary {
+                        style::ACCENT_BRIGHT
+                    } else {
+                        style::TEXT
+                    }),
+                text(unit.to_owned())
+                    .size(style::T_MICRO)
+                    .color(style::TEXT_MUTED)
+            ]
+            .align_y(Alignment::Center),
+            text(label).size(style::T_MICRO).color(style::TEXT_MUTED),
+        ]
+        .spacing(2),
+    )
+    .center_y(Length::Fill)
+    .into()
+}
+
+/// Responsive score band with a clear primary value and quieter supporting metrics.
+pub fn score_strip<'a>(
+    meta: DeckMeta,
+    on_deck_list: crate::app::Message,
+    on_breakdown: crate::app::Message,
+) -> Element<'a, crate::app::Message> {
+    container(responsive(move |size| {
+        let entries = meta.entries();
+        let wide = size.width / entries.len().max(1) as f32 >= 105.0;
+        let mut strip = row![].spacing(style::GAP_SM).align_y(Alignment::Center);
+        for (index, (label, value)) in entries.iter().enumerate() {
+            let primary = matches!(*label, "POWER" | "BRACKET");
+            let (number, unit) = if let Some(n) = value.strip_suffix("/100") {
+                (n, "/100")
+            } else if let Some(n) = value.strip_suffix(" pts") {
+                (n, "pts")
+            } else {
+                (value.as_str(), "")
+            };
+            let caption = match *label {
+                "POWER" => "Power",
+                "BRACKET" => "Bracket",
+                "SALT" => "Salt",
+                "WIN CON" if wide => "Win conditions",
+                "WIN CON" => "Win",
+                "SYNERGY" if wide => "Synergy",
+                "SYNERGY" => "Syn",
+                _ if wide => "Interaction",
+                _ => "Int",
+            };
+            let mut metric = column![
+                text(caption).size(style::T_MICRO).color(style::TEXT_MUTED),
+                text(number.to_owned())
+                    .size(if primary {
+                        style::T_HEADING
+                    } else {
+                        style::T_SUBHEAD
+                    })
+                    .color(if primary {
+                        style::ACCENT_BRIGHT
+                    } else {
+                        style::TEXT
+                    }),
+            ]
+            .spacing(2)
+            .align_x(Alignment::Center);
+            if !primary {
+                metric = metric.push(text(unit).size(style::T_MICRO).color(style::TEXT_MUTED));
+            }
+            strip = strip.push(
+                button(
+                    container(metric)
+                        .center_x(Length::Fill)
+                        .center_y(style::TOUCH_H),
+                )
+                .padding(0)
+                .width(Length::Fill)
+                .height(style::TOUCH_H)
+                .style(style::ghost)
+                .on_press(if *label == "BRACKET" {
+                    on_deck_list.clone()
+                } else {
+                    crate::app::Message::OpenScoreSection(
+                        Box::new(on_breakdown.clone()),
+                        crate::screens::breakdown::Section::from_label(label),
+                    )
+                }),
+            );
+            if primary && index + 1 < entries.len() {
+                strip = strip.push(container(iced::widget::vertical_rule(1)).height(48));
+            }
+        }
+        strip.into()
+    }))
+    .height(style::TOUCH_H)
+    .into()
 }
 
 /// The name a commander actually goes by at the table: "Thrasios", not

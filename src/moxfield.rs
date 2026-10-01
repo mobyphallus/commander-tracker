@@ -73,10 +73,16 @@ pub struct Card {
     pub scryfall_id: String,
     pub oracle_text: String,
     pub type_line: String,
+    /// Distinguishes split cards from transforming or modal double-faced cards.
+    #[serde(default)]
+    pub layout: String,
     /// Concatenated WUBRG letters, matching `Commander::color_identity`.
     pub color_identity: String,
     pub usd: Option<f64>,
     pub reserved: bool,
+    /// Printed mana value from Moxfield; absent in older cached lists.
+    #[serde(default)]
+    pub mana_value: Option<f64>,
 }
 
 /// A linked Moxfield deck, reduced to what this app cares about.
@@ -185,18 +191,30 @@ fn one() -> u32 {
 #[derive(Debug, Deserialize)]
 struct CardData {
     name: String,
+    #[serde(default)]
+    cmc: Option<f64>,
     #[serde(rename = "scryfall_id", default)]
     scryfall_id: String,
     #[serde(rename = "oracle_text", default)]
     oracle_text: String,
     #[serde(rename = "type_line", default)]
     type_line: String,
+    #[serde(default)]
+    layout: String,
     #[serde(rename = "color_identity", default)]
     color_identity: Vec<String>,
+    #[serde(default)]
+    card_faces: Vec<CardFace>,
     #[serde(default)]
     prices: Option<Prices>,
     #[serde(default)]
     reserved: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CardFace {
+    #[serde(default)]
+    oracle_text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,11 +230,28 @@ impl From<CardData> for Card {
             // Replaced by the entry's real count in `board_cards`.
             quantity: 1,
             scryfall_id: c.scryfall_id,
-            oracle_text: c.oracle_text,
+            oracle_text: if c.card_faces.is_empty() {
+                c.oracle_text
+            } else {
+                let faces = c
+                    .card_faces
+                    .iter()
+                    .map(|face| face.oracle_text.as_str())
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if faces.is_empty() {
+                    c.oracle_text
+                } else {
+                    faces
+                }
+            },
             type_line: c.type_line,
+            layout: c.layout,
             color_identity: c.color_identity.join(""),
             usd: c.prices.and_then(|p| p.usd),
             reserved: c.reserved,
+            mana_value: c.cmc.filter(|v| v.is_finite() && *v >= 0.),
         }
     }
 }
@@ -239,6 +274,7 @@ fn board_cards(board: Board) -> Vec<Card> {
 fn client() -> Result<reqwest::Client, Error> {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(30))
         .build()
         .map_err(Error::other)
 }
@@ -312,6 +348,42 @@ pub async fn fetch(input: String) -> Result<Deck, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_layout_and_reads_older_cards_without_it() {
+        for layout in ["transform", "modal_dfc", "split"] {
+            let raw: CardData = serde_json::from_value(serde_json::json!({
+                "name": "Front // Back", "layout": layout
+            }))
+            .unwrap();
+            let card = Card::from(raw);
+            assert_eq!(card.layout, layout);
+        }
+        let raw: CardData = serde_json::from_value(serde_json::json!({"name": "Legacy"})).unwrap();
+        assert_eq!(Card::from(raw).layout, "");
+    }
+
+    #[test]
+    fn imports_all_faces_without_duplicating_cards() {
+        let body: DeckResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/magda-moxfield-cards.json"))
+                .unwrap();
+        let cards = board_cards(body.boards.mainboard);
+        let split = cards.iter().find(|c| c.name == "Fast // Furious").unwrap();
+        assert!(split.oracle_text.contains("Discard a card"));
+        assert!(split
+            .oracle_text
+            .contains("deals 3 damage to each creature"));
+        assert_eq!(split.quantity, 1);
+        assert_eq!(split.mana_value, Some(8.));
+        let modal = cards
+            .iter()
+            .find(|c| c.name.starts_with("Sundering Eruption"))
+            .unwrap();
+        assert!(modal.oracle_text.contains("Destroy target land"));
+        assert!(modal.oracle_text.contains("Add {R}"));
+        assert_eq!(cards.len(), 5);
+    }
 
     #[test]
     fn parses_every_shape_of_link() {

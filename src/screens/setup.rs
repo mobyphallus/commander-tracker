@@ -106,10 +106,7 @@ impl SeatSetup {
     fn deck_meta(&self, deck: &SavedDeck) -> cards::DeckMeta {
         self.deck_links
             .get(&deck.commander.id)
-            .map(|link| cards::DeckMeta {
-                bracket: link.bracket,
-                salt: link.salt_total,
-            })
+            .map(|link| link.table_scores)
             .unwrap_or_default()
     }
 
@@ -195,6 +192,8 @@ pub struct SetupState {
     pub kb: Keyboard<Field>,
     pub error: Option<String>,
     pub deck_list: Option<super::deck_list::State>,
+    pub score_section: super::breakdown::Section,
+    pub score_details: super::breakdown::Details,
     pub score_summary: Option<(String, Option<crate::salt::Analysis>)>,
     pub profile_pictures: HashMap<i64, image::Handle>,
 }
@@ -226,15 +225,7 @@ impl SetupState {
                     .borrowed_from
                     .as_ref()
                     .and_then(|_| links.get(&seat.commander.id))
-                    .map(|link| {
-                        (
-                            deck,
-                            cards::DeckMeta {
-                                bracket: link.bracket,
-                                salt: link.salt_total,
-                            },
-                        )
-                    });
+                    .map(|link| (deck, link.table_scores));
                 SeatSetup {
                     player: Some(seat.player.clone()),
                     commander: Some(seat.commander.clone()),
@@ -271,6 +262,8 @@ impl SetupState {
             borrowing: None,
             kb: Keyboard::default(),
             error: None,
+            score_section: super::breakdown::Section::Summary,
+            score_details: Default::default(),
             score_summary: None,
             deck_list: None,
             profile_pictures: HashMap::new(),
@@ -318,6 +311,27 @@ impl SetupState {
         match field {
             Field::NewPlayer => self.new_player_name = value,
             Field::CommanderQuery => self.commander_query = value,
+        }
+    }
+}
+
+/// Re-read display preferences and scores before reusing a rematch pod.
+pub fn refresh_scores(state: &mut SetupState, conn: &Connection) {
+    for seat in &mut state.seats {
+        let Some(owner) = seat.borrowed_from.as_ref().or(seat.player.as_ref()) else {
+            continue;
+        };
+        match db::deck_links(conn, owner.id) {
+            Ok(links) => {
+                if let Some((deck, meta)) = &mut seat.borrowed_scores {
+                    *meta = links
+                        .get(&deck.commander.id)
+                        .map(|l| l.table_scores)
+                        .unwrap_or_default();
+                }
+                seat.deck_links = links;
+            }
+            Err(error) => state.error = Some(format!("Couldn't refresh deck scores: {error}")),
         }
     }
 }
@@ -464,6 +478,8 @@ pub fn update(
             (Task::none(), None)
         }
         SetupMessage::OpenScore(player, commander, label) => {
+            state.score_section = super::breakdown::Section::Summary;
+            state.score_details = Default::default();
             state.score_summary = Some((label, db::deck_breakdown(conn, player, commander)));
             state.kb.close();
             (Task::none(), None)
@@ -682,10 +698,7 @@ pub fn update(
                     .borrowing
                     .as_ref()
                     .and_then(|b| b.links.get(&deck.commander.id))
-                    .map(|link| cards::DeckMeta {
-                        bracket: link.bracket,
-                        salt: link.salt_total,
-                    })
+                    .map(|link| link.table_scores)
                     .unwrap_or_default();
                 state.seats[seat].borrowed_scores = Some((deck.clone(), meta));
                 // A single-commander loan must not retain a previous partner.
@@ -1044,7 +1057,9 @@ pub fn view<'a>(
     }
     if let Some((label, analysis)) = &state.score_summary {
         let body = match analysis {
-            Some(analysis) => crate::screens::breakdown::body(analysis),
+            Some(analysis) => {
+                crate::screens::breakdown::view(analysis, state.score_section, &state.score_details)
+            }
             None => empty_state(
                 "No saved summary",
                 "Link and analyze this deck in Players to see its breakdown.",
@@ -1167,11 +1182,10 @@ fn step_header<'a>(
             .size(style::T_LABEL)
             .color(style::TEXT_MUTED),
     ]
-    .spacing(PAD_TIGHT);
+    .spacing(PAD_TIGHT)
+    .width(Length::Fill);
 
-    let mut bar = row![titles, iced::widget::horizontal_space()]
-        .spacing(PAD)
-        .align_y(Alignment::Center);
+    let mut bar = row![titles].spacing(PAD).align_y(Alignment::Center);
     for control in trailing {
         bar = bar.push(control);
     }
@@ -1605,80 +1619,67 @@ fn seat_tile<'a>(
     image_cache: &'a HashMap<String, image::Handle>,
 ) -> Element<'a, Message> {
     let seat_label = format!("SEAT {}", index + 1);
-
+    let edit = Message::Setup(SetupMessage::EditSeat(index));
     let content: Element<Message> = match (&seat.player, &seat.commander) {
         (Some(player), Some(commander)) => {
-            let art = art::framed_pair(
+            let art = button(art::framed_pair(
                 commander,
                 seat.partner.as_ref(),
                 image_cache,
                 style::T_BODY,
                 facing.radians(),
-            );
-
-            let caption = container(
-                container(
-                    column![
-                        text(seat_label)
-                            .size(style::T_MICRO)
-                            .color(style::TEXT_MUTED),
-                        text(player.name.clone())
-                            .size(style::T_SUBHEAD)
-                            .color(style::TEXT),
-                        text(seat.commander_label())
-                            .size(style::T_BODY)
-                            .color(style::TEXT_MUTED),
-                    ]
-                    .spacing(PAD_TIGHT),
-                )
-                .padding([PAD_HALF, PAD])
-                .style(style::glass),
-            )
-            .padding(iced::Padding {
-                bottom: if seat.selected_meta().bracket.is_some()
-                    || seat.selected_meta().salt.is_some()
-                {
-                    style::TOUCH_H + PAD_HALF as f32 * 2.0
-                } else {
-                    PAD_HALF as f32
-                },
-                ..iced::Padding::new(PAD_HALF as f32)
-            })
-            .width(Length::Fill);
-
-            let overlay = container(caption)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_y(iced::alignment::Vertical::Bottom);
-
-            stack![art, overlay].into()
-        }
-        (Some(player), None) => seat_prompt(
-            seat_label,
-            player.name.clone(),
-            "Tap to pick a commander".to_string(),
-        ),
-        _ => seat_prompt(
-            seat_label,
-            "Empty".to_string(),
-            "Tap to choose who sits here".to_string(),
-        ),
-    };
-
-    container(stack![
-        button(content)
+            ))
             .padding(0)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(style::ghost)
-            .on_press(Message::Setup(SetupMessage::EditSeat(index))),
-        score_overlay(seat),
-    ])
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(style::panel)
-    .clip(true)
-    .into()
+            .on_press(edit.clone());
+            let identity = button(
+                column![
+                    text(seat_label)
+                        .size(style::T_MICRO)
+                        .color(style::TEXT_MUTED),
+                    text(&player.name).size(style::T_SUBHEAD).color(style::TEXT),
+                    text(seat.commander_label())
+                        .size(style::T_BODY)
+                        .color(style::TEXT_MUTED),
+                ]
+                .spacing(PAD_TIGHT),
+            )
+            .padding([PAD_HALF, PAD])
+            .width(Length::Fill)
+            .style(style::ghost)
+            .on_press(edit);
+            let identity = container(
+                container(identity)
+                    .width(Length::Fill)
+                    .style(style::commander_footer),
+            )
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .align_y(Alignment::Start);
+            stack![art, identity, score_overlay(seat)].into()
+        }
+        _ => {
+            let (name, hint) = match &seat.player {
+                Some(player) => (player.name.clone(), "Tap to pick a commander"),
+                None => ("Empty".into(), "Tap to choose who sits here"),
+            };
+            button(seat_prompt(seat_label, name, hint.into()))
+                .padding(0)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(style::ghost)
+                .on_press(edit)
+                .into()
+        }
+    };
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::panel)
+        .clip(true)
+        .into()
 }
 
 /// What an unfinished seat says for itself: which seat it is, what is in it,
@@ -1955,7 +1956,10 @@ fn commander_picker<'a>(
                 deck,
                 false,
                 image_cache,
-                seat.deck_meta(deck),
+                seat.deck_links
+                    .get(&deck.commander.id)
+                    .map(|link| link.list_scores)
+                    .unwrap_or_default(),
                 Message::Setup(SetupMessage::PickHistoryCommander(deck.clone())),
                 Message::Setup(SetupMessage::OpenDeckList(
                     seat.player.as_ref().unwrap().id,
@@ -2078,10 +2082,7 @@ fn borrow_picker<'a>(
                 let meta = borrowing
                     .links
                     .get(&deck.commander.id)
-                    .map(|link| cards::DeckMeta {
-                        bracket: link.bracket,
-                        salt: link.salt_total,
-                    })
+                    .map(|link| link.list_scores)
                     .unwrap_or_default();
                 cards::deck_tile(
                     deck,
@@ -2405,64 +2406,45 @@ fn turn_order_view<'a>(
                 .collect::<Vec<Element<Message>>>(),
         )
         .spacing(PAD_HALF);
-        let sequence: Element<Message> = match planned_turn_order(state) {
-            Some(order) => column(
-                order
-                    .iter()
-                    .enumerate()
-                    .map(|(position, &idx)| {
-                        let name = state.seats[idx]
-                            .player
-                            .as_ref()
-                            .map(|p| p.name.clone())
-                            .unwrap_or_default();
-                        container(
-                            row![
-                                container(
-                                    text(format!("{}", position + 1))
-                                        .size(style::T_LABEL)
-                                        .color(style::ACCENT_BRIGHT)
-                                )
-                                .center_x(40)
-                                .center_y(40)
-                                .style(style::panel_active),
-                                column![
-                                    text(name).size(style::T_LABEL),
-                                    text(if position == 0 {
-                                        "First turn".to_string()
-                                    } else {
-                                        format!("Seat {}", idx + 1)
-                                    })
-                                    .size(style::T_CAPTION)
-                                    .color(style::TEXT_MUTED)
-                                ]
-                                .spacing(2),
-                            ]
-                            .spacing(PAD)
-                            .align_y(Alignment::Center),
-                        )
-                        .padding(PAD_HALF)
-                        .width(Length::Fill)
-                        .style(style::table_row)
-                        .into()
-                    })
-                    .collect::<Vec<Element<Message>>>(),
-            )
-            .spacing(PAD_HALF)
-            .into(),
-            None => container(
-                column![
-                    crate::icon::view(crate::icon::Glyph::Players, 32.0, style::ACCENT_BRIGHT),
-                    text("Choose the first player").size(style::T_SUBHEAD),
-                    text("Tap a seat on the table, or let Random choose for you.")
-                        .size(style::T_BODY)
-                        .color(style::TEXT_MUTED),
-                ]
-                .spacing(PAD),
-            )
-            .padding(PAD)
-            .into(),
-        };
+        let order = planned_turn_order(state);
+        let indices = order
+            .clone()
+            .unwrap_or_else(|| (0..state.seats.len()).collect());
+        let mut sequence = column![].spacing(PAD_HALF);
+        if order.is_none() {
+            sequence = sequence.push(
+                text("Tap a seat or choose Random to pick the first player.")
+                    .size(style::T_BODY)
+                    .color(style::TEXT_MUTED),
+            );
+        }
+        for (position, idx) in indices.into_iter().enumerate() {
+            let seat = &state.seats[idx];
+            let name = seat
+                .player
+                .as_ref()
+                .map(|p| p.name.as_str())
+                .unwrap_or("Empty seat");
+            let label = if order.is_some() {
+                format!("{} · {name}", position + 1)
+            } else {
+                format!("Seat {} · {name}", idx + 1)
+            };
+            sequence = sequence.push(
+                container(
+                    column![
+                        text(label).size(style::T_LABEL),
+                        text(seat.commander_label())
+                            .size(style::T_CAPTION)
+                            .color(style::TEXT_MUTED),
+                    ]
+                    .spacing(PAD_TIGHT),
+                )
+                .padding(PAD_HALF)
+                .width(Length::Fill)
+                .style(style::table_row),
+            );
+        }
         let controls = container(
             column![
                 text("TURN DIRECTION")
@@ -2545,14 +2527,11 @@ fn turn_order_view<'a>(
     )
 }
 
-/// Reuse the saved-deck badges without taking space away from the art.
-fn score_overlay(seat: &SeatSetup) -> Element<'_, Message> {
+fn seat_score_action(seat: &SeatSetup) -> Element<'_, Message> {
     let (Some(player), Some(commander)) = (&seat.player, &seat.commander) else {
-        return iced::widget::horizontal_space()
-            .width(Length::Shrink)
-            .into();
+        return iced::widget::Space::new(0, 0).into();
     };
-    container(cards::score_buttons(
+    container(cards::score_strip(
         seat.selected_meta(),
         Message::Setup(SetupMessage::OpenDeckList(
             seat.borrowed_from.as_ref().unwrap_or(player).id,
@@ -2565,11 +2544,25 @@ fn score_overlay(seat: &SeatSetup) -> Element<'_, Message> {
             seat.commander_label(),
         )),
     ))
+    .padding(PAD_HALF)
+    .width(Length::Fill)
+    .style(style::pregame_scores)
+    .into()
+}
+
+/// Shared score footer for the commander preview/editor.
+fn score_overlay(seat: &SeatSetup) -> Element<'_, Message> {
+    if seat.selected_meta().is_empty() {
+        return iced::widget::Space::new(0, 0).into();
+    }
+    container(
+        container(seat_score_action(seat))
+            .padding(PAD_HALF)
+            .width(Length::Fill),
+    )
     .width(Length::Fill)
     .height(Length::Fill)
-    .align_x(Alignment::Start)
-    .align_y(Alignment::End)
-    .padding(PAD_HALF)
+    .align_y(iced::alignment::Vertical::Bottom)
     .into()
 }
 
@@ -2604,59 +2597,52 @@ fn turn_order_tile<'a>(
         None => iced::widget::horizontal_space().into(),
     };
 
-    let badge = container(
-        container(
-            text(match position {
-                Some(1) => "1 · First turn".to_string(),
-                Some(p) => format!("{p} · Turn order"),
-                None => format!("Seat {}", index + 1),
-            })
-            .size(style::T_LABEL)
-            .color(style::TEXT),
-        )
-        .padding([PAD_HALF, PAD])
-        .style(if position == Some(1) {
-            style::panel_active
-        } else {
-            style::glass_strong
-        }),
-    )
-    .padding(PAD)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_y(Alignment::Start);
-
-    let caption = container(
+    let identity = container(
         container(
             column![
-                text(format!("SEAT {}", index + 1))
-                    .size(style::T_MICRO)
+                text(match position {
+                    Some(1) => "1 · FIRST TURN".to_string(),
+                    Some(p) => format!("{p} · TURN ORDER"),
+                    None => format!("SEAT {}", index + 1),
+                })
+                .size(style::T_MICRO)
+                .color(if position == Some(1) {
+                    style::ACCENT_BRIGHT
+                } else {
+                    style::TEXT_MUTED
+                }),
+                text(&player.name).size(style::T_SUBHEAD).color(style::TEXT),
+                text(seat.commander_label())
+                    .size(style::T_CAPTION)
                     .color(style::TEXT_MUTED),
-                text(player.name.clone())
-                    .size(style::T_SUBHEAD)
-                    .color(style::TEXT),
             ]
             .spacing(PAD_TIGHT),
         )
         .padding([PAD_HALF, PAD])
-        .style(style::glass),
-    )
-    .padding(PAD_HALF)
-    .width(Length::Fill);
-
-    let overlay = container(caption)
         .width(Length::Fill)
-        .height(Length::Fill)
-        .align_y(iced::alignment::Vertical::Bottom);
+        .style(style::commander_footer),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_y(Alignment::Start);
+    let scores: Element<Message> = if seat.selected_meta().is_empty() {
+        iced::widget::Space::new(0, 0).into()
+    } else {
+        container(container(seat_score_action(seat)).padding(PAD_HALF))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(iced::alignment::Vertical::Bottom)
+            .into()
+    };
 
-    let tile = button(stack![art, overlay, badge])
+    let tile = button(stack![art, identity])
         .padding(0)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style::ghost)
         .on_press(Message::Setup(SetupMessage::ChooseFirstSeat(index)));
 
-    container(tile)
+    container(stack![tile, scores])
         .padding(3)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -2705,13 +2691,24 @@ mod comparison_tests {
                 deck_name: "Deck".into(),
                 bracket: Some(3),
                 salt_total: Some(123.4),
+                list_scores: cards::DeckMeta {
+                    bracket: Some(3),
+                    salt: Some(123.4),
+                    ..Default::default()
+                },
+                table_scores: cards::DeckMeta {
+                    bracket: Some(3),
+                    salt: Some(123.4),
+                    ..Default::default()
+                },
             },
         );
         assert_eq!(
             seat.selected_meta(),
             cards::DeckMeta {
                 bracket: Some(3),
-                salt: Some(123.4)
+                salt: Some(123.4),
+                ..Default::default()
             }
         );
         seat.partner = Some(commander(3));
@@ -2745,6 +2742,16 @@ mod comparison_tests {
             deck_name: "Owner deck".into(),
             bracket: Some(4),
             salt_total: Some(222.0),
+            list_scores: cards::DeckMeta {
+                bracket: Some(4),
+                salt: Some(222.0),
+                ..Default::default()
+            },
+            table_scores: cards::DeckMeta {
+                bracket: Some(4),
+                salt: Some(222.0),
+                ..Default::default()
+            },
         };
         let mut state = SetupState::new();
         state.seats.push(SeatSetup {
@@ -2769,7 +2776,8 @@ mod comparison_tests {
             state.seats[0].selected_meta(),
             cards::DeckMeta {
                 bracket: Some(4),
-                salt: Some(222.0)
+                salt: Some(222.0),
+                ..Default::default()
             }
         );
         state.seats[0].partner = Some(commander(8));

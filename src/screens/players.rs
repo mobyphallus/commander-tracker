@@ -131,6 +131,7 @@ async fn choose_picture() -> Result<Option<Vec<u8>>, String> {
 }
 
 pub struct ManagedPlayer {
+    pub list_score_choice: Option<crate::preferences::Primary>,
     pub player: Player,
     pub commanders: Vec<SavedDeck>,
     pub query: String,
@@ -162,6 +163,8 @@ pub struct ManagedPlayer {
 /// frame because it's a big structure and `view` runs constantly. It's
 /// loaded once when the page opens.
 pub struct DeckPage {
+    pub section: breakdown::Section,
+    pub details: breakdown::Details,
     pub commander_id: i64,
     pub deck_label: String,
     /// What's in the link box. Starts as whatever was saved, so a link can
@@ -257,12 +260,15 @@ pub enum PlayersMessage {
     /// acts on the deck page that's open, which is also what lets the
     /// keyboard's submit key stand in for it.
     SaveLink,
+    CalculateLocally,
+    ListScoreChoice(Option<crate::preferences::Primary>),
+    RefreshReport,
     /// Forget a deck's link and everything worked out from it.
     RemoveLink,
     /// An analysis finished, for the deck with this commander id. Carries the
     /// id rather than assuming the same page is still open - someone can walk
     /// away from a slow analysis and it must not land on another deck.
-    Analysed(i64, Result<crate::salt::Analysis, String>),
+    Analysed(i64, i64, String, Result<crate::salt::Analysis, String>),
 }
 
 pub fn update(
@@ -383,6 +389,9 @@ pub fn update(
             state.kb.close();
             let links = db::deck_links(conn, player.id).unwrap_or_default();
             state.managing = Some(ManagedPlayer {
+                list_score_choice: crate::preferences::Preferences::load(conn)
+                    .ok()
+                    .and_then(|p| p.commander_list),
                 player,
                 commanders,
                 query: String::new(),
@@ -398,6 +407,25 @@ pub fn update(
                 deck_list: None,
             });
             return art;
+        }
+        PlayersMessage::ListScoreChoice(choice) => {
+            let Some(managed) = &mut state.managing else {
+                return Task::none();
+            };
+            let result = crate::preferences::Preferences::load(conn).and_then(|mut p| {
+                p.commander_list = choice;
+                p.save(conn)
+            });
+            match result {
+                Ok(()) => {
+                    managed.list_score_choice = choice;
+                    match db::deck_links(conn, managed.player.id) {
+                        Ok(links) => managed.links = links,
+                        Err(e) => state.error = Some(format!("Couldn't refresh scores: {e}")),
+                    }
+                }
+                Err(e) => state.error = Some(format!("Couldn't save list preference: {e}")),
+            }
         }
         PlayersMessage::CloseManage => {
             state.managing = None;
@@ -522,8 +550,15 @@ pub fn update(
             // Read once here rather than on every frame: the breakdown is a
             // big structure and `view` runs constantly.
             let analysis = db::deck_breakdown(conn, m.player.id, commander_id);
+            let link_input = analysis
+                .as_ref()
+                .and_then(|a| a.report.as_ref())
+                .map(|r| r.url.clone())
+                .unwrap_or(link_input);
             state.kb.close();
             m.deck_page = Some(DeckPage {
+                section: breakdown::Section::Summary,
+                details: Default::default(),
                 commander_id,
                 deck_label,
                 link_input,
@@ -539,8 +574,32 @@ pub fn update(
         }
         PlayersMessage::LinkChanged(value) => {
             if let Some(page) = state.managing.as_mut().and_then(|m| m.deck_page.as_mut()) {
+                if page.link_input != value {
+                    page.busy = false;
+                }
                 page.link_input = value;
             }
+        }
+        PlayersMessage::CalculateLocally | PlayersMessage::RefreshReport => {
+            let report_refresh = matches!(message, PlayersMessage::RefreshReport);
+            let Some(page) = state.managing.as_mut().and_then(|m| m.deck_page.as_mut()) else {
+                return Task::none();
+            };
+            if page.busy {
+                return Task::none();
+            }
+            let Some(analysis) = &page.analysis else {
+                return Task::none();
+            };
+            page.link_input = if report_refresh {
+                let Some(report) = &analysis.report else {
+                    return Task::none();
+                };
+                report.url.clone()
+            } else {
+                analysis.url.clone()
+            };
+            return update(state, conn, PlayersMessage::SaveLink);
         }
         PlayersMessage::SaveLink => {
             let Some(m) = &mut state.managing else {
@@ -552,37 +611,33 @@ pub fn update(
             };
 
             let input = page.link_input.trim().to_string();
-            // Checked here rather than after a round trip, so a typo comes
-            // back instantly instead of as a failed request.
-            let Some(public_id) = crate::moxfield::parse_ref(&input) else {
-                state.error = Some(crate::moxfield::Error::NotALink.to_string());
+            if page.busy {
                 return Task::none();
-            };
-
+            }
+            let is_report = crate::commander_salt::parse_ref(&input).is_some();
+            if !is_report && crate::moxfield::parse_ref(&input).is_none() {
+                state.error =
+                    Some("Paste a Moxfield deck link or a CommanderSalt report link.".into());
+                return Task::none();
+            }
             let commander_id = page.commander_id;
-            let url = format!("https://moxfield.com/decks/{public_id}");
-            if let Err(e) = db::set_deck_link(conn, player_id, commander_id, &public_id, &url) {
-                state.error = Some(format!("Couldn't save that link: {e}"));
-                return Task::none();
-            }
-
-            // A re-check of the same list keeps the old breakdown on screen
-            // while it runs, so a failed check doesn't blank out numbers we
-            // still have. A different list invalidates them.
-            if m.links
-                .get(&commander_id)
-                .is_some_and(|l| l.public_id != public_id)
-            {
-                page.analysis = None;
-            }
-            page.link_input = url.clone();
+            page.link_input = input.clone();
             page.busy = true;
-            m.links = db::deck_links(conn, player_id).unwrap_or_default();
+            state.error = None;
+            // Commit the source link and scores together only after a successful
+            // response. Failed imports must leave the saved deck intact.
             state.kb.close();
-            return Task::perform(crate::salt::from_link(url), move |result| {
-                Message::Players(PlayersMessage::Analysed(commander_id, result))
+            let request = input.clone();
+            return Task::perform(crate::salt::from_link(input), move |result| {
+                Message::Players(PlayersMessage::Analysed(
+                    player_id,
+                    commander_id,
+                    request.clone(),
+                    result,
+                ))
             });
         }
+
         PlayersMessage::RemoveLink => {
             let Some(m) = &mut state.managing else {
                 return Task::none();
@@ -600,14 +655,32 @@ pub fn update(
             page.busy = false;
             m.links = db::deck_links(conn, player_id).unwrap_or_default();
         }
-        PlayersMessage::Analysed(commander_id, result) => {
+        PlayersMessage::Analysed(owner_id, commander_id, request, result) => {
             let Some(m) = &mut state.managing else {
                 return Task::none();
             };
             let player_id = m.player.id;
+            if player_id != owner_id
+                || !m.deck_page.as_ref().is_some_and(|p| {
+                    p.commander_id == commander_id && p.busy && p.link_input == request
+                })
+            {
+                return Task::none();
+            }
 
             match result {
                 Ok(analysis) => {
+                    if analysis.report.is_some()
+                        && m.links
+                            .get(&commander_id)
+                            .is_some_and(|link| link.public_id != analysis.public_id)
+                    {
+                        state.error = Some("That report is for a different Moxfield deck. Paste a report for this deck, or unlink before changing decks.".into());
+                        if let Some(page) = &mut m.deck_page {
+                            page.busy = false;
+                        }
+                        return Task::none();
+                    }
                     if let Err(e) = db::save_deck_analysis(
                         conn,
                         player_id,
@@ -616,6 +689,10 @@ pub fn update(
                         &analysis,
                     ) {
                         state.error = Some(format!("Couldn't save the analysis: {e}"));
+                        if let Some(page) = &mut m.deck_page {
+                            page.busy = false;
+                        }
+                        return Task::none();
                     }
                     m.links = db::deck_links(conn, player_id).unwrap_or_default();
                     // Only fill in the page if it's still this deck's: a slow
@@ -626,7 +703,7 @@ pub fn update(
                         .as_mut()
                         .filter(|p| p.commander_id == commander_id)
                     {
-                        page.analysis = Some(analysis);
+                        page.analysis = db::deck_breakdown(conn, player_id, commander_id);
                         page.busy = false;
                     }
                 }
@@ -1559,6 +1636,25 @@ fn manage_view<'a>(
             Message::Players(PlayersMessage::CloseManage),
         ),
         section_label(caption),
+        row([
+            ("Follow default", None),
+            ("Power level", Some(crate::preferences::Primary::Power)),
+            ("Bracket", Some(crate::preferences::Primary::Bracket)),
+        ]
+        .into_iter()
+        .map(|(label, choice)| {
+            style::touch_button(label, style::T_LABEL)
+                .width(190)
+                .style(if managed.list_score_choice == choice {
+                    style::primary
+                } else {
+                    style::secondary
+                })
+                .on_press(Message::Players(PlayersMessage::ListScoreChoice(choice)))
+                .into()
+        }))
+        .spacing(style::GAP_SM)
+        .wrap(),
         grid,
         deck_bar(),
     ]
@@ -1606,9 +1702,10 @@ fn selected_deck_view<'a>(
         use crate::icon::Glyph;
         let height = (size.height / 3.0 - 12.0).clamp(180.0, 260.0);
         let meta = deck_meta(managed, deck);
-        let scores = match (meta.bracket, meta.salt) {
-            (Some(b), Some(s)) => format!("Bracket {b} · {s:.0} salt"),
-            _ => "Link a deck or view its analysis".to_string(),
+        let scores = if meta.is_empty() {
+            "Link a deck or view its analysis".into()
+        } else {
+            meta.summary()
         };
         let mut options = vec![
             profile_action(
@@ -1621,7 +1718,7 @@ fn selected_deck_view<'a>(
             ),
             profile_action(
                 Glyph::Salt,
-                "Salt & bracket",
+                "Deck scores",
                 &scores,
                 PlayersMessage::OpenDeckPage(deck.commander.id),
                 height,
@@ -1775,7 +1872,7 @@ fn deck_page_view<'a>(
     let mut controls = row![field_pod(
         keyed_field(
             Field::MoxfieldLink,
-            "https://moxfield.com/decks/...",
+            "Moxfield deck or CommanderSalt report URL",
             &page.link_input,
             |s| Message::Players(PlayersMessage::LinkChanged(s)),
         ),
@@ -1793,15 +1890,26 @@ fn deck_page_view<'a>(
         );
     }
 
+    let local_action = if page.analysis.is_some() {
+        let mut button = style::touch_button("Refresh local calculation", style::T_LABEL)
+            .style(style::secondary);
+        if !page.busy {
+            button = button.on_press(Message::Players(PlayersMessage::CalculateLocally));
+        }
+        Some(button)
+    } else {
+        None
+    };
+
     let body: Element<Message> = match &page.analysis {
-        Some(analysis) => breakdown::body(analysis),
+        Some(analysis) => breakdown::view(analysis, page.section, &page.details),
         None if page.busy => empty_fill(
             "Reading the list...",
             "Fetching the deck, then scoring every card. The first deck takes longest - after that most cards are already known.",
         ),
         None => empty_fill(
-            "Paste this deck's Moxfield link",
-            "You'll get its bracket, the cards that set it, and how salty the list is - all of it saved, so it's here without wifi next time.",
+            "Paste a deck or report link",
+            "Use a Moxfield link to calculate power, synergy, interaction, win conditions, salt and bracket screening. Results are saved offline. CommanderSalt reports are optional.",
         ),
     };
 
@@ -1812,9 +1920,22 @@ fn deck_page_view<'a>(
             Message::Players(PlayersMessage::CloseDeckPage),
         ),
         controls,
+        text("Moxfield: calculate all scores locally · CommanderSalt report: import published scores").size(style::T_CAPTION).color(style::TEXT_MUTED),
     ]
     .spacing(style::GAP);
 
+    if let Some(action) = local_action {
+        let mut actions = row![action].spacing(style::GAP);
+        if page.analysis.as_ref().is_some_and(|a| a.report.is_some()) {
+            let mut refresh = style::touch_button("Refresh CommanderSalt report", style::T_LABEL)
+                .style(style::secondary);
+            if !page.busy {
+                refresh = refresh.on_press(Message::Players(PlayersMessage::RefreshReport));
+            }
+            actions = actions.push(refresh);
+        }
+        content = content.push(actions.wrap());
+    }
     if let Some(e) = &state.error {
         content = content.push(error_banner(e));
     }
@@ -2029,10 +2150,7 @@ fn deck_meta(managed: &ManagedPlayer, deck: &SavedDeck) -> cards::DeckMeta {
     managed
         .links
         .get(&deck.commander.id)
-        .map(|link| cards::DeckMeta {
-            bracket: link.bracket,
-            salt: link.salt_total,
-        })
+        .map(|link| link.list_scores)
         .unwrap_or_default()
 }
 
@@ -2147,5 +2265,179 @@ mod picture_tests {
         assert!(state.pictures.contains_key(&1));
         assert!(!state.choosing_picture);
         assert!(state.error.is_none());
+    }
+}
+
+#[cfg(test)]
+mod scoring_tests {
+    use super::*;
+
+    #[test]
+    fn list_score_switch_preserves_pregame_default_and_other_preferences() {
+        let (conn, game) = crate::session::tests::fixture();
+        let original = crate::preferences::Preferences {
+            primary: crate::preferences::Primary::Bracket,
+            synergy: true,
+            ..Default::default()
+        };
+        original.save(&conn).unwrap();
+        let mut state = PlayersState::load(&conn);
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::ManageCommanders(game.seats[0].player.clone()),
+        );
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::ListScoreChoice(Some(crate::preferences::Primary::Power)),
+        );
+        let saved = crate::preferences::Preferences::load(&conn).unwrap();
+        assert_eq!(saved.primary, original.primary);
+        assert_eq!(
+            saved.commander_list,
+            Some(crate::preferences::Primary::Power)
+        );
+        assert!(saved.synergy);
+        conn.pragma_update(None, "query_only", true).unwrap();
+        let _ = update(&mut state, &conn, PlayersMessage::ListScoreChoice(None));
+        assert_eq!(
+            state.managing.unwrap().list_score_choice,
+            saved.commander_list
+        );
+        assert!(state.error.is_some());
+    }
+
+    #[test]
+    fn comparison_rejects_a_different_decks_report_and_retains_saved_results_on_failure() {
+        let (conn, game) = crate::session::tests::fixture();
+        let player = game.seats[0].player.clone();
+        let commander = game.seats[0].commander.id;
+        db::record_player_commander_use(&conn, player.id, commander).unwrap();
+        let a = crate::commander_salt::decode(
+            serde_json::from_str(include_str!(
+                "../../tests/fixtures/magda-commandersalt.json"
+            ))
+            .unwrap(),
+            "bf9dad6c497fcac34ff0933f6ad5ac06",
+        )
+        .unwrap();
+        db::save_deck_analysis(&conn, player.id, commander, &a.public_id, &a).unwrap();
+        let mut state = PlayersState::load(&conn);
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::ManageCommanders(player.clone()),
+        );
+        let _ = update(&mut state, &conn, PlayersMessage::OpenDeckPage(commander));
+        let source = a.report.as_ref().unwrap().url.clone();
+        let _ = update(&mut state, &conn, PlayersMessage::RefreshReport);
+        let mut wrong = a.clone();
+        wrong.public_id = "a-different-deck".into();
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::Analysed(player.id, commander, source.clone(), Ok(wrong)),
+        );
+        assert!(state
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("different Moxfield deck"));
+        assert_eq!(
+            db::deck_breakdown(&conn, player.id, commander),
+            Some(a.clone())
+        );
+        // A successful fetch followed by a failed database write must not
+        // replace the page with results that were never saved.
+        let _ = update(&mut state, &conn, PlayersMessage::RefreshReport);
+        conn.pragma_update(None, "query_only", true).unwrap();
+        let mut changed = a.clone();
+        changed.report.as_mut().unwrap().power = 9.;
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::Analysed(player.id, commander, source, Ok(changed)),
+        );
+        let page = state.managing.as_ref().unwrap().deck_page.as_ref().unwrap();
+        assert_eq!(page.analysis, Some(a));
+        assert!(!page.busy);
+        assert!(state.error.as_ref().unwrap().contains("Couldn't save"));
+    }
+
+    #[test]
+    fn report_import_preserves_moxfield_link_and_unlink_ignores_late_results() {
+        let (conn, game) = crate::session::tests::fixture();
+        let player = game.seats[0].player.clone();
+        let commander = game.seats[0].commander.id;
+        db::record_player_commander_use(&conn, player.id, commander).unwrap();
+        let mut state = PlayersState::load(&conn);
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::ManageCommanders(player.clone()),
+        );
+        let _ = update(&mut state, &conn, PlayersMessage::OpenDeckPage(commander));
+        let a = crate::commander_salt::decode(
+            serde_json::from_str(include_str!(
+                "../../tests/fixtures/magda-commandersalt.json"
+            ))
+            .unwrap(),
+            "bf9dad6c497fcac34ff0933f6ad5ac06",
+        )
+        .unwrap();
+        let source = a.report.as_ref().unwrap().url.clone();
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::LinkChanged(source.clone()),
+        );
+        let _ = update(&mut state, &conn, PlayersMessage::SaveLink);
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::Analysed(player.id, commander, source.clone(), Ok(a.clone())),
+        );
+        let links = db::deck_links(&conn, player.id).unwrap();
+        assert_eq!(links[&commander].public_id, a.public_id);
+        assert_eq!(links[&commander].salt_total, Some(a.salt_total));
+        assert_eq!(links[&commander].bracket, Some(4));
+        let _ = update(&mut state, &conn, PlayersMessage::CloseDeckPage);
+        let _ = update(&mut state, &conn, PlayersMessage::OpenDeckPage(commander));
+        assert_eq!(
+            state
+                .managing
+                .as_ref()
+                .unwrap()
+                .deck_page
+                .as_ref()
+                .unwrap()
+                .link_input,
+            source
+        );
+        let _ = update(&mut state, &conn, PlayersMessage::CalculateLocally);
+        let page = state.managing.as_ref().unwrap().deck_page.as_ref().unwrap();
+        assert_eq!(page.link_input, a.url);
+        assert!(page.busy);
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::LinkChanged(source.clone()),
+        );
+        let _ = update(&mut state, &conn, PlayersMessage::SaveLink);
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::Analysed(player.id, commander, source.clone(), Err("offline".into())),
+        );
+        assert_eq!(db::deck_breakdown(&conn, player.id, commander).unwrap(), a);
+        let _ = update(&mut state, &conn, PlayersMessage::SaveLink);
+        let _ = update(&mut state, &conn, PlayersMessage::RemoveLink);
+        let _ = update(
+            &mut state,
+            &conn,
+            PlayersMessage::Analysed(player.id, commander, source, Ok(a)),
+        );
+        assert!(db::deck_links(&conn, player.id).unwrap().is_empty());
     }
 }

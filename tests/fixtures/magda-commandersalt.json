@@ -1,0 +1,948 @@
+{
+  "id": "bf9dad6c497fcac34ff0933f6ad5ac06",
+  "url": "https://moxfield.com/decks/mCMqeU3Ydk2PeTLx47ijkw",
+  "name": "Magda, Brazen Outlaw",
+  "isPrivate": false,
+  "_cardCount": 100,
+  "powerLevelRating": 8.58773741828711,
+  "synergyRating": 1438.3999999999999,
+  "saltRating": 85.52179401780548,
+  "ingestDate": {
+    "category": "deck_ingest_date",
+    "ingestDate": 1790638154375,
+    "versioning": {
+      "DECK_IMPORT_CHUNKING": "4.6"
+    },
+    "id": "piece_bf9dad6c497fcac34ff0933f6ad5ac06_deck_ingest_date",
+    "status": {
+      "exists": true,
+      "DECK_IMPORT_CHUNKING": true,
+      "invalid": false
+    }
+  },
+  "cards": {
+    "magda_brazen_outlaw": {
+      "name": "Magda, Brazen Outlaw"
+    },
+    "dwarven_mine": {
+      "name": "Dwarven Mine"
+    },
+    "torbran_thane_of_red_fell": {
+      "name": "Torbran, Thane of Red Fell"
+    },
+    "meteor_golem": {
+      "name": "Meteor Golem"
+    },
+    "enslaved_dwarf": {
+      "name": "Enslaved Dwarf"
+    },
+    "battered_golem": {
+      "name": "Battered Golem"
+    },
+    "sculpting_steel": {
+      "name": "Sculpting Steel"
+    },
+    "dwarven_nomad": {
+      "name": "Dwarven Nomad"
+    },
+    "abrade": {
+      "name": "Abrade"
+    },
+    "bloodfire_dwarf": {
+      "name": "Bloodfire Dwarf"
+    },
+    "pirates_pillage": {
+      "name": "Pirate's Pillage"
+    },
+    "clock_of_omens": {
+      "name": "Clock of Omens"
+    },
+    "elixir_of_immortality": {
+      "name": "Elixir of Immortality"
+    },
+    "dwarven_bloodboiler": {
+      "name": "Dwarven Bloodboiler"
+    },
+    "dwarven_scorcher": {
+      "name": "Dwarven Scorcher"
+    },
+    "liberated_dwarf": {
+      "name": "Liberated Dwarf"
+    },
+    "dwarven_grunt": {
+      "name": "Dwarven Grunt"
+    },
+    "spark_mage": {
+      "name": "Spark Mage"
+    },
+    "dwarven_trader": {
+      "name": "Dwarven Trader"
+    },
+    "seize_the_spoils": {
+      "name": "Seize the Spoils"
+    },
+    "fearless_liberator": {
+      "name": "Fearless Liberator"
+    },
+    "goldspan_dragon": {
+      "name": "Goldspan Dragon"
+    },
+    "liquimetal_torque": {
+      "name": "Liquimetal Torque"
+    },
+    "fast": {
+      "name": "Fast"
+    },
+    "fast_furious_back": {
+      "name": "Furious"
+    },
+    "honeymoon_hearse": {
+      "name": "Honeymoon Hearse"
+    },
+    "hoard_hauler": {
+      "name": "Hoard Hauler"
+    },
+    "unlicensed_hearse": {
+      "name": "Unlicensed Hearse"
+    },
+    "ganax_astral_hunter": {
+      "name": "Ganax, Astral Hunter"
+    },
+    "mountain": {
+      "name": "Mountain"
+    },
+    "holdout_settlement": {
+      "name": "Holdout Settlement"
+    },
+    "stoke_the_flames": {
+      "name": "Stoke the Flames"
+    },
+    "gimli_of_the_glittering_caves": {
+      "name": "Gimli of the Glittering Caves"
+    },
+    "mines_of_moria": {
+      "name": "Mines of Moria"
+    },
+    "gloin_dwarf_emissary": {
+      "name": "Glóin, Dwarf Emissary"
+    },
+    "dwarven_recruiter": {
+      "name": "Dwarven Recruiter"
+    },
+    "bottle_cap_blast": {
+      "name": "Bottle-Cap Blast"
+    },
+    "magda_the_hoardmaster": {
+      "name": "Magda, the Hoardmaster"
+    },
+    "great_train_heist": {
+      "name": "Great Train Heist"
+    },
+    "barbarian_ring": {
+      "name": "Barbarian Ring"
+    },
+    "sundering_eruption": {
+      "name": "Sundering Eruption"
+    },
+    "sundering_eruption_volcanic_fissure_back": {
+      "name": "Volcanic Fissure"
+    },
+    "barkform_harvester": {
+      "name": "Barkform Harvester"
+    },
+    "dragonhawk_fates_tempest": {
+      "name": "Dragonhawk, Fate's Tempest"
+    },
+    "season_of_the_bold": {
+      "name": "Season of the Bold"
+    },
+    "unexpected_windfall": {
+      "name": "Unexpected Windfall"
+    },
+    "plundering_barbarian": {
+      "name": "Plundering Barbarian"
+    },
+    "sticky_fingers": {
+      "name": "Sticky Fingers"
+    },
+    "axgard_cavalry": {
+      "name": "Axgard Cavalry"
+    },
+    "paradise_mantle": {
+      "name": "Paradise Mantle"
+    },
+    "smugglers_copter": {
+      "name": "Smuggler's Copter"
+    },
+    "survivors_encampment": {
+      "name": "Survivors' Encampment"
+    },
+    "adaptive_automaton": {
+      "name": "Adaptive Automaton"
+    },
+    "three_tree_mascot": {
+      "name": "Three Tree Mascot"
+    },
+    "lathliss_dragon_queen": {
+      "name": "Lathliss, Dragon Queen"
+    },
+    "lifecraft_engine": {
+      "name": "Lifecraft Engine"
+    },
+    "treasure_vault": {
+      "name": "Treasure Vault"
+    },
+    "maskwood_nexus": {
+      "name": "Maskwood Nexus"
+    },
+    "faithless_looting": {
+      "name": "Faithless Looting"
+    },
+    "universal_automaton": {
+      "name": "Universal Automaton"
+    },
+    "summon__bahamut": {
+      "name": "Summon: Bahamut"
+    },
+    "hellkite_tyrant": {
+      "name": "Hellkite Tyrant"
+    },
+    "chaos_warp": {
+      "name": "Chaos Warp"
+    },
+    "lightning_greaves": {
+      "name": "Lightning Greaves"
+    },
+    "sol_ring": {
+      "name": "Sol Ring"
+    },
+    "kavaron_memorial_world": {
+      "name": "Kavaron, Memorial World"
+    },
+    "warmaker_gunship": {
+      "name": "Warmaker Gunship"
+    },
+    "springleaf_drum": {
+      "name": "Springleaf Drum"
+    },
+    "firdoch_core": {
+      "name": "Firdoch Core"
+    },
+    "cursed_mirror": {
+      "name": "Cursed Mirror"
+    },
+    "drakuseth_maw_of_flames": {
+      "name": "Drakuseth, Maw of Flames"
+    },
+    "smaug_the_magnificent": {
+      "name": "Smaug the Magnificent"
+    },
+    "big_score": {
+      "name": "Big Score"
+    },
+    "metallic_mimic": {
+      "name": "Metallic Mimic"
+    },
+    "vandalblast": {
+      "name": "Vandalblast"
+    },
+    "the_lonely_mountain": {
+      "name": "The Lonely Mountain"
+    },
+    "dori_bearer_of_friends": {
+      "name": "Dori, Bearer of Friends"
+    },
+    "academy_manufactor": {
+      "name": "Academy Manufactor"
+    }
+  },
+  "details": {
+    "salt": {
+      "scoring": {
+        "boardwipes": {
+          "enum": "boardwipes",
+          "score": 21,
+          "list": {
+            "bloodfire_dwarf": {
+              "score": 7
+            },
+            "fast_furious_back": {
+              "score": 7
+            },
+            "vandalblast": {
+              "score": 7
+            }
+          },
+          "label": "Board wipes"
+        },
+        "cedhMetashare": {
+          "enum": "cedhMetashare",
+          "score": 0.5,
+          "list": {
+            "sol_ring": {
+              "score": 0.25
+            },
+            "springleaf_drum": {
+              "score": 0.25
+            }
+          },
+          "label": "Meta staples"
+        },
+        "infiniteCombos": {
+          "enum": "infiniteCombos",
+          "score": 30,
+          "list": {
+            "adaptive_automaton_clock_of_omens_magda_brazen_outlaw": {
+              "id": "adaptive_automaton_clock_of_omens_magda_brazen_outlaw",
+              "name": "Adaptive Automaton,Clock of Omens,Magda, Brazen Outlaw",
+              "score": 3
+            },
+            "barkform_harvester_clock_of_omens_magda_brazen_outlaw": {
+              "id": "barkform_harvester_clock_of_omens_magda_brazen_outlaw",
+              "name": "Barkform Harvester,Clock of Omens,Magda, Brazen Outlaw",
+              "score": 3
+            },
+            "battered_golem_dwarven_bloodboiler_magda_brazen_outlaw_maskwood_nexus": {
+              "id": "battered_golem_dwarven_bloodboiler_magda_brazen_outlaw_maskwood_nexus",
+              "name": "Battered Golem,Dwarven Bloodboiler,Magda, Brazen Outlaw,Maskwood Nexus",
+              "score": 3
+            },
+            "battered_golem_hoard_hauler_magda_brazen_outlaw_maskwood_nexus": {
+              "id": "battered_golem_hoard_hauler_magda_brazen_outlaw_maskwood_nexus",
+              "name": "Battered Golem,Magda, Brazen Outlaw,Maskwood Nexus,Hoard Hauler",
+              "score": 3
+            },
+            "battered_golem_lifecraft_engine_magda_brazen_outlaw_maskwood_nexus": {
+              "id": "battered_golem_lifecraft_engine_magda_brazen_outlaw_maskwood_nexus",
+              "name": "Battered Golem,Magda, Brazen Outlaw,Maskwood Nexus,Lifecraft Engine",
+              "score": 3
+            },
+            "battered_golem_magda_brazen_outlaw_maskwood_nexus_unlicensed_hearse": {
+              "id": "battered_golem_magda_brazen_outlaw_maskwood_nexus_unlicensed_hearse",
+              "name": "Battered Golem,Magda, Brazen Outlaw,Maskwood Nexus,Unlicensed Hearse",
+              "score": 3
+            },
+            "clock_of_omens_liquimetal_torque_magda_brazen_outlaw": {
+              "id": "clock_of_omens_liquimetal_torque_magda_brazen_outlaw",
+              "name": "Clock of Omens,Liquimetal Torque,Magda, Brazen Outlaw",
+              "score": 3
+            },
+            "clock_of_omens_magda_brazen_outlaw_metallic_mimic": {
+              "id": "clock_of_omens_magda_brazen_outlaw_metallic_mimic",
+              "name": "Clock of Omens,Magda, Brazen Outlaw,Metallic Mimic",
+              "score": 3
+            },
+            "clock_of_omens_magda_brazen_outlaw_three_tree_mascot": {
+              "id": "clock_of_omens_magda_brazen_outlaw_three_tree_mascot",
+              "name": "Clock of Omens,Magda, Brazen Outlaw,Three Tree Mascot",
+              "score": 3
+            },
+            "clock_of_omens_magda_brazen_outlaw_universal_automaton": {
+              "id": "clock_of_omens_magda_brazen_outlaw_universal_automaton",
+              "name": "Clock of Omens,Magda, Brazen Outlaw,Universal Automaton",
+              "score": 3
+            }
+          },
+          "label": "Infinite combos"
+        },
+        "edhrec": {
+          "enum": "edhrec",
+          "score": 29.673394017805474,
+          "list": {
+            "magda_brazen_outlaw": {
+              "score": 0.8233532934131736
+            },
+            "dwarven_mine": {
+              "score": 0.10162601626016259
+            },
+            "torbran_thane_of_red_fell": {
+              "score": 0.5764705882352945
+            },
+            "meteor_golem": {
+              "score": 0.3132183908045976
+            },
+            "enslaved_dwarf": {
+              "score": 0.29411764705882354
+            },
+            "battered_golem": {
+              "score": 0.21052631578947367
+            },
+            "sculpting_steel": {
+              "score": 0.2506393861892583
+            },
+            "dwarven_nomad": {
+              "score": 0.3333333333333333
+            },
+            "abrade": {
+              "score": 0.1615384615384616
+            },
+            "pirates_pillage": {
+              "score": 0.11475409836065566
+            },
+            "clock_of_omens": {
+              "score": 0.8117647058823527
+            },
+            "elixir_of_immortality": {
+              "score": 0.0997229916897507
+            },
+            "dwarven_scorcher": {
+              "score": 0.06666666666666667
+            },
+            "liberated_dwarf": {
+              "score": 0.6428571428571429
+            },
+            "dwarven_grunt": {
+              "score": 0.07142857142857142
+            },
+            "spark_mage": {
+              "score": 0.13333333333333333
+            },
+            "seize_the_spoils": {
+              "score": 0.0956521739130435
+            },
+            "fearless_liberator": {
+              "score": 0.25
+            },
+            "goldspan_dragon": {
+              "score": 0.6924754634678298
+            },
+            "liquimetal_torque": {
+              "score": 0.35294117647058826
+            },
+            "fast": {
+              "score": 0.25
+            },
+            "fast_furious_back": {
+              "score": 0.25
+            },
+            "honeymoon_hearse": {
+              "score": 0.5
+            },
+            "hoard_hauler": {
+              "score": 0.31111111111111117
+            },
+            "unlicensed_hearse": {
+              "score": 0.23809523809523817
+            },
+            "ganax_astral_hunter": {
+              "score": 0.22157434402332354
+            },
+            "mountain": {
+              "score": 0.3157894736842107
+            },
+            "holdout_settlement": {
+              "score": 0.09278350515463918
+            },
+            "stoke_the_flames": {
+              "score": 0.5652173913043478
+            },
+            "gimli_of_the_glittering_caves": {
+              "score": 0.29245283018867907
+            },
+            "mines_of_moria": {
+              "score": 0.17241379310344834
+            },
+            "gloin_dwarf_emissary": {
+              "score": 0.256637168141593
+            },
+            "dwarven_recruiter": {
+              "score": 0.14285714285714285
+            },
+            "bottle_cap_blast": {
+              "score": 0.33783783783783783
+            },
+            "magda_the_hoardmaster": {
+              "score": 0.29687500000000006
+            },
+            "great_train_heist": {
+              "score": 0.25531914893617014
+            },
+            "barbarian_ring": {
+              "score": 0.09345794392523363
+            },
+            "barkform_harvester": {
+              "score": 0.6666666666666666
+            },
+            "dragonhawk_fates_tempest": {
+              "score": 0.3846153846153847
+            },
+            "season_of_the_bold": {
+              "score": 0.42857142857142855
+            },
+            "unexpected_windfall": {
+              "score": 0.20838052095130236
+            },
+            "sticky_fingers": {
+              "score": 0.17488789237668162
+            },
+            "axgard_cavalry": {
+              "score": 0.23529411764705882
+            },
+            "paradise_mantle": {
+              "score": 0.25
+            },
+            "smugglers_copter": {
+              "score": 0.23737373737373738
+            },
+            "survivors_encampment": {
+              "score": 0.11214953271028036
+            },
+            "adaptive_automaton": {
+              "score": 0.1485148514851485
+            },
+            "three_tree_mascot": {
+              "score": 0.25
+            },
+            "lathliss_dragon_queen": {
+              "score": 0.37869822485207083
+            },
+            "lifecraft_engine": {
+              "score": 0.2616822429906543
+            },
+            "treasure_vault": {
+              "score": 0.24820143884892096
+            },
+            "maskwood_nexus": {
+              "score": 0.36536312849161984
+            },
+            "faithless_looting": {
+              "score": 0.16067415730337103
+            },
+            "universal_automaton": {
+              "score": 0.11538461538461539
+            },
+            "hellkite_tyrant": {
+              "score": 1.0442477876106204
+            },
+            "chaos_warp": {
+              "score": 0.3318632855567801
+            },
+            "lightning_greaves": {
+              "score": 0.5307692307692314
+            },
+            "sol_ring": {
+              "score": 1.46268656716418
+            },
+            "kavaron_memorial_world": {
+              "score": 0.1138613861386139
+            },
+            "warmaker_gunship": {
+              "score": 0.14563106796116504
+            },
+            "springleaf_drum": {
+              "score": 0.2
+            },
+            "cursed_mirror": {
+              "score": 0.4
+            },
+            "drakuseth_maw_of_flames": {
+              "score": 0.344632768361582
+            },
+            "big_score": {
+              "score": 0.11296076099881097
+            },
+            "metallic_mimic": {
+              "score": 0.15014164305949002
+            },
+            "vandalblast": {
+              "score": 0.7003525264394832
+            },
+            "academy_manufactor": {
+              "score": 0.942
+            }
+          },
+          "label": "Community salt ratings"
+        },
+        "extraCombats": {
+          "enum": "extraCombats",
+          "score": 3,
+          "list": {
+            "great_train_heist": {
+              "score": 3
+            }
+          },
+          "label": "Extra combats"
+        },
+        "cardPrice": {
+          "enum": "cardPrice",
+          "score": 1.3484,
+          "list": {
+            "smaug_the_magnificent": {
+              "score": 1.3484
+            }
+          },
+          "label": "Expensive cards"
+        }
+      }
+    },
+    "powerLevel": {
+      "scoring": {
+        "interaction": {
+          "list": {},
+          "subCategories": [
+            "spotRemoval",
+            "boardWipes",
+            "counters",
+            "stax",
+            "taxes",
+            "graveyard",
+            "evasion",
+            "otherControl",
+            "discard"
+          ],
+          "enum": "interaction",
+          "scaledScore": 105.40895,
+          "score": 105
+        },
+        "consistency": {
+          "list": {},
+          "subCategories": [
+            "tutors",
+            "draw",
+            "recursion",
+            "topdeck",
+            "multipliers"
+          ],
+          "enum": "consistency",
+          "scaledScore": 169.57608,
+          "score": 170
+        },
+        "efficiency": {
+          "list": {},
+          "subCategories": [
+            "fastmana",
+            "ramp",
+            "costReduction"
+          ],
+          "enum": "efficiency",
+          "scaledScore": 334.80177,
+          "score": 335
+        },
+        "spotRemoval": {
+          "enum": "spotRemoval",
+          "category": "spotRemoval",
+          "list": {
+            "meteor_golem": {
+              "id": "meteor_golem",
+              "manabaseBonus": 3.5,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.053,
+              "score": 4.5,
+              "bonus": 0,
+              "maxScore": 19.4
+            },
+            "abrade": {
+              "id": "abrade",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.246,
+              "score": 4.8,
+              "bonus": 0,
+              "maxScore": 19.45
+            },
+            "dwarven_scorcher": {
+              "id": "dwarven_scorcher",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.138,
+              "score": 2.7,
+              "bonus": 0,
+              "maxScore": 19.45
+            },
+            "spark_mage": {
+              "id": "spark_mage",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.192,
+              "score": 3.7,
+              "bonus": 0,
+              "maxScore": 19.45
+            },
+            "stoke_the_flames": {
+              "id": "stoke_the_flames",
+              "manabaseBonus": 2.197,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.377,
+              "score": 9.7,
+              "bonus": 0,
+              "maxScore": 20
+            },
+            "bottle_cap_blast": {
+              "id": "bottle_cap_blast",
+              "manabaseBonus": 3.333,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.168,
+              "score": 6.7,
+              "bonus": 0,
+              "maxScore": 20
+            },
+            "barbarian_ring": {
+              "id": "barbarian_ring",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.096,
+              "score": 1.9,
+              "bonus": 0,
+              "maxScore": 20
+            },
+            "sundering_eruption": {
+              "id": "sundering_eruption",
+              "manabaseBonus": 2.197,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.236,
+              "score": 3.4,
+              "bonus": 0,
+              "maxScore": 5
+            },
+            "season_of_the_bold": {
+              "id": "season_of_the_bold",
+              "manabaseBonus": 3.333,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.003,
+              "score": 3.3,
+              "bonus": 0,
+              "maxScore": 19.45
+            },
+            "plundering_barbarian": {
+              "id": "plundering_barbarian",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.033,
+              "score": 0.6,
+              "bonus": 0,
+              "maxScore": 19.45
+            },
+            "summon__bahamut": {
+              "id": "summon__bahamut",
+              "manabaseBonus": 3.6,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.026,
+              "score": 4.1,
+              "bonus": 0,
+              "maxScore": 19.4
+            },
+            "chaos_warp": {
+              "id": "chaos_warp",
+              "manabaseBonus": 2.197,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.461,
+              "score": 11.2,
+              "bonus": 0,
+              "maxScore": 19.45
+            },
+            "drakuseth_maw_of_flames": {
+              "id": "drakuseth_maw_of_flames",
+              "manabaseBonus": 3.5,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.007,
+              "score": 3.6,
+              "bonus": 0,
+              "maxScore": 20
+            },
+            "vandalblast": {
+              "id": "vandalblast",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.069,
+              "score": 1.4,
+              "bonus": 0,
+              "maxScore": 19.45
+            }
+          },
+          "score": 62
+        },
+        "boardWipes": {
+          "enum": "boardWipes",
+          "category": "boardWipes",
+          "list": {
+            "bloodfire_dwarf": {
+              "id": "bloodfire_dwarf",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.82,
+              "score": 15.9,
+              "bonus": 0,
+              "maxScore": 19.45
+            },
+            "fast_furious_back": {
+              "id": "fast_furious_back",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.028,
+              "score": 0.5,
+              "bonus": 0,
+              "maxScore": 19.45
+            },
+            "vandalblast": {
+              "id": "vandalblast",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.263,
+              "score": 5.1,
+              "bonus": 0,
+              "maxScore": 19.45
+            }
+          },
+          "score": 22
+        },
+        "counters": {
+          "enum": "counters",
+          "category": "counterspell",
+          "list": {},
+          "score": 0
+        },
+        "stax": {
+          "enum": "stax",
+          "category": "stax",
+          "list": {},
+          "score": 0
+        },
+        "taxes": {
+          "enum": "taxes",
+          "category": "taxes",
+          "list": {},
+          "score": 0
+        },
+        "graveyard": {
+          "enum": "graveyard",
+          "category": "graveyard",
+          "list": {
+            "unlicensed_hearse": {
+              "id": "unlicensed_hearse",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.38,
+              "score": 4.6,
+              "bonus": 0,
+              "maxScore": 12
+            }
+          },
+          "score": 5
+        },
+        "evasion": {
+          "enum": "evasion",
+          "category": "evasion",
+          "list": {
+            "lightning_greaves": {
+              "id": "lightning_greaves",
+              "manabaseBonus": 0,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 1.05,
+              "score": 10,
+              "bonus": 0,
+              "maxScore": 10
+            }
+          },
+          "score": 10
+        },
+        "otherControl": {
+          "enum": "otherControl",
+          "category": "otherControl",
+          "list": {
+            "gloin_dwarf_emissary": {
+              "id": "gloin_dwarf_emissary",
+              "manabaseBonus": 2.197,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.035,
+              "score": 2.9,
+              "bonus": 0,
+              "maxScore": 19.4
+            },
+            "hellkite_tyrant": {
+              "id": "hellkite_tyrant",
+              "manabaseBonus": 4,
+              "preCappedBonusAmount": 0,
+              "scoreToMaxScoreRatio": 0.034,
+              "score": 4.7,
+              "bonus": 0,
+              "maxScore": 19.45
+            }
+          },
+          "score": 8
+        },
+        "discard": {
+          "enum": "discard",
+          "category": "discard",
+          "list": {},
+          "score": 0
+        }
+      },
+      "spikeScorePieces": {
+        "winConditions": {
+          "total": 672.5246710915425
+        }
+      }
+    },
+    "combos": {
+      "profile": {
+        "count": 10,
+        "effectiveWinconLines": 2
+      }
+    },
+    "brackets": {
+      "displayBracket": 4,
+      "profile": {
+        "rationale": [
+          {
+            "sentiment": "info",
+            "data": {
+              "powerLevel": 8.6,
+              "targetBracket": 4
+            },
+            "id": "powerLevelExceedsWotcBracket",
+            "direction": "up",
+            "label": "Power level above the WotC read",
+            "why": "The deck's overall power level of 8.6 plays like bracket 4, above what the WotC criteria alone would assign."
+          },
+          {
+            "data": {
+              "density": "dense"
+            },
+            "label": "Optimized manabase",
+            "sentiment": "info",
+            "direction": "up",
+            "why": "The manabase is highly optimized, so the deck casts its spells on schedule.",
+            "id": "manabaseQuality"
+          },
+          {
+            "id": "winconDensity",
+            "direction": "up",
+            "label": "Multiple ways to win",
+            "sentiment": "info",
+            "why": "The deck can win through 1 distinct path and 10 combo wins across 2 independent lines.",
+            "data": {
+              "paths": 1,
+              "effectiveLines": 2,
+              "winconCount": 10
+            }
+          },
+          {
+            "sentiment": "info",
+            "label": "Efficient, low-cost spells",
+            "data": {
+              "density": "dense"
+            },
+            "direction": "up",
+            "id": "efficiencyHigh",
+            "why": "The spell suite is highly efficient, keeping costs low and turns fast."
+          },
+          {
+            "label": "Meaningful tutor package",
+            "direction": "up",
+            "data": {
+              "density": "dense"
+            },
+            "id": "tutorDensity",
+            "sentiment": "info",
+            "why": "A dense tutor package finds the deck's key pieces consistently."
+          }
+        ]
+      }
+    },
+    "synergy": {
+      "profile": {
+        "coverage": 0.853
+      }
+    }
+  }
+}

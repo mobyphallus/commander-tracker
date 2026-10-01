@@ -7,6 +7,8 @@ mod art;
 mod cache;
 #[path = "../cards.rs"]
 mod cards;
+#[path = "../commander_salt.rs"]
+mod commander_salt;
 #[path = "../db.rs"]
 mod db;
 #[path = "../feedback.rs"]
@@ -23,6 +25,10 @@ mod model;
 mod moxfield;
 #[path = "../panned_image.rs"]
 mod panned_image;
+#[path = "../power.rs"]
+mod power;
+#[path = "../preferences.rs"]
+mod preferences;
 #[path = "../rotated.rs"]
 mod rotated;
 #[path = "../salt.rs"]
@@ -42,6 +48,7 @@ mod table_preview;
 use iced::{window, Element, Size, Task};
 use screens::{game, history, home, setup, stats};
 struct Review {
+    preferences: preferences::State,
     conn: rusqlite::Connection,
     home: home::HomeState,
     game: game::GameState,
@@ -52,6 +59,7 @@ struct Review {
     players: Vec<model::Player>,
     decks: Vec<model::SavedDeck>,
     deck_list: screens::deck_list::State,
+    local_assessment: power::Assessment,
     player_manager: screens::players::PlayersState,
     images: cards::Images,
     page: usize,
@@ -59,6 +67,7 @@ struct Review {
 #[derive(Debug, Clone)]
 enum Msg {
     Capture,
+    ScrollForCapture,
     Captured(window::Screenshot),
     App(app::Message),
 }
@@ -88,6 +97,29 @@ const PAGES: &[&str] = &[
     "feedback-history",
     "winner-facing",
     "feedback-sideways",
+    "salt-report",
+    "local-assessment",
+    "score-comparison",
+    "preferences",
+    "all-score-badges",
+    "all-setup-scores",
+    "all-turn-order-scores",
+    "salt-section",
+    "synergy-section",
+    "win-conditions-section",
+    "power-section",
+    "bracket-section",
+    "interaction-section",
+    "consistency-section",
+    "efficiency-section",
+    "salt-table-expanded",
+    "synergy-cards-expanded",
+    "power-calculation-expanded",
+    "win-calculation-expanded",
+    "combo-lines-expanded",
+    "deck-mana-curve",
+    "deck-mana-curve-cards",
+    "deck-mana-curve-missing",
 ];
 impl Review {
     fn new() -> (Self, Task<Msg>) {
@@ -170,12 +202,14 @@ impl Review {
         let make_card = |name: &str, kind: &str, quantity| moxfield::Card {
             name: name.into(),
             type_line: kind.into(),
+            layout: String::new(),
             quantity,
             scryfall_id: String::new(),
             oracle_text: String::new(),
             color_identity: String::new(),
             usd: None,
             reserved: false,
+            mana_value: None,
         };
         let sample = moxfield::Deck {
             public_id: "review-list".into(),
@@ -227,8 +261,17 @@ impl Review {
             })
             .collect();
         let mut review = Self {
+            preferences: preferences::State::load(&conn),
             decks,
             deck_list,
+            local_assessment: power::assess(
+                &serde_json::from_str(include_str!("../../tests/fixtures/magda-local-deck.json"))
+                    .unwrap(),
+                &serde_json::from_str::<Vec<salt::ComboLine>>(include_str!(
+                    "../../tests/fixtures/magda-local-combos.json"
+                ))
+                .unwrap(),
+            ),
             player_manager,
             home: home::HomeState::load(&conn),
             history: history::HistoryState::load(&conn),
@@ -242,16 +285,184 @@ impl Review {
             page: review_size_index() * PAGES.len() + review_start_page(),
         };
         review.configure();
-        (review, Self::later())
+        let task = Self::later(review.page % PAGES.len());
+        (review, task)
     }
-    fn later() -> Task<Msg> {
+    fn later(page: usize) -> Task<Msg> {
         Task::perform(
             async { tokio::time::sleep(std::time::Duration::from_millis(700)).await },
-            |_| Msg::Capture,
+            move |_| {
+                if (41..=44).contains(&page) || page == 46 {
+                    Msg::ScrollForCapture
+                } else {
+                    Msg::Capture
+                }
+            },
         )
     }
     fn configure(&mut self) {
         let p = self.page % PAGES.len();
+        if p >= 45 {
+            self.deck_list.deck = Some(
+                serde_json::from_str(include_str!("../../tests/fixtures/magda-local-deck.json"))
+                    .unwrap(),
+            );
+            self.deck_list.label = "Magda, Brazen Outlaw".into();
+            self.deck_list.page = screens::deck_list::Page::ManaCurve;
+            self.deck_list.curve_bucket = (p == 46).then_some(2);
+            if p == 47 {
+                for card in self.deck_list.deck.as_mut().unwrap().mainboard.iter_mut() {
+                    card.mana_value = None;
+                }
+            }
+            return;
+        }
+        if p >= 28 {
+            preferences::Preferences {
+                primary: preferences::Primary::Power,
+                commander_list: Some(preferences::Primary::Bracket),
+                salt: true,
+                synergy: true,
+                interaction: true,
+                win_conditions: true,
+                prefer_report: false,
+            }
+            .save(&self.conn)
+            .unwrap();
+            self.preferences = preferences::State::load(&self.conn);
+            let mut a = commander_salt::decode(
+                serde_json::from_str(include_str!(
+                    "../../tests/fixtures/magda-commandersalt.json"
+                ))
+                .unwrap(),
+                "bf9dad6c497fcac34ff0933f6ad5ac06",
+            )
+            .unwrap();
+            a.report = None;
+            a.local_available = true;
+            a.assessment = Some(self.local_assessment.clone());
+            a.bracket = 3;
+            for seat in &self.setup.seats {
+                if let (Some(player), Some(commander)) = (&seat.player, &seat.commander) {
+                    db::save_deck_analysis(&self.conn, player.id, commander.id, &a.public_id, &a)
+                        .unwrap();
+                }
+            }
+            setup::refresh_scores(&mut self.setup, &self.conn);
+            self.setup.stage = if p == 31 {
+                setup::SetupStage::TurnOrder
+            } else {
+                setup::SetupStage::Grid
+            };
+        }
+        if p == 25 || p == 26 || p == 27 || p >= 32 {
+            let commander = self.game.seats[0].commander.id;
+            let player = self.game.seats[0].player.id;
+            let analysis = commander_salt::decode(
+                serde_json::from_str(include_str!(
+                    "../../tests/fixtures/magda-commandersalt.json"
+                ))
+                .unwrap(),
+                "bf9dad6c497fcac34ff0933f6ad5ac06",
+            )
+            .unwrap();
+            db::save_deck_analysis(
+                &self.conn,
+                player,
+                commander,
+                &analysis.public_id,
+                &analysis,
+            )
+            .unwrap();
+            if p == 26 || p == 27 || p >= 32 {
+                let mut local = analysis.clone();
+                local.report = None;
+                local.local_available = true;
+                local.assessment = Some(self.local_assessment.clone());
+                local.bracket = 3;
+                local.salt_total = 85.07;
+                if p == 44 {
+                    local.combos = serde_json::from_str(include_str!(
+                        "../../tests/fixtures/magda-local-combos.json"
+                    ))
+                    .unwrap();
+                }
+                if p == 32 || p == 40 {
+                    let mut cards = vec![
+                        salt::CardScore {
+                            name: "Mountain".into(),
+                            score: 1.8,
+                            quantity: Some(18),
+                        },
+                        salt::CardScore {
+                            name: "Sol Ring".into(),
+                            score: 0.8,
+                            quantity: Some(1),
+                        },
+                        salt::CardScore {
+                            name: "Rhystic Study".into(),
+                            score: 2.7,
+                            quantity: Some(1),
+                        },
+                    ];
+                    salt::sort_card_scores(&mut cards);
+                    local.categories = vec![salt::Category {
+                        kind: salt::CategoryKind::Edhrec,
+                        score: 5.3,
+                        cards,
+                    }];
+                    local.salt_total = 5.3;
+                }
+                db::save_deck_analysis(&self.conn, player, commander, &local.public_id, &local)
+                    .unwrap();
+            }
+            let _ = screens::players::update(
+                &mut self.player_manager,
+                &self.conn,
+                screens::players::PlayersMessage::OpenDeckPage(commander),
+            );
+        }
+        if p == 26 || p >= 32 {
+            let page = self
+                .player_manager
+                .managing
+                .as_mut()
+                .unwrap()
+                .deck_page
+                .as_mut()
+                .unwrap();
+            page.section = if p == 26 {
+                screens::breakdown::Section::Power
+            } else {
+                [
+                    screens::breakdown::Section::Salt,
+                    screens::breakdown::Section::Synergy,
+                    screens::breakdown::Section::WinConditions,
+                    screens::breakdown::Section::Power,
+                    screens::breakdown::Section::Bracket,
+                    screens::breakdown::Section::Interaction,
+                    screens::breakdown::Section::Consistency,
+                    screens::breakdown::Section::Efficiency,
+                    screens::breakdown::Section::Salt,
+                    screens::breakdown::Section::Synergy,
+                    screens::breakdown::Section::Power,
+                    screens::breakdown::Section::WinConditions,
+                    screens::breakdown::Section::WinConditions,
+                ][p - 32]
+            };
+            if p >= 40 {
+                page.details.toggle(
+                    [
+                        "local:Salt:Edhrec",
+                        "local:Synergy:Artifacts and artifact tokens",
+                        "local:Power:formula",
+                        "local:Win conditions:formula",
+                        "local:Win conditions:combos",
+                    ][p - 40]
+                        .into(),
+                );
+            }
+        }
         if p == 19 {
             self.setup.stage = setup::SetupStage::Grid;
         }
@@ -340,7 +551,8 @@ impl Review {
         if p == 24 {
             self.game.pending_winner = None;
             self.game.table_layout = layout::TableLayout {
-                name: "Two heads".into(), columns: vec![vec![0], vec![1, 2], vec![3]],
+                name: "Two heads".into(),
+                columns: vec![vec![0], vec![1, 2], vec![3]],
             };
         }
         self.game.game_menu_open = p == 2;
@@ -398,6 +610,18 @@ impl Review {
     }
     fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
+            Msg::ScrollForCapture => iced::widget::scrollable::snap_to(
+                if self.page % PAGES.len() == 46 {
+                    iced::widget::scrollable::Id::new("deck-list-content")
+                } else {
+                    screens::breakdown::scroll_id()
+                },
+                iced::widget::scrollable::RelativeOffset::END,
+            )
+            .chain(Task::perform(
+                async { tokio::time::sleep(std::time::Duration::from_millis(100)).await },
+                |_| Msg::Capture,
+            )),
             Msg::Capture => window::get_latest()
                 .and_then(window::screenshot)
                 .map(Msg::Captured),
@@ -474,7 +698,7 @@ impl Review {
                     std::process::exit(0)
                 }
                 self.configure();
-                Self::later()
+                Self::later(self.page % PAGES.len())
             }
             Msg::App(_) => Task::none(),
         }
@@ -485,7 +709,7 @@ impl Review {
             0 | 1 => home::view(&self.home, &self.players),
             2..=5 | 13..=15 | 20..=21 | 23..=24 => game::view(&self.game, &self.images),
             6..=9 | 22 => history::view(&self.history),
-            16 => iced::widget::container(cards::grid(
+            16 | 29 => iced::widget::container(cards::grid(
                 self.decks
                     .iter()
                     .enumerate()
@@ -497,6 +721,10 @@ impl Review {
                             cards::DeckMeta {
                                 bracket: Some(i as u8 + 2),
                                 salt: Some([0., 82., 247., 1234.][i]),
+                                synergy: (p == 29).then_some(93.),
+                                interaction: (p == 29).then_some(82.5),
+                                win_conditions: (p == 29).then_some(75.),
+                                ..Default::default()
                             },
                             app::Message::GoHome,
                             app::Message::GoHome,
@@ -508,9 +736,10 @@ impl Review {
             ))
             .padding(24)
             .into(),
-            17 => screens::deck_list::view(&self.deck_list)
+            17 | 45..=47 => screens::deck_list::view(&self.deck_list)
                 .map(|msg| app::Message::Players(screens::players::PlayersMessage::DeckList(msg))),
-            18 => screens::players::view(&self.player_manager, &self.images),
+            18 | 25..=27 | 32..=44 => screens::players::view(&self.player_manager, &self.images),
+            28 => preferences::view(&self.preferences),
             10 => stats::view(&self.stats, &self.images),
             11 => storage::view(&self.storage),
             _ => setup::view(&self.setup, &self.players, &self.images),
@@ -538,7 +767,14 @@ fn review_size_index() -> usize {
 }
 fn review_size() -> Size {
     [
-        Size::new(1875., 1205.),
+        Size::new(
+            if review_start_page() >= 45 {
+                1800.
+            } else {
+                1875.
+            },
+            1205.,
+        ),
         Size::new(800., 1280.),
         Size::new(1280., 800.),
     ][review_size_index()]
